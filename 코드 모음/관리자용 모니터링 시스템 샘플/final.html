@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AGV 로봇 창고 시뮬레이션</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            font-family: Arial, sans-serif;
+            background: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .title {
+            text-align: center;
+            color: #2c3e50;
+            margin: 10px 0;
+        }
+        .simulation-area {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .canvas-container {
+            position: relative;
+            display: flex;
+            justify-content: center;
+        }
+        canvas {
+            border: 2px solid #34495e;
+            border-radius: 8px;
+            background: #ecf0f1;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        .status {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .agv-status {
+            background: #34495e;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        .agv-status h3 {
+            margin-top: 0;
+            color: #3498db;
+        }
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">AGV 로봇 창고 시뮬레이션</h1>
+        <div class="simulation-area">
+            <div class="canvas-container">
+                <canvas id="simulationCanvas" width="1000" height="700"></canvas>
+            </div>
+            <div class="controls">
+                <button onclick="startSimulation()">시뮬레이션 시작</button>
+                <button onclick="pauseSimulation()">일시정지</button>
+                <button onclick="resetSimulation()">리셋</button>
+                <button onclick="addTask()">새 작업 추가</button>
+            </div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #e74c3c;"></div>
+                    <span>AGV-1</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #2ecc71;"></div>
+                    <span>AGV-2</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #8b4513;"></div>
+                    <span>선반</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #f39c12;"></div>
+                    <span>피킹 스테이션</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #9b59b6;"></div>
+                    <span>아루코 마커</span>
+                </div>
+            </div>
+            <div class="status">
+                <div class="agv-status">
+                    <h3>AGV-1 상태</h3>
+                    <p>위치: <span id="agv1-position">대기중</span></p>
+                    <p>상태: <span id="agv1-status">대기</span></p>
+                    <p>목표: <span id="agv1-target">없음</span></p>
+                    <p>배터리: <span id="agv1-battery">100%</span></p>
+                </div>
+                <div class="agv-status">
+                    <h3>AGV-2 상태</h3>
+                    <p>위치: <span id="agv2-position">대기중</span></p>
+                    <p>상태: <span id="agv2-status">대기</span></p>
+                    <p>목표: <span id="agv2-target">없음</span></p>
+                    <p>배터리: <span id="agv2-battery">100%</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simulationCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let animationId;
+        let isRunning = false;
+
+        // 시뮬레이션 상태
+        const simulation = {
+            agvs: [],
+            shelves: [],
+            pickingStations: [],
+            arucoMarkers: [],
+            tasks: [],
+            time: 0,
+            occupiedShelves: new Set()
+        };
+
+        // AGV 클래스
+        class AGV {
+            constructor(id, x, y, color) {
+                this.id = id;
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.angle = 0;
+                this.speed = 3;
+                this.status = '대기';
+                this.currentTask = null;
+                this.battery = 100;
+                this.path = [];
+                this.currentPathIndex = 0;
+                this.carryingShelf = null;
+                this.workingAtStation = false;
+                this.workTimer = 0;
+                this.workDuration = 180;
+            }
+
+            update() {
+                if (this.workingAtStation) {
+                    this.workTimer++;
+                    this.status = `작업중 (${Math.ceil((this.workDuration - this.workTimer) / 60)}초 남음)`;
+                    
+                    if (this.workTimer >= this.workDuration) {
+                        this.workingAtStation = false;
+                        this.workTimer = 0;
+                        this.status = '복귀중';
+                        
+                        if (this.carryingShelf) {
+                            this.path = this.planReturnPath(this.carryingShelf.originalPosition);
+                            this.currentPathIndex = 0;
+                        }
+                    }
+                    return;
+                }
+
+                if (this.path.length > 0 && this.currentPathIndex < this.path.length) {
+                    const target = this.path[this.currentPathIndex];
+                    const dx = target.x - this.x;
+                    const dy = target.y - this.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance < 5) {
+                        this.currentPathIndex++;
+                        
+                        // 선반에 도착한 경우
+                        if (this.currentTask && this.currentTask.phase === 'pickup' && target === this.currentTask.shelf) {
+                            this.pickupShelf(this.currentTask.shelf);
+                            this.currentTask.phase = 'transport';
+                            this.path = this.planPath(this.currentTask.pickingStation);
+                            this.currentPathIndex = 0;
+                        }
+                        // 피킹스테이션에 도착한 경우
+                        else if (this.currentTask && this.currentTask.phase === 'transport' && 
+                                target === this.currentTask.pickingStation) {
+                            this.startWorking();
+                        }
+                        // 복귀 완료 - 상태 완전 초기화
+                        else if (this.currentPathIndex >= this.path.length) {
+                            if (this.carryingShelf) {
+                                this.dropoffShelf();
+                            }
+                            // 상태 완전 초기화
+                            this.path = [];
+                            this.currentPathIndex = 0;
+                            this.status = '대기';
+                            this.currentTask = null;
+                            this.workingAtStation = false;
+                            this.workTimer = 0;
+                        }
+                    } else {
+                        // 부드러운 직선 이동 (가로 또는 세로만)
+                        const moveThreshold = 2; // 더 부드러운 이동을 위한 임계값
+                        
+                        if (Math.abs(dx) > Math.abs(dy)) {
+                            // 가로 이동 우선
+                            if (Math.abs(dx) > moveThreshold) {
+                                this.angle = dx > 0 ? 0 : Math.PI;
+                                this.x += Math.cos(this.angle) * this.speed;
+                            }
+                        } else {
+                            // 세로 이동 우선
+                            if (Math.abs(dy) > moveThreshold) {
+                                this.angle = dy > 0 ? Math.PI/2 : -Math.PI/2;
+                                this.y += Math.sin(this.angle) * this.speed;
+                            }
+                        }
+                        
+                        // 선반이 있을 때 부드럽게 따라오기
+                        if (this.carryingShelf) {
+                            this.carryingShelf.x = this.x;
+                            this.carryingShelf.y = this.y - 30;
+                            this.status = this.currentTask?.phase === 'transport' ? '선반 운반중' : '복귀중';
+                        } else {
+                            this.status = '이동중';
+                        }
+                        
+                        this.battery = Math.max(0, this.battery - 0.01);
+                    }
+                }
+            }
+
+            setTask(task) {
+                this.currentTask = task;
+                this.currentTask.phase = 'pickup';
+                this.path = this.planPath(task.shelf);
+                this.currentPathIndex = 0;
+                this.status = '작업중';
+            }
+
+            pickupShelf(shelf) {
+                this.carryingShelf = shelf;
+                this.carryingShelf.originalPosition = {x: shelf.x, y: shelf.y};
+                shelf.occupied = true;
+                shelf.carriedBy = this.id;
+            }
+
+            startWorking() {
+                this.workingAtStation = true;
+                this.workTimer = 0;
+                this.status = '피킹 작업중';
+            }
+
+            dropoffShelf() {
+                if (this.carryingShelf) {
+                    this.carryingShelf.x = this.carryingShelf.originalPosition.x;
+                    this.carryingShelf.y = this.carryingShelf.originalPosition.y;
+                    this.carryingShelf.occupied = false;
+                    delete this.carryingShelf.carriedBy;
+                    simulation.occupiedShelves.delete(this.carryingShelf.id);
+                    this.carryingShelf = null;
+                }
+            }
+
+            planReturnPath(originalPosition) {
+                return this.planPath(originalPosition);
+            }
+
+            planPath(target) {
+                const path = [];
+                const currentMarker = this.findNearestMarker();
+                
+                if (target.id && target.id.includes('피킹스테이션')) {
+                    // 피킹스테이션 이동 - 지정된 마커 사용
+                    if (target.id === '피킹스테이션-1') {
+                        // 1번 마커를 반드시 경유
+                        const pathMarkers = this.getSimplePath(currentMarker.id, 1);
+                        path.push(...pathMarkers);
+                    } else if (target.id === '피킹스테이션-2') {
+                        // 19번 마커를 반드시 경유  
+                        const pathMarkers = this.getSimplePath(currentMarker.id, 19);
+                        path.push(...pathMarkers);
+                    }
+                } else {
+                    // 선반 이동 - 선반 위아래 마커만 사용
+                    let targetMarkerId;
+                    if (target.y <= 200) {
+                        // 첫 번째 행 선반 - 위쪽 마커만 사용
+                        if (target.x <= 375) targetMarkerId = 2;
+                        else if (target.x <= 525) targetMarkerId = 3;
+                        else if (target.x <= 675) targetMarkerId = 4;
+                        else targetMarkerId = 5;
+                    } else if (target.y <= 400) {
+                        // 두 번째 행 선반 - 위쪽 마커만 사용
+                        if (target.x <= 375) targetMarkerId = 8;
+                        else if (target.x <= 525) targetMarkerId = 9;
+                        else if (target.x <= 675) targetMarkerId = 10;
+                        else targetMarkerId = 11;
+                    } else {
+                        // 세 번째 행 선반 - 아래쪽 마커만 사용
+                        if (target.x <= 375) targetMarkerId = 20;
+                        else if (target.x <= 525) targetMarkerId = 21;
+                        else if (target.x <= 675) targetMarkerId = 22;
+                        else targetMarkerId = 23;
+                    }
+                    
+                    // 선반 위아래 마커로만 접근
+                    const pathMarkers = this.getSimplePath(currentMarker.id, targetMarkerId);
+                    path.push(...pathMarkers);
+                }
+                
+                path.push(target);
+                return path;
+            }
+
+            planReturnPath(originalPosition) {
+                // 복귀할 때도 선반 위아래 마커만 사용
+                return this.planPath(originalPosition);
+            }
+
+            getSimplePath(fromId, toId) {
+                const path = [];
+                
+                if (fromId === toId) return path;
+                
+                let currentId = fromId;
+                
+                // 한 칸씩 이동 (양쪽 세로 라인만 위아래 이동)
+                while (currentId !== toId) {
+                    const currentRow = Math.floor((currentId - 1) / 6);
+                    const currentCol = (currentId - 1) % 6;
+                    const targetRow = Math.floor((toId - 1) / 6);
+                    const targetCol = (toId - 1) % 6;
+                    
+                    let nextId = currentId;
+                    
+                    // 목표에 도달했으면 종료
+                    if (currentRow === targetRow && currentCol === targetCol) {
+                        break;
+                    }
+                    
+                    // 1단계: 세로 라인으로 이동 (왼쪽 또는 오른쪽)
+                    if (currentRow !== targetRow && currentCol !== 0 && currentCol !== 5) {
+                        // 더 가까운 세로 라인으로 이동
+                        if (currentCol < 3) {
+                            nextId = currentId - 1; // 왼쪽 세로 라인(1,7,13,19)으로
+                        } else {
+                            nextId = currentId + 1; // 오른쪽 세로 라인(6,12,18,24)으로
+                        }
+                    }
+                    // 2단계: 세로 라인에서 위아래로 이동 (1,7,13,19 또는 6,12,18,24만)
+                    else if ((currentCol === 0 || currentCol === 5) && currentRow !== targetRow) {
+                        if (currentRow < targetRow) {
+                            nextId = currentId + 6; // 아래로
+                        } else {
+                            nextId = currentId - 6; // 위로
+                        }
+                    }
+                    // 3단계: 같은 행에서 좌우로 이동
+                    else if (currentRow === targetRow && currentCol !== targetCol) {
+                        if (currentCol < targetCol) {
+                            nextId = currentId + 1; // 오른쪽으로
+                        } else {
+                            nextId = currentId - 1; // 왼쪽으로
+                        }
+                    }
+                    else {
+                        break; // 더 이상 이동할 수 없음
+                    }
+                    
+                    if (nextId !== currentId && nextId >= 1 && nextId <= 24) {
+                        const nextMarker = simulation.arucoMarkers.find(m => m.id === nextId);
+                        if (nextMarker) {
+                            path.push(nextMarker);
+                            currentId = nextId;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    
+                    // 무한루프 방지
+                    if (path.length > 15) break;
+                }
+                
+                return path;
+            }
+
+            findNearestMarker() {
+                let nearest = simulation.arucoMarkers[0];
+                let minDist = this.distanceTo(nearest);
+                
+                for (let marker of simulation.arucoMarkers) {
+                    const dist = this.distanceTo(marker);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearest = marker;
+                    }
+                }
+                return nearest;
+            }
+
+            distanceTo(point) {
+                return Math.sqrt((this.x - point.x)**2 + (this.y - point.y)**2);
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                
+                ctx.fillStyle = this.color;
+                ctx.fillRect(-20, -15, 40, 30);
+                
+                ctx.fillStyle = 'white';
+                ctx.fillRect(15, -8, 8, 16);
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(this.id, 0, 4);
+                
+                ctx.restore();
+
+                if (this.carryingShelf) {
+                    ctx.save();
+                    ctx.fillStyle = '#d4943a';
+                    ctx.strokeStyle = '#654321';
+                    ctx.lineWidth = 2;
+                    const shelfX = this.x - this.carryingShelf.width/2;
+                    const shelfY = this.y - 30 - this.carryingShelf.height/2;
+                    ctx.fillRect(shelfX, shelfY, this.carryingShelf.width, this.carryingShelf.height);
+                    ctx.strokeRect(shelfX, shelfY, this.carryingShelf.width, this.carryingShelf.height);
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.font = '10px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(this.carryingShelf.id, this.x, this.y - 30 + 3);
+                    ctx.restore();
+                }
+
+                if (this.path.length > 0 && !this.workingAtStation) {
+                    ctx.strokeStyle = this.color;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, this.y);
+                    for (let point of this.path.slice(this.currentPathIndex)) {
+                        ctx.lineTo(point.x, point.y);
+                    }
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                if (this.workingAtStation) {
+                    ctx.fillStyle = 'rgba(241, 196, 15, 0.7)';
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 35, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    ctx.fillStyle = '#f39c12';
+                    ctx.font = '12px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('작업중', this.x, this.y - 40);
+                }
+            }
+        }
+
+        // 시뮬레이션 초기화
+        function initSimulation() {
+            simulation.agvs = [];
+            simulation.shelves = [];
+            simulation.pickingStations = [];
+            simulation.arucoMarkers = [];
+            simulation.tasks = [];
+            simulation.occupiedShelves.clear();
+
+            // AGV 2대 생성
+            simulation.agvs.push(new AGV('AGV-1', 100, 275, '#e74c3c'));
+            simulation.agvs.push(new AGV('AGV-2', 100, 475, '#2ecc71'));
+
+            // 선반 12개 생성
+            for (let row = 0; row < 3; row++) {
+                for (let col = 0; col < 4; col++) {
+                    simulation.shelves.push({
+                        id: `선반-${row * 4 + col + 1}`,
+                        x: 300 + col * 150,
+                        y: 175 + row * 200,
+                        width: 80,
+                        height: 40,
+                        occupied: false
+                    });
+                }
+            }
+
+            // 피킹 스테이션 2개
+            simulation.pickingStations.push({
+                id: '피킹스테이션-1',
+                x: 50,
+                y: 100,
+                width: 100,
+                height: 60
+            });
+            simulation.pickingStations.push({
+                id: '피킹스테이션-2',
+                x: 50,
+                y: 600,
+                width: 100,
+                height: 60
+            });
+
+            // 아루코 마커 24개 배치
+            const markerPositions = [
+                // 첫 번째 줄 (1-6)
+                {x: 150, y: 100, id: 1}, {x: 300, y: 100, id: 2}, {x: 450, y: 100, id: 3}, {x: 600, y: 100, id: 4}, {x: 750, y: 100, id: 5}, {x: 850, y: 100, id: 6},
+                // 두 번째 줄 (7-12)
+                {x: 150, y: 275, id: 7}, {x: 300, y: 275, id: 8}, {x: 450, y: 275, id: 9}, {x: 600, y: 275, id: 10}, {x: 750, y: 275, id: 11}, {x: 850, y: 275, id: 12},
+                // 세 번째 줄 (13-18)
+                {x: 150, y: 475, id: 13}, {x: 300, y: 475, id: 14}, {x: 450, y: 475, id: 15}, {x: 600, y: 475, id: 16}, {x: 750, y: 475, id: 17}, {x: 850, y: 475, id: 18},
+                // 네 번째 줄 (19-24)
+                {x: 150, y: 620, id: 19}, {x: 300, y: 620, id: 20}, {x: 450, y: 620, id: 21}, {x: 600, y: 620, id: 22}, {x: 750, y: 620, id: 23}, {x: 850, y: 620, id: 24}
+            ];
+
+            markerPositions.forEach((pos) => {
+                simulation.arucoMarkers.push({
+                    id: pos.id,
+                    x: pos.x,
+                    y: pos.y,
+                    size: 20
+                });
+            });
+        }
+
+        // 렌더링 함수
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 배경 격자
+            ctx.strokeStyle = '#ddd';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < canvas.width; i += 50) {
+                ctx.beginPath();
+                ctx.moveTo(i, 0);
+                ctx.lineTo(i, canvas.height);
+                ctx.stroke();
+            }
+            for (let i = 0; i < canvas.height; i += 50) {
+                ctx.beginPath();
+                ctx.moveTo(0, i);
+                ctx.lineTo(canvas.width, i);
+                ctx.stroke();
+            }
+
+            // 아루코 마커 그리기
+            simulation.arucoMarkers.forEach(marker => {
+                ctx.fillStyle = '#9b59b6';
+                ctx.fillRect(marker.x - marker.size/2, marker.y - marker.size/2, marker.size, marker.size);
+                ctx.fillStyle = 'white';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(marker.id, marker.x, marker.y + 3);
+            });
+
+            // 선반 그리기
+            simulation.shelves.forEach(shelf => {
+                if (shelf.carriedBy) return;
+                
+                ctx.fillStyle = shelf.occupied ? '#8b4513' : '#d4943a';
+                ctx.fillRect(shelf.x - shelf.width/2, shelf.y - shelf.height/2, shelf.width, shelf.height);
+                ctx.strokeStyle = '#654321';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(shelf.x - shelf.width/2, shelf.y - shelf.height/2, shelf.width, shelf.height);
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(shelf.id, shelf.x, shelf.y + 3);
+            });
+
+            // 피킹 스테이션 그리기
+            simulation.pickingStations.forEach(station => {
+                ctx.fillStyle = '#f39c12';
+                ctx.fillRect(station.x - station.width/2, station.y - station.height/2, station.width, station.height);
+                ctx.strokeStyle = '#e67e22';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(station.x - station.width/2, station.y - station.height/2, station.width, station.height);
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(station.id, station.x, station.y + 4);
+            });
+
+            // AGV 그리기
+            simulation.agvs.forEach(agv => {
+                agv.draw();
+            });
+
+            updateStatus();
+        }
+
+        // 상태 정보 업데이트
+        function updateStatus() {
+            simulation.agvs.forEach((agv, index) => {
+                const num = index + 1;
+                document.getElementById(`agv${num}-position`).textContent = `(${Math.round(agv.x)}, ${Math.round(agv.y)})`;
+                document.getElementById(`agv${num}-status`).textContent = agv.status;
+                document.getElementById(`agv${num}-target`).textContent = agv.currentTask ? agv.currentTask.description : '없음';
+                document.getElementById(`agv${num}-battery`).textContent = Math.round(agv.battery) + '%';
+            });
+        }
+
+        // 애니메이션 루프
+        function animate() {
+            if (!isRunning) return;
+
+            simulation.agvs.forEach(agv => {
+                agv.update();
+            });
+
+            render();
+            simulation.time++;
+
+            if (simulation.time % 180 === 0) {
+                autoAssignTasks();
+            }
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        // 자동 작업 할당 (반복 방지)
+        function autoAssignTasks() {
+            // 모든 AGV가 작업 중이면 새 작업 할당하지 않음
+            if (simulation.agvs.every(agv => agv.status !== '대기')) {
+                return;
+            }
+            
+            const availableAGV = simulation.agvs.find(agv => agv.status === '대기');
+            if (availableAGV) {
+                const availableShelves = simulation.shelves.filter(shelf => 
+                    !shelf.occupied && 
+                    !shelf.carriedBy && 
+                    !simulation.occupiedShelves.has(shelf.id)
+                );
+                
+                if (availableShelves.length > 0) {
+                    const randomShelf = availableShelves[Math.floor(Math.random() * availableShelves.length)];
+                    const randomPickingStation = simulation.pickingStations[Math.floor(Math.random() * simulation.pickingStations.length)];
+                    
+                    simulation.occupiedShelves.add(randomShelf.id);
+                    
+                    const task = {
+                        id: `작업-${Date.now()}`,
+                        description: `${randomShelf.id} → ${randomPickingStation.id}`,
+                        shelf: randomShelf,
+                        pickingStation: randomPickingStation,
+                        phase: 'pickup'
+                    };
+                    
+                    availableAGV.setTask(task);
+                }
+            }
+        }
+
+        // 제어 함수들
+        function startSimulation() {
+            if (!isRunning) {
+                isRunning = true;
+                animate();
+            }
+        }
+
+        function pauseSimulation() {
+            isRunning = false;
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+        }
+
+        function resetSimulation() {
+            pauseSimulation();
+            initSimulation();
+            render();
+        }
+
+        function addTask() {
+            const availableAGV = simulation.agvs.find(agv => agv.status === '대기');
+            if (availableAGV) {
+                const availableShelves = simulation.shelves.filter(shelf => 
+                    !shelf.occupied && 
+                    !shelf.carriedBy && 
+                    !simulation.occupiedShelves.has(shelf.id)
+                );
+                
+                if (availableShelves.length > 0) {
+                    const randomShelf = availableShelves[Math.floor(Math.random() * availableShelves.length)];
+                    const randomPickingStation = simulation.pickingStations[Math.floor(Math.random() * simulation.pickingStations.length)];
+                    
+                    simulation.occupiedShelves.add(randomShelf.id);
+                    
+                    const task = {
+                        id: `작업-${Date.now()}`,
+                        description: `${randomShelf.id} → ${randomPickingStation.id}`,
+                        shelf: randomShelf,
+                        pickingStation: randomPickingStation,
+                        phase: 'pickup'
+                    };
+                    
+                    availableAGV.setTask(task);
+                    alert(`${availableAGV.id}에게 새 작업이 할당되었습니다: ${task.description}`);
+                } else {
+                    alert('사용 가능한 선반이 없습니다.');
+                }
+            } else {
+                alert('사용 가능한 AGV가 없습니다.');
+            }
+        }
+
+        // 초기화 및 렌더링
+        initSimulation();
+        render();
+    </script>
+</body>
+</html>
