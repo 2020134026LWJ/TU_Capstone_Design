@@ -14,7 +14,10 @@ TOPIC_STATE = "/agv/state"
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, my_rid: int = 0) -> None:
+        # 이 브릿지가 담당하는 로봇 번호(0, 1, ...)
+        self.my_rid = my_rid
+
         self.current_plan: Optional[Dict[str, Any]] = None
         self.path: List[int] = []
         self.idx: int = 0
@@ -47,16 +50,39 @@ class Bridge:
 
     def handle_plan(self, plan: Dict[str, Any]) -> None:
         self.current_plan = plan
-        self.path = plan.get("path", [])
-        self.idx = 1 if len(self.path) > 1 else 0
         self.speed = float(plan.get("speed", 0.3))
 
+        # (1) 새 server.py 형식: robots 배열이 있는 경우
+        if "robots" in plan:
+            robots = plan.get("robots", [])
+            mine = None
+            for r in robots:
+                if int(r.get("rid", -1)) == self.my_rid:
+                    mine = r
+                    break
+
+            if mine is None:
+                print(f"[BRIDGE] no plan for rid={self.my_rid}")
+                self.path = []
+                return
+
+            self.path = mine.get("node_path", [])
+
+        else:
+            # (2) 예전 형식(단일 로봇): path가 바로 오는 경우
+            self.path = plan.get("path", [])
+
+        self.idx = 1 if len(self.path) > 1 else 0
         self.current_node = self.path[0] if self.path else None
         self.progress = 0.0
 
-        print(f"[BRIDGE] got PLAN: path={self.path}, speed={self.speed}")
+        print(f"[BRIDGE] got PLAN: rid={self.my_rid}, path={self.path}, speed={self.speed}")
 
     def handle_state(self, state: Dict[str, Any]) -> None:
+        # (선택) state에 rid가 들어오면, 내 로봇 것만 처리
+        if "rid" in state and int(state["rid"]) != self.my_rid:
+            return
+
         self.current_node = state.get("current_node", self.current_node)
         self.progress = float(state.get("progress", self.progress))
 
@@ -74,6 +100,7 @@ class Bridge:
         target_node = self.path[-1] if done else self.path[self.idx]
 
         highcmd = {
+            "rid": self.my_rid,
             "mode": "FOLLOW_PATH",
             "target_node": int(target_node),
             "speed": float(self.speed),
@@ -82,6 +109,7 @@ class Bridge:
         }
 
         lowcmd = {
+            "rid": self.my_rid,
             "v": float(self.speed if not done else 0.0),
             "w": 0.0,
             "target_node": int(target_node)
@@ -108,4 +136,4 @@ class Bridge:
 
 
 if __name__ == "__main__":
-    Bridge().run()
+    Bridge(my_rid=0).run()
