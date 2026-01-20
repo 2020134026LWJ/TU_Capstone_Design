@@ -1,0 +1,35 @@
+미니 pc
+(라즈베리파이 5) * 2
+187,649원 * 2
+
+구동부 보드
+[STMicroelectronics] NUCLEO-F767ZI * 2
+45,936원 * 2
+
+엑추에이터 - https://www.motorbank.kr/goods/goods_view.php?goodsNo=1000013287
+소형리니어액츄에이터 메탈타입 LM2036M DC12V 128N/188N * 2
+102,700원 * 2
+
+모터
+[㈜디엔지위드] BLDC감속모터+컨트롤러세트 BL3640A-24V-06P + RA35 with BLC-22H06P
+83,490원 * 4
+(직경42파이 유성감속기어 BLDC모터 PG42-BL4241 24V 26W 고성능 94,700원)
+(500W(와트) 고출력 BLDC모터 컨트롤러 BLC-150 DC12-36V 고성능 44,000원)
+
+휠
+[DFROBOT] 메카넘 휠 (80mm) - 좌측 [FIT0653]
+10,450원 * 2
+[DFROBOT] 메카넘 휠 (80mm) - 우측 [FIT0654]
+10,450원 * 2
+
+카메라
+[DFROBOT] 5MP Night Vision Camera for Raspberry Pi [SEN0184] * 2
+61,380원 * 2
+
+디스플레이
+[SunFounder] [KC인증] 라즈베리파이 5인치 800x480 HDMI LCD 터치스크린 모니터 [CN0396]
+60,500원 * 2
+
+
+총 1,292,090원
+

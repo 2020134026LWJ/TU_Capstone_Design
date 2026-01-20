@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AGV 물류 로봇 시스템</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            font-family: Arial, sans-serif;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .main-content {
+            display: flex;
+            height: 500px;
+        }
+        
+        .warehouse {
+            flex: 1;
+            position: relative;
+            background: #f8f9fa;
+            border-right: 2px solid #ddd;
+        }
+        
+        .control-panel {
+            width: 250px;
+            background: #34495e;
+            color: white;
+            padding: 20px;
+        }
+        
+        /* 선반 */
+        .shelf {
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            background: #8B4513;
+            border: 2px solid #654321;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 10px;
+            font-weight: bold;
+            z-index: 5;
+        }
+        
+        .shelf.occupied {
+            background: #e74c3c;
+        }
+        
+        .shelf.carried {
+            z-index: 15;
+            box-shadow: 0 5px 10px rgba(0,0,0,0.3);
+            animation: float 1s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(-3px); }
+            50% { transform: translateY(-6px); }
+        }
+        
+        /* 작업대 */
+        .workstation {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background: #27ae60;
+            border: 2px solid #1e8449;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 11px;
+            font-weight: bold;
+            z-index: 5;
+        }
+        
+        /* AGV 로봇 */
+        .agv {
+            position: absolute;
+            width: 25px;
+            height: 25px;
+            background: #3498db;
+            border: 2px solid #2980b9;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 9px;
+            font-weight: bold;
+            z-index: 10;
+            transition: all 0.1s ease;
+        }
+        
+        .agv.moving {
+            animation: pulse 0.5s infinite;
+        }
+        
+        .agv.carrying {
+            background: #e67e22;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        /* 통로 */
+        .path {
+            position: absolute;
+            background: rgba(52, 152, 219, 0.1);
+            border: 1px dashed rgba(52, 152, 219, 0.3);
+            z-index: 1;
+        }
+        
+        /* 작업 목록 */
+        .task-list {
+            background: #2c3e50;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .task-list h3 {
+            margin: 0 0 10px 0;
+            color: #3498db;
+        }
+        
+        .task-item {
+            background: #34495e;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 3px;
+            font-size: 12px;
+            border-left: 3px solid #3498db;
+        }
+        
+        .task-item.active {
+            border-left-color: #f39c12;
+            background: #4a4a2a;
+        }
+        
+        .status {
+            background: #2c3e50;
+            border-radius: 5px;
+            padding: 15px;
+        }
+        
+        .status h3 {
+            margin: 0 0 10px 0;
+            color: #3498db;
+        }
+        
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 AGV 물류 로봇</h1>
+            <p>간단한 창고 자동화 시스템</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="warehouse" id="warehouse">
+                <!-- 요소들이 여기에 생성됩니다 -->
+            </div>
+            
+            <div class="control-panel">
+                <div class="task-list">
+                    <h3>📋 작업 목록</h3>
+                    <div id="tasks">
+                        <!-- 작업들이 여기에 표시됩니다 -->
+                    </div>
+                </div>
+                
+                <div class="status">
+                    <h3>📊 현황</h3>
+                    <div class="status-item">
+                        <span>로봇:</span>
+                        <span id="robot-status">1대 활동중</span>
+                    </div>
+                    <div class="status-item">
+                        <span>대기 작업:</span>
+                        <span id="pending-count">3개</span>
+                    </div>
+                    <div class="status-item">
+                        <span>완료:</span>
+                        <span id="completed-count">0개</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class SimpleAGVSystem {
+            constructor() {
+                this.warehouse = document.getElementById('warehouse');
+                this.robot = null;
+                this.shelves = [];
+                this.workstations = [];
+                this.tasks = [];
+                this.completedCount = 0;
+                
+                this.init();
+            }
+            
+            init() {
+                this.createWarehouse();
+                this.createRobot();
+                this.createTasks();
+                this.start();
+            }
+            
+            createWarehouse() {
+                // 선반 8개 생성 (2x4)
+                const shelfPositions = [
+                    {x: 100, y: 100}, {x: 200, y: 100}, {x: 300, y: 100}, {x: 400, y: 100},
+                    {x: 100, y: 200}, {x: 200, y: 200}, {x: 300, y: 200}, {x: 400, y: 200}
+                ];
+                
+                shelfPositions.forEach((pos, i) => {
+                    const shelf = {
+                        id: `S${i + 1}`,
+                        x: pos.x,
+                        y: pos.y,
+                        busy: false
+                    };
+                    this.shelves.push(shelf);
+                    
+                    const element = document.createElement('div');
+                    element.className = 'shelf';
+                    element.style.left = `${pos.x}px`;
+                    element.style.top = `${pos.y}px`;
+                    element.textContent = shelf.id;
+                    element.id = `shelf-${shelf.id}`;
+                    this.warehouse.appendChild(element);
+                });
+                
+                // 작업대 2개
+                const workstations = [
+                    {id: 'W1', x: 550, y: 120},
+                    {id: 'W2', x: 550, y: 180}
+                ];
+                
+                workstations.forEach(ws => {
+                    this.workstations.push(ws);
+                    
+                    const element = document.createElement('div');
+                    element.className = 'workstation';
+                    element.style.left = `${ws.x}px`;
+                    element.style.top = `${ws.y}px`;
+                    element.textContent = ws.id;
+                    this.warehouse.appendChild(element);
+                });
+                
+                // 통로 표시
+                const path = document.createElement('div');
+                path.className = 'path';
+                path.style.left = '50px';
+                path.style.top = '50px';
+                path.style.width = '550px';
+                path.style.height = '250px';
+                this.warehouse.appendChild(path);
+            }
+            
+            createRobot() {
+                this.robot = {
+                    id: 'AGV1',
+                    x: 50,
+                    y: 150,
+                    status: 'idle',
+                    carrying: null,
+                    task: null,
+                    path: []
+                };
+                
+                const element = document.createElement('div');
+                element.className = 'agv';
+                element.style.left = `${this.robot.x}px`;
+                element.style.top = `${this.robot.y}px`;
+                element.textContent = '1';
+                element.id = 'robot';
+                this.warehouse.appendChild(element);
+            }
+            
+            createTasks() {
+                const taskData = [
+                    {shelf: 'S1', workstation: 'W1'},
+                    {shelf: 'S3', workstation: 'W2'},
+                    {shelf: 'S5', workstation: 'W1'}
+                ];
+                
+                taskData.forEach((data, i) => {
+                    this.tasks.push({
+                        id: `T${i + 1}`,
+                        shelfId: data.shelf,
+                        workstationId: data.workstation,
+                        status: 'waiting'
+                    });
+                });
+                
+                this.updateDisplay();
+            }
+            
+            // 간단한 경로 계산
+            moveTo(targetX, targetY) {
+                const path = [];
+                let x = this.robot.x;
+                let y = this.robot.y;
+                
+                // Y축 먼저
+                while (y !== targetY) {
+                    y += y < targetY ? 10 : -10;
+                    if (Math.abs(y - targetY) < 10) y = targetY;
+                    path.push({x, y});
+                }
+                
+                // X축
+                while (x !== targetX) {
+                    x += x < targetX ? 10 : -10;
+                    if (Math.abs(x - targetX) < 10) x = targetX;
+                    path.push({x, y});
+                }
+                
+                return path;
+            }
+            
+            assignTask() {
+                if (this.robot.status !== 'idle') return;
+                
+                const waitingTask = this.tasks.find(t => t.status === 'waiting');
+                if (!waitingTask) return;
+                
+                const shelf = this.shelves.find(s => s.id === waitingTask.shelfId);
+                if (!shelf || shelf.busy) return;
+                
+                // 작업 할당
+                this.robot.task = waitingTask;
+                this.robot.status = 'going_to_shelf';
+                this.robot.path = this.moveTo(shelf.x, shelf.y);
+                shelf.busy = true;
+                waitingTask.status = 'assigned';
+                
+                console.log(`로봇이 ${shelf.id}로 이동 시작`);
+                this.updateDisplay();
+            }
+            
+            updateRobot() {
+                const element = document.getElementById('robot');
+                if (!element) return;
+                
+                // 이동 처리
+                if (this.robot.path && this.robot.path.length > 0) {
+                    const target = this.robot.path.shift();
+                    if (!target) return;
+                    
+                    this.robot.x = target.x;
+                    this.robot.y = target.y;
+                    
+                    element.style.left = `${this.robot.x}px`;
+                    element.style.top = `${this.robot.y}px`;
+                    element.classList.add('moving');
+                    
+                    // 선반을 운반 중이면 함께 이동
+                    if (this.robot.carrying) {
+                        const shelfElement = document.getElementById(`shelf-${this.robot.carrying.id}`);
+                        if (shelfElement) {
+                            shelfElement.style.left = `${this.robot.x}px`;
+                            shelfElement.style.top = `${this.robot.y - 5}px`;
+                        }
+                    }
+                } else {
+                    element.classList.remove('moving');
+                    this.handleArrival();
+                }
+            }
+            
+            handleArrival() {
+                if (this.robot.status === 'going_to_shelf') {
+                    // 선반 픽업
+                    const shelf = this.shelves.find(s => s.id === this.robot.task.shelfId);
+                    if (!shelf) return;
+                    
+                    this.robot.carrying = shelf;
+                    this.robot.status = 'going_to_workstation';
+                    
+                    const workstation = this.workstations.find(w => w.id === this.robot.task.workstationId);
+                    if (!workstation) return;
+                    
+                    this.robot.path = this.moveTo(workstation.x - 50, workstation.y);
+                    
+                    const robotElement = document.getElementById('robot');
+                    if (robotElement) robotElement.classList.add('carrying');
+                    
+                    const shelfElement = document.getElementById(`shelf-${shelf.id}`);
+                    if (shelfElement) shelfElement.classList.add('occupied', 'carried');
+                    
+                    console.log(`${shelf.id} 픽업 완료`);
+                    
+                } else if (this.robot.status === 'going_to_workstation') {
+                    // 작업대 도착
+                    console.log(`작업대 ${this.robot.task.workstationId}에 배송 완료`);
+                    
+                    setTimeout(() => {
+                        this.returnShelf();
+                    }, 2000);
+                    
+                } else if (this.robot.status === 'returning_shelf') {
+                    // 선반 반환 완료
+                    const shelf = this.robot.carrying;
+                    if (!shelf) return;
+                    
+                    // 선반 원래 자리로
+                    const shelfElement = document.getElementById(`shelf-${shelf.id}`);
+                    if (shelfElement) {
+                        shelfElement.style.left = `${shelf.x}px`;
+                        shelfElement.style.top = `${shelf.y}px`;
+                        shelfElement.classList.remove('occupied', 'carried');
+                    }
+                    
+                    // 작업 완료
+                    shelf.busy = false;
+                    this.robot.carrying = null;
+                    if (this.robot.task) {
+                        this.robot.task.status = 'completed';
+                    }
+                    this.robot.task = null;
+                    this.robot.status = 'idle';
+                    this.completedCount++;
+                    
+                    const robotElement = document.getElementById('robot');
+                    if (robotElement) robotElement.classList.remove('carrying');
+                    
+                    console.log(`${shelf.id} 반환 완료`);
+                    this.updateDisplay();
+                    
+                    // 새 작업 생성
+                    setTimeout(() => {
+                        this.addRandomTask();
+                    }, 3000);
+                }
+            }
+            
+            returnShelf() {
+                const shelf = this.robot.carrying;
+                if (!shelf) return;
+                
+                this.robot.status = 'returning_shelf';
+                this.robot.path = this.moveTo(shelf.x, shelf.y);
+                console.log(`${shelf.id} 반환 시작`);
+            }
+            
+            addRandomTask() {
+                const availableShelves = this.shelves.filter(s => !s.busy);
+                const randomShelf = availableShelves[Math.floor(Math.random() * availableShelves.length)];
+                const randomWorkstation = this.workstations[Math.floor(Math.random() * this.workstations.length)];
+                
+                if (randomShelf) {
+                    this.tasks.push({
+                        id: `T${this.tasks.length + 1}`,
+                        shelfId: randomShelf.id,
+                        workstationId: randomWorkstation.id,
+                        status: 'waiting'
+                    });
+                    this.updateDisplay();
+                }
+            }
+            
+            updateDisplay() {
+                // 작업 목록 업데이트
+                const taskContainer = document.getElementById('tasks');
+                const activeTasks = this.tasks.filter(t => t.status !== 'completed').slice(-4);
+                
+                taskContainer.innerHTML = '';
+                activeTasks.forEach(task => {
+                    const div = document.createElement('div');
+                    div.className = `task-item ${task.status === 'assigned' ? 'active' : ''}`;
+                    
+                    let status = task.status === 'waiting' ? '대기' : 
+                                task.status === 'assigned' ? '진행중' : '완료';
+                    
+                    div.innerHTML = `${task.shelfId} → ${task.workstationId} (${status})`;
+                    taskContainer.appendChild(div);
+                });
+                
+                // 상태 업데이트
+                document.getElementById('robot-status').textContent = 
+                    this.robot.status === 'idle' ? '1대 대기중' : '1대 작업중';
+                document.getElementById('pending-count').textContent = 
+                    `${this.tasks.filter(t => t.status === 'waiting').length}개`;
+                document.getElementById('completed-count').textContent = `${this.completedCount}개`;
+            }
+            
+            start() {
+                console.log('AGV 시스템 시작');
+                
+                // 첫 작업 할당
+                setTimeout(() => {
+                    this.assignTask();
+                }, 1000);
+                
+                // 메인 루프
+                setInterval(() => {
+                    this.assignTask();
+                    this.updateRobot();
+                }, 100);
+            }
+        }
+        
+        // 시스템 시작
+        window.onload = () => {
+            new SimpleAGVSystem();
+        };
+    </script>
+</body>
+</html>

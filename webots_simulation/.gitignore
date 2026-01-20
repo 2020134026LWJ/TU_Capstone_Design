@@ -1,0 +1,10 @@
+# Webots
+*.wbproj
+__pycache__/
+
+# paho library (install via: sudo apt install python3-paho-mqtt)
+controllers/agv_mqtt_controller/paho/
+
+# Old files
+controllers/agv_controller/
+worlds/warehouse.wbt
