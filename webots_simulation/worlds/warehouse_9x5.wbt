@@ -1,0 +1,547 @@
+#VRML_SIM R2023b utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/adept/pioneer3/protos/Pioneer3dx.proto"
+
+WorldInfo {
+  info [
+    "AGV Warehouse Simulation - 9x5 Grid"
+    "TU Capstone Design Project"
+    "MQTT 연동: stm_dummy.py 대체"
+  ]
+  title "AGV Warehouse 9x5"
+  basicTimeStep 16
+  contactProperties [
+    ContactProperties {
+      material1 "floor"
+      material2 "wheel"
+      coulombFriction [2]
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -0.7 0.7 0.14 0.6
+  position 4 -6 12
+}
+
+TexturedBackground {
+  texture "factory"
+}
+
+TexturedBackgroundLight {
+}
+
+# 창고 바닥 (9x5 그리드 + 여유 공간)
+RectangleArena {
+  translation 4.5 2.5 0
+  floorSize 10 6
+  floorTileSize 1 1
+  floorAppearance PBRAppearance {
+    baseColor 0.9 0.9 0.9
+    roughness 1
+    metalness 0
+  }
+  wallHeight 0.1
+  wallAppearance PBRAppearance {
+    baseColor 0.3 0.3 0.3
+    roughness 0.5
+  }
+}
+
+# 노드 마커 표시 (각 그리드 셀 중앙에 표시)
+# Row 0 (y=0): 노드 1-9
+Solid {
+  translation 0.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_1"
+}
+Solid {
+  translation 1.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_2"
+}
+Solid {
+  translation 2.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_3"
+}
+Solid {
+  translation 3.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_4"
+}
+Solid {
+  translation 4.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_5"
+}
+Solid {
+  translation 5.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_6"
+}
+Solid {
+  translation 6.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_7"
+}
+Solid {
+  translation 7.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_8"
+}
+Solid {
+  translation 8.5 0.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_9"
+}
+
+# Row 1 (y=1): 노드 10-18
+Solid {
+  translation 0.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_10"
+}
+Solid {
+  translation 1.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_11"
+}
+Solid {
+  translation 2.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_12"
+}
+Solid {
+  translation 3.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_13"
+}
+Solid {
+  translation 4.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_14"
+}
+Solid {
+  translation 5.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_15"
+}
+Solid {
+  translation 6.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_16"
+}
+Solid {
+  translation 7.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_17"
+}
+Solid {
+  translation 8.5 1.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_18"
+}
+
+# Row 2 (y=2): 노드 19-27
+Solid {
+  translation 0.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_19"
+}
+Solid {
+  translation 1.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_20"
+}
+Solid {
+  translation 2.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_21"
+}
+Solid {
+  translation 3.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_22"
+}
+Solid {
+  translation 4.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_23"
+}
+Solid {
+  translation 5.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_24"
+}
+Solid {
+  translation 6.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_25"
+}
+Solid {
+  translation 7.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_26"
+}
+Solid {
+  translation 8.5 2.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_27"
+}
+
+# Row 3 (y=3): 노드 28-36
+Solid {
+  translation 0.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_28"
+}
+Solid {
+  translation 1.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_29"
+}
+Solid {
+  translation 2.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_30"
+}
+Solid {
+  translation 3.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_31"
+}
+Solid {
+  translation 4.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_32"
+}
+Solid {
+  translation 5.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_33"
+}
+Solid {
+  translation 6.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_34"
+}
+Solid {
+  translation 7.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_35"
+}
+Solid {
+  translation 8.5 3.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_36"
+}
+
+# Row 4 (y=4): 노드 37-45
+Solid {
+  translation 0.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_37"
+}
+Solid {
+  translation 1.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_38"
+}
+Solid {
+  translation 2.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_39"
+}
+Solid {
+  translation 3.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_40"
+}
+Solid {
+  translation 4.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_41"
+}
+Solid {
+  translation 5.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_42"
+}
+Solid {
+  translation 6.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_43"
+}
+Solid {
+  translation 7.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_44"
+}
+Solid {
+  translation 8.5 4.5 0.001
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 }
+      geometry Plane { size 0.3 0.3 }
+    }
+  ]
+  name "marker_45"
+}
+
+# AGV 로봇 0 - 노드 1에서 시작 (0.5, 0.5)
+Pioneer3dx {
+  translation 0.5 0.5 0.05
+  rotation 0 0 1 0
+  name "agv_0"
+  controller "agv_mqtt_controller"
+  controllerArgs ["0", "1"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+  ]
+}
+
+# AGV 로봇 1 - 노드 37에서 시작 (0.5, 4.5)
+Pioneer3dx {
+  translation 0.5 4.5 0.05
+  rotation 0 0 1 0
+  name "agv_1"
+  controller "agv_mqtt_controller"
+  controllerArgs ["1", "37"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+  ]
+}
