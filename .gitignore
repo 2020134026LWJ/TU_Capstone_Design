@@ -1,0 +1,9 @@
+```
+# 기본적으로 모든 것 무시
+*
+
+# warehouse_system 폴더만 허용
+!warehouse_system/
+
+# .gitignore 자체는 올리기
+!.gitignore
