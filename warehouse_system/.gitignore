@@ -1,0 +1,30 @@
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+*.egg-info/
+
+# 데이터베이스
+*.db
+*.sqlite
+*.sqlite3
+
+# 로그
+logs/
+*.log
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
+
+# Kivy
+.kivy/
+
+# 개인 데이터
+*.xlsx
+data/*
+!data/.gitkeep
