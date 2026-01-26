@@ -25,11 +25,10 @@ AGV 기반 물류 피킹 시스템 졸업작품
 - Python
 - OpenCV (ArUco Marker)
 - MQTT / WebSocket
-
+- Git / GitHub
 
 ## 디렉토리 구조
 
-```
 TU_Capstone_Design/
 │
 ├── webots_simulation/          # [메인] Webots 시뮬레이션 프로젝트
@@ -61,7 +60,6 @@ TU_Capstone_Design/
 │   └── admin_ui_html/          # 관리자 UI HTML 샘플
 │
 └── README.md
-```
 
 
 ## 버전 히스토리
@@ -76,26 +74,19 @@ TU_Capstone_Design/
 ## 실행 방법
 
 ### 1. 서버 실행
-```bash
 cd webots_simulation
 python -m server.main
-```
 
 ### 2. 브릿지 실행
-```bash
 cd webots_simulation
 python bridge.py
-```
 
 ### 3. Webots 시뮬레이션 실행
-```bash
 # Webots에서 worlds/warehouse.wbt 열기
-```
 
 
 ## 시스템 흐름
 
-```
 [Admin UI] --WebSocket--> [Server] --MQTT--> [bridge.py] --MQTT--> [AGV]
      │                       │
      │                       ├── 요청 수신 (작업자 ID, 선반 마커)
@@ -104,4 +95,3 @@ python bridge.py
      │                       └── MQTT 발행
      │
      └── 응답 수신 (경로, 상태)
-```
