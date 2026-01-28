@@ -9,7 +9,13 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
-from paho.mqtt.enums import CallbackAPIVersion
+
+# paho-mqtt 버전 호환성 처리
+try:
+    from paho.mqtt.enums import CallbackAPIVersion
+    PAHO_V2 = True
+except ImportError:
+    PAHO_V2 = False
 
 from .config import Config
 
@@ -25,7 +31,10 @@ class MQTTPublisher:
     def connect(self) -> bool:
         """MQTT 브로커 연결"""
         try:
-            self.client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
+            if PAHO_V2:
+                self.client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
+            else:
+                self.client = mqtt.Client()
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
             self.client.connect(self.config.mqtt_host, self.config.mqtt_port, 60)
@@ -38,15 +47,17 @@ class MQTTPublisher:
             return False
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0 or rc.value == 0:
+        # paho-mqtt 1.x: rc는 int, 2.x: rc는 ReasonCode 객체
+        rc_val = rc if isinstance(rc, int) else getattr(rc, 'value', rc)
+        if rc_val == 0:
             self.connected = True
             print(f"[MQTTPublisher] Connected, rc={rc}")
         else:
             print(f"[MQTTPublisher] Connection failed, rc={rc}")
 
-    def _on_disconnect(self, client, userdata, disconnect_flags, rc, properties=None):
+    def _on_disconnect(self, client, userdata, *args):
         self.connected = False
-        print(f"[MQTTPublisher] Disconnected, rc={rc}")
+        print(f"[MQTTPublisher] Disconnected")
 
     def disconnect(self) -> None:
         """MQTT 연결 해제"""
