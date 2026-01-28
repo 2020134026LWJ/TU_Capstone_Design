@@ -1,9 +1,34 @@
-```
-# 기본적으로 모든 것 무시
-*
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
 
-# warehouse_system 폴더만 허용
-!warehouse_system/
+# Virtual environments
+venv/
+env/
+.env
 
-# .gitignore 자체는 올리기
-!.gitignore
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Webots
+*.bak
+*.wbproj

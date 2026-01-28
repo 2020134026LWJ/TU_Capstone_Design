@@ -4,7 +4,6 @@
 - WebSocket 포트
 - 맵 파일 경로
 - 로봇 설정 파일 경로
-- 선반 설정 파일 경로
 """
 
 import os
@@ -19,8 +18,6 @@ class Config:
     mqtt_port: int = 1883
     mqtt_topic_plan: str = "/agv/plan"
     mqtt_topic_state: str = "/agv/state"
-    mqtt_topic_shelf_cmd: str = "/agv/shelf_cmd"
-    mqtt_topic_task_status: str = "/agv/task_status"
 
     # WebSocket 설정
     websocket_host: str = "0.0.0.0"
@@ -30,7 +27,6 @@ class Config:
     base_dir: str = ""
     map_file: str = ""
     robot_config_file: str = ""
-    shelf_config_file: str = ""
 
     # 경로 계획 설정
     max_time: int = 50
@@ -44,8 +40,6 @@ class Config:
             self.map_file = os.path.join(self.base_dir, "map.json")
         if not self.robot_config_file:
             self.robot_config_file = os.path.join(self.base_dir, "robot_config.json")
-        if not self.shelf_config_file:
-            self.shelf_config_file = os.path.join(self.base_dir, "shelf_config.json")
 
     @classmethod
     def from_env(cls) -> "Config":

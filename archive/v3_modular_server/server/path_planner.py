@@ -2,8 +2,7 @@
 경로 계획 모듈
 - A* 알고리즘 (시간 포함)
 - Prioritized Planning
-- 맵 로드 (노드 타입: M=통로, S=선반, W=작업대)
-- 선반 노드 통과 제외
+- 맵 로드
 """
 
 import json
@@ -17,10 +16,7 @@ class PathPlanner:
     def __init__(self, map_file: str):
         self.map_file = map_file
         self.nodes: Dict[int, Tuple[float, float]] = {}
-        self.node_types: Dict[int, str] = {}          # node_id -> "M"/"S"/"W"
         self.graph: Dict[int, List[Tuple[int, float]]] = {}
-        self.shelf_nodes: Set[int] = set()
-        self.workstation_nodes: Set[int] = set()
         self._load_map()
 
     def _load_map(self) -> None:
@@ -28,15 +24,10 @@ class PathPlanner:
         with open(self.map_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        for n in data["nodes"]:
-            nid = int(n["id"])
-            self.nodes[nid] = (float(n.get("x", 0.0)), float(n.get("y", 0.0)))
-            ntype = n.get("type", "M")
-            self.node_types[nid] = ntype
-            if ntype == "S":
-                self.shelf_nodes.add(nid)
-            elif ntype == "W":
-                self.workstation_nodes.add(nid)
+        self.nodes = {
+            int(n["id"]): (float(n.get("x", 0.0)), float(n.get("y", 0.0)))
+            for n in data["nodes"]
+        }
 
         self.graph = {nid: [] for nid in self.nodes.keys()}
 
@@ -44,10 +35,7 @@ class PathPlanner:
             a, b, c = int(e["from"]), int(e["to"]), float(e.get("cost", 1.0))
             self.graph.setdefault(a, []).append((b, c))
 
-        print(f"[PathPlanner] Loaded {len(self.nodes)} nodes "
-              f"(M={len(self.nodes) - len(self.shelf_nodes) - len(self.workstation_nodes)}, "
-              f"S={len(self.shelf_nodes)}, W={len(self.workstation_nodes)}) "
-              f"from {self.map_file}")
+        print(f"[PathPlanner] Loaded {len(self.nodes)} nodes from {self.map_file}")
 
     def _heuristic(self, a: int, b: int) -> float:
         """유클리드 거리 휴리스틱"""
@@ -59,18 +47,13 @@ class PathPlanner:
         """노드 유효성 검사"""
         return node_id in self.nodes
 
-    def get_node_type(self, node_id: int) -> str:
-        """노드 타입 반환"""
-        return self.node_types.get(node_id, "M")
-
     def astar_with_time(
         self,
         start: int,
         goal: int,
         reserved_nodes: Set[Tuple[int, int]],
         reserved_edges: Set[Tuple[int, int, int]],
-        max_time: int = 50,
-        excluded_transit: Optional[Set[int]] = None
+        max_time: int = 50
     ) -> Optional[List[Tuple[int, int]]]:
         """
         시간 포함 A* 알고리즘
@@ -81,7 +64,6 @@ class PathPlanner:
             reserved_nodes: 예약된 노드 집합 {(node_id, time), ...}
             reserved_edges: 예약된 엣지 집합 {(from_node, to_node, time), ...}
             max_time: 최대 시간
-            excluded_transit: 통과 불가 노드 집합 (start/goal 제외)
 
         Returns:
             시간 포함 경로 [(node, time), ...] 또는 None
@@ -117,11 +99,6 @@ class PathPlanner:
                 neighbors.append((nxt, float(cost)))
 
             for nxt_node, step_cost in neighbors:
-                # 선반 노드 통과 제외 (start/goal은 허용)
-                if excluded_transit and nxt_node in excluded_transit:
-                    if nxt_node != goal and nxt_node != start:
-                        continue
-
                 next_state = (nxt_node, nt)
 
                 # 노드 충돌 검사
@@ -176,8 +153,7 @@ class PathPlanner:
                 goal=goal,
                 reserved_nodes=reserved_nodes,
                 reserved_edges=reserved_edges,
-                max_time=max_time,
-                excluded_transit=self.shelf_nodes
+                max_time=max_time
             )
 
             if path is None:
@@ -210,14 +186,13 @@ class PathPlanner:
         goal: int,
         max_time: int = 50
     ) -> Optional[List[Tuple[int, int]]]:
-        """단일 로봇 경로 계획 (선반 노드 통과 제외 적용)"""
+        """단일 로봇 경로 계획"""
         return self.astar_with_time(
             start=start,
             goal=goal,
             reserved_nodes=set(),
             reserved_edges=set(),
-            max_time=max_time,
-            excluded_transit=self.shelf_nodes
+            max_time=max_time
         )
 
     @staticmethod

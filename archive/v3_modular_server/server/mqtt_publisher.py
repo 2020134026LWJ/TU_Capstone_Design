@@ -118,38 +118,6 @@ class MQTTPublisher:
 
         return self.publish_plan(robots, speed)
 
-    def publish_shelf_command(self, rid: int, command: str, shelf_id: int) -> bool:
-        """
-        선반 명령 발행 (pickup / putdown)
-
-        Args:
-            rid: 로봇 ID
-            command: "pickup" 또는 "putdown"
-            shelf_id: 선반 ID
-        """
-        if not self.client or not self.connected:
-            print("[MQTTPublisher] Not connected")
-            return False
-
-        payload = {
-            "rid": rid,
-            "command": command,
-            "shelf_id": shelf_id,
-            "timestamp": time.time(),
-        }
-
-        try:
-            self.client.publish(
-                self.config.mqtt_topic_shelf_cmd,
-                json.dumps(payload),
-                qos=0,
-            )
-            print(f"[MQTTPublisher] Published shelf_cmd: {command} shelf {shelf_id} by robot {rid}")
-            return True
-        except Exception as e:
-            print(f"[MQTTPublisher] Shelf command publish failed: {e}")
-            return False
-
     def is_connected(self) -> bool:
         """연결 상태 확인"""
         return self.connected
