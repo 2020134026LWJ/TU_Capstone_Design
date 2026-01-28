@@ -16,8 +16,6 @@ from .config import Config
 from .path_planner import PathPlanner
 from .mqtt_publisher import MQTTPublisher
 from .robot_manager import RobotManager
-from .shelf_manager import ShelfManager
-from .task_manager import TaskManager
 from .request_handler import RequestHandler
 from .websocket_handler import WebSocketHandler
 
@@ -35,23 +33,16 @@ class AGVServer:
         self.path_planner = PathPlanner(self.config.map_file)
         self.mqtt_publisher = MQTTPublisher(self.config)
         self.robot_manager = RobotManager(self.config)
-        self.shelf_manager = ShelfManager(self.config.shelf_config_file)
-        self.task_manager = TaskManager(self.shelf_manager, self.path_planner)
         self.request_handler = RequestHandler(
             config=self.config,
             path_planner=self.path_planner,
             mqtt_publisher=self.mqtt_publisher,
-            robot_manager=self.robot_manager,
-            shelf_manager=self.shelf_manager,
-            task_manager=self.task_manager,
+            robot_manager=self.robot_manager
         )
         self.websocket_handler = WebSocketHandler(
             config=self.config,
-            request_handler=self.request_handler,
+            request_handler=self.request_handler
         )
-
-        # 브로드캐스트 콜백 연결
-        self.request_handler.set_broadcast_callback(self.websocket_handler.broadcast)
 
         print("[AGVServer] Modules initialized")
 

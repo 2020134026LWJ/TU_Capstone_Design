@@ -1,0 +1,17 @@
+{
+  "shelves": {
+    "9":  {"label": "S1", "items": ["A", "B", "C"]},
+    "11": {"label": "S2", "items": ["D", "E", "F"]},
+    "13": {"label": "S3", "items": ["G", "H", "I"]},
+    "23": {"label": "S4", "items": ["J", "K", "L"]},
+    "25": {"label": "S5", "items": ["M", "N", "O"]},
+    "27": {"label": "S6", "items": ["P", "Q", "R"]},
+    "37": {"label": "S7", "items": ["S", "T", "U"]},
+    "39": {"label": "S8", "items": ["V", "W", "X"]},
+    "41": {"label": "S9", "items": ["Y", "Z", "AA"]}
+  },
+  "workstations": {
+    "50": {"label": "W1", "gateway_node": 1},
+    "51": {"label": "W2", "gateway_node": 43}
+  }
+}

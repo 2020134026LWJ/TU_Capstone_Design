@@ -62,14 +62,6 @@ class WebSocketHandler:
             return_exceptions=True
         )
 
-    async def broadcast_task_update(self, task_id: str, status: dict):
-        """작업 진행 상황 브로드캐스트"""
-        await self.broadcast({
-            "type": "task_update",
-            "task_id": task_id,
-            **status,
-        })
-
     async def start(self):
         """WebSocket 서버 시작"""
         self.server = await websockets.serve(
