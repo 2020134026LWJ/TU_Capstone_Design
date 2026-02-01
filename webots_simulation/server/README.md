@@ -1,5 +1,43 @@
 # AGV 서버 설계 문서 (v4)
 
+## 빠른 시작
+
+### 1. 의존성 설치
+```bash
+pip install -r requirements.txt
+```
+
+### 2. MQTT 브로커 설치 (Mosquitto)
+```bash
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl start mosquitto
+sudo systemctl enable mosquitto
+```
+
+### 3. 서버 실행
+```bash
+cd webots_simulation
+python -m server.main
+```
+
+### 4. 시뮬레이션 테스트
+```bash
+# 터미널 1: 서버
+python -m server.main
+
+# 터미널 2: Bridge (시뮬레이션 모드)
+cd rpi && python bridge.py
+
+# 터미널 3: Webots
+webots worlds/agv_warehouse.wbt
+
+# 터미널 4: 테스트 요청
+python test_workflow.py
+```
+
+---
+
 ## 1. 전체 시스템 구조
 
 ```
@@ -119,12 +157,19 @@ server/
 #### `request_handler.py` - 요청 처리
 ```
 지원하는 요청 타입:
-1. batch_task_request  - 배치 작업 등록
-2. pick_complete       - 물품 픽업 완료
-3. robot_arrived       - 로봇 도착 알림 (MQTT에서)
-4. status_request      - 전체 상태 조회
-5. task_status_request - 작업 상세 조회
-6. shelf_status_request - 선반 상세 조회
+
+[신규 주문 API]
+1. start_order         - 주문 시작 (DB/엑셀 연동)
+2. shelf_complete      - 선반/서랍 물품 픽업 완료
+3. order_complete      - 주문 완료 확인
+
+[내부/레거시 API]
+4. batch_task_request  - 배치 작업 등록
+5. pick_complete       - 물품 픽업 완료
+6. robot_arrived       - 로봇 도착 알림 (MQTT에서)
+7. status_request      - 전체 상태 조회
+8. task_status_request - 작업 상세 조회
+9. shelf_status_request - 선반 상세 조회
 ```
 
 
@@ -148,7 +193,62 @@ W2(51)─43  44  45  46  47  48  49     (row 6, 통로)
 
 ## 4. 통신 프로토콜
 
-### Admin UI → Server (WebSocket)
+### 신규 주문 API (권장)
+
+**주문 시작:**
+```json
+// 요청
+{"type": "start_order", "사용자ID": 1, "주문번호": 1}
+
+// 응답
+{
+  "type": "start_order_response",
+  "success": true,
+  "사용자ID": 1,
+  "주문번호": 1,
+  "task_id": "ORDER_1_1",
+  "items": ["A", "B", "C"],
+  "message": "주문 1 작업 시작"
+}
+```
+
+**선반/서랍 물품 픽업:**
+```json
+// 요청 (선반번호 형식: "선반ID-서랍번호")
+{"type": "shelf_complete", "사용자ID": 1, "선반번호": "1-1"}
+
+// 응답
+{
+  "type": "shelf_complete_response",
+  "success": true,
+  "사용자ID": 1,
+  "선반번호": "1-1",
+  "item": "A",
+  "action": "continue_picking",
+  "remaining_items": ["B", "C"]
+}
+```
+
+**주문 완료 확인:**
+```json
+// 요청
+{"type": "order_complete", "사용자ID": 1, "주문번호": 1}
+
+// 응답
+{
+  "type": "order_complete_response",
+  "success": true,
+  "사용자ID": 1,
+  "주문번호": 1,
+  "is_complete": true,
+  "status": "completed",
+  "message": "주문 완료"
+}
+```
+
+---
+
+### Admin UI → Server (WebSocket) - 레거시 API
 
 **배치 작업 등록:**
 ```json

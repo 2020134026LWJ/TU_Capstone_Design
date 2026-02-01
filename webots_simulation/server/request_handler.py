@@ -68,6 +68,10 @@ class RequestHandler:
             "task_status_request": self._handle_task_status,
             "shelf_status_request": self._handle_shelf_status,
             "robot_status": self._handle_robot_status,
+            # 새로운 주문 처리 메시지
+            "start_order": self._handle_start_order,
+            "shelf_complete": self._handle_shelf_complete,
+            "order_complete": self._handle_order_complete,
         }
 
         handler = handlers.get(msg_type)
@@ -507,6 +511,194 @@ class RequestHandler:
                 pass
 
         return {"type": "robot_status_ack", "success": True}
+
+    # ─── 새로운 주문 처리 (start_order, shelf_complete, order_complete) ───
+
+    def _handle_start_order(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        주문 시작 처리
+
+        요청:
+        {"type": "start_order", "사용자ID": 1, "주문번호": 1}
+
+        TODO: DB/엑셀에서 주문번호로 작업 목록 로드
+        """
+        user_id = data.get("사용자ID")
+        order_id = data.get("주문번호")
+
+        if user_id is None or order_id is None:
+            return self._error_response("Missing '사용자ID' or '주문번호'")
+
+        # TODO: 여기서 DB/엑셀에서 주문 정보를 가져와야 함
+        # 임시로 작업대와 물품 목록을 하드코딩 (나중에 DB 연동)
+        # 예시: 주문번호 1 → 작업대 50에서 물품 A, B, C 필요
+
+        # ─── DB 연동 부분 (stub) ───
+        order_info = self._get_order_from_db(user_id, order_id)
+        if not order_info:
+            return self._error_response(f"Order {order_id} not found for user {user_id}")
+
+        # batch_task_request 형식으로 변환
+        task_id = f"ORDER_{user_id}_{order_id}"
+        workstation_id = order_info.get("workstation_id", 50)
+        items = order_info.get("items", [])
+
+        # 내부적으로 batch_task 생성
+        batch_data = {
+            "type": "batch_task_request",
+            "tasks": [
+                {
+                    "task_id": task_id,
+                    "workstation_id": workstation_id,
+                    "items": items,
+                }
+            ]
+        }
+
+        result = self._handle_batch_task(batch_data)
+
+        return {
+            "type": "start_order_response",
+            "success": result.get("success", False),
+            "사용자ID": user_id,
+            "주문번호": order_id,
+            "task_id": task_id,
+            "items": items,
+            "message": f"주문 {order_id} 작업 시작",
+        }
+
+    def _get_order_from_db(self, user_id: int, order_id: int) -> Optional[Dict]:
+        """
+        DB/엑셀에서 주문 정보 조회 (stub)
+
+        TODO: 실제 DB 연동 구현
+        반환 형식: {"workstation_id": 50, "items": ["A", "B", "C"]}
+        """
+        # 임시 테스트 데이터 - 나중에 실제 DB 연동으로 교체
+        test_orders = {
+            (1, 1): {"workstation_id": 50, "items": ["A", "B", "C"]},
+            (1, 2): {"workstation_id": 50, "items": ["D", "E"]},
+            (2, 1): {"workstation_id": 51, "items": ["F", "G", "H"]},
+        }
+        return test_orders.get((user_id, order_id))
+
+    def _handle_shelf_complete(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        선반/서랍 물품 픽업 완료
+
+        요청:
+        {"type": "shelf_complete", "사용자ID": 1, "선반번호": "1-1"}
+
+        선반번호 형식: "선반ID-서랍번호" (예: "1-1" = 선반1의 1번 서랍)
+        """
+        user_id = data.get("사용자ID")
+        shelf_drawer = data.get("선반번호")
+
+        if user_id is None or shelf_drawer is None:
+            return self._error_response("Missing '사용자ID' or '선반번호'")
+
+        # 선반번호 파싱: "1-1" → shelf_id=1, drawer=1
+        try:
+            parts = shelf_drawer.split("-")
+            shelf_id = int(parts[0])
+            drawer_num = int(parts[1]) if len(parts) > 1 else 1
+        except (ValueError, IndexError):
+            return self._error_response(f"Invalid 선반번호 format: {shelf_drawer}")
+
+        # 해당 사용자의 현재 진행 중인 작업 찾기
+        task_id = self._find_active_task_for_user(user_id)
+        if not task_id:
+            return self._error_response(f"No active task for user {user_id}")
+
+        # 선반-서랍 → 물품 매핑 (TODO: 실제 매핑 로직)
+        item = self._get_item_from_shelf_drawer(shelf_id, drawer_num)
+
+        # pick_complete 로직 호출
+        pick_data = {
+            "type": "pick_complete",
+            "task_id": task_id,
+            "item": item,
+        }
+
+        result = self._handle_pick_complete(pick_data)
+
+        return {
+            "type": "shelf_complete_response",
+            "success": result.get("success", False),
+            "사용자ID": user_id,
+            "선반번호": shelf_drawer,
+            "item": item,
+            "action": result.get("action"),
+            "remaining_items": result.get("remaining_items_on_shelf", []),
+        }
+
+    def _find_active_task_for_user(self, user_id: int) -> Optional[str]:
+        """사용자의 현재 진행 중인 작업 ID 찾기"""
+        # 작업 ID 형식: ORDER_{user_id}_{order_id}
+        prefix = f"ORDER_{user_id}_"
+        for task in self.task_manager.tasks.values():
+            if task.task_id.startswith(prefix) and task.status == TaskStatus.IN_PROGRESS:
+                return task.task_id
+        return None
+
+    def _get_item_from_shelf_drawer(self, shelf_id: int, drawer_num: int) -> str:
+        """
+        선반-서랍 → 물품명 매핑 (stub)
+
+        TODO: 실제 재고 DB에서 조회
+        """
+        # 임시 매핑 - 선반 노드 ID와 서랍 번호로 물품명 생성
+        # 실제로는 shelf_config.json 또는 DB에서 조회해야 함
+        shelf_node_map = {1: 9, 2: 11, 3: 13, 4: 23, 5: 25, 6: 27, 7: 37, 8: 39, 9: 41}
+        shelf_node = shelf_node_map.get(shelf_id, 9)
+
+        shelf = self.shelf_manager.get_shelf(shelf_node)
+        if shelf and drawer_num <= len(shelf.items):
+            return shelf.items[drawer_num - 1]
+
+        # fallback: 기본 물품명
+        return f"ITEM_{shelf_id}_{drawer_num}"
+
+    def _handle_order_complete(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        주문 완료 확인
+
+        요청:
+        {"type": "order_complete", "사용자ID": 1, "주문번호": 1}
+        """
+        user_id = data.get("사용자ID")
+        order_id = data.get("주문번호")
+
+        if user_id is None or order_id is None:
+            return self._error_response("Missing '사용자ID' or '주문번호'")
+
+        task_id = f"ORDER_{user_id}_{order_id}"
+        task = self.task_manager.get_task(task_id)
+
+        if not task:
+            return self._error_response(f"Task {task_id} not found")
+
+        # 작업 상태 확인
+        is_complete = task.status == TaskStatus.COMPLETED
+        remaining_items = []
+
+        if not is_complete:
+            # 남은 물품 목록
+            current_st = task.get_current_subtask()
+            if current_st and current_st.items_to_pick:
+                remaining_items = current_st.items_to_pick
+
+        return {
+            "type": "order_complete_response",
+            "success": True,
+            "사용자ID": user_id,
+            "주문번호": order_id,
+            "task_id": task_id,
+            "is_complete": is_complete,
+            "status": task.status.value,
+            "remaining_items": remaining_items,
+            "message": "주문 완료" if is_complete else "주문 진행 중",
+        }
 
     # ─── 유틸리티 ───
 
