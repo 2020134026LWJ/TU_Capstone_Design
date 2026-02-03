@@ -38,8 +38,8 @@ TOPIC_LOWCMD = "/agv/lowcmd"
 TOPIC_STATE = "/agv/state"
 
 CELL_SIZE = 1.0  # 그리드 한 칸 크기 (미터)
-GRID_COLS = 9
-GRID_ROWS = 5
+GRID_COLS = 7
+GRID_ROWS = 7
 
 # 이동 파라미터
 MAX_SPEED = 6.28  # 최대 휠 속도 (rad/s)

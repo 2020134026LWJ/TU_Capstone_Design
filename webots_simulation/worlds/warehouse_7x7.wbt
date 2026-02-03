@@ -1,0 +1,165 @@
+#VRML_SIM R2023b utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/adept/pioneer3/protos/Pioneer3dx.proto"
+
+WorldInfo {
+  info [
+    "AGV Warehouse Simulation - 7x7 Grid"
+    "TU Capstone Design Project"
+    "MQTT communication with bridge.py"
+  ]
+  title "AGV Warehouse 7x7"
+  basicTimeStep 16
+  contactProperties [
+    ContactProperties {
+      material1 "floor"
+      material2 "wheel"
+      coulombFriction [2]
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -0.7 0.7 0.14 0.6
+  position 3 -5 12
+}
+
+TexturedBackground {
+  texture "factory"
+}
+
+TexturedBackgroundLight {
+}
+
+# Warehouse floor (7x7 grid + workspace)
+RectangleArena {
+  translation 3.5 3.5 0
+  floorSize 9 9
+  floorTileSize 1 1
+  floorAppearance PBRAppearance {
+    baseColor 0.9 0.9 0.9
+    roughness 1
+    metalness 0
+  }
+  wallHeight 0.1
+  wallAppearance PBRAppearance {
+    baseColor 0.3 0.3 0.3
+    roughness 0.5
+  }
+}
+
+# ============================================================
+# Node markers - 7x7 grid (nodes 1-49)
+# Blue = pathway (M), Green = shelf (S)
+# ============================================================
+
+# Row 0 (y=0): nodes 1-7 (all pathway)
+Solid { translation 0.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_1" }
+Solid { translation 1.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_2" }
+Solid { translation 2.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_3" }
+Solid { translation 3.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_4" }
+Solid { translation 4.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_5" }
+Solid { translation 5.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_6" }
+Solid { translation 6.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_7" }
+
+# Row 1 (y=1): nodes 8-14 (9,11,13 are shelves)
+Solid { translation 0.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_8" }
+Solid { translation 1.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_9_shelf" }
+Solid { translation 2.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_10" }
+Solid { translation 3.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_11_shelf" }
+Solid { translation 4.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_12" }
+Solid { translation 5.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_13_shelf" }
+Solid { translation 6.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_14" }
+
+# Row 2 (y=2): nodes 15-21 (all pathway)
+Solid { translation 0.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_15" }
+Solid { translation 1.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_16" }
+Solid { translation 2.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_17" }
+Solid { translation 3.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_18" }
+Solid { translation 4.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_19" }
+Solid { translation 5.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_20" }
+Solid { translation 6.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_21" }
+
+# Row 3 (y=3): nodes 22-28 (23,25,27 are shelves)
+Solid { translation 0.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_22" }
+Solid { translation 1.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_23_shelf" }
+Solid { translation 2.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_24" }
+Solid { translation 3.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_25_shelf" }
+Solid { translation 4.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_26" }
+Solid { translation 5.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_27_shelf" }
+Solid { translation 6.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_28" }
+
+# Row 4 (y=4): nodes 29-35 (all pathway)
+Solid { translation 0.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_29" }
+Solid { translation 1.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_30" }
+Solid { translation 2.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_31" }
+Solid { translation 3.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_32" }
+Solid { translation 4.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_33" }
+Solid { translation 5.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_34" }
+Solid { translation 6.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_35" }
+
+# Row 5 (y=5): nodes 36-42 (37,39,41 are shelves)
+Solid { translation 0.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_36" }
+Solid { translation 1.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_37_shelf" }
+Solid { translation 2.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_38" }
+Solid { translation 3.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_39_shelf" }
+Solid { translation 4.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_40" }
+Solid { translation 5.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_41_shelf" }
+Solid { translation 6.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_42" }
+
+# Row 6 (y=6): nodes 43-49 (all pathway)
+Solid { translation 0.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_43" }
+Solid { translation 1.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_44" }
+Solid { translation 2.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_45" }
+Solid { translation 3.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_46" }
+Solid { translation 4.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_47" }
+Solid { translation 5.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_48" }
+Solid { translation 6.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_49" }
+
+# ============================================================
+# Workstations (W1=50, W2=51)
+# Yellow markers
+# ============================================================
+Solid { translation -0.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.8 0.8 0.2 } geometry Plane { size 0.6 0.6 } } ] name "marker_50_W1" }
+Solid { translation -0.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.8 0.8 0.2 } geometry Plane { size 0.6 0.6 } } ] name "marker_51_W2" }
+
+# ============================================================
+# AGV Robots (Pioneer 3-DX)
+# ============================================================
+
+# Robot 0 - starts at node 1 (0.5, 0.5)
+Pioneer3dx {
+  translation 0.5 0.5 0
+  rotation 0 0 1 0
+  name "AGV_0"
+  controller "agv_mqtt_controller"
+  controllerArgs ["0", "1"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+  ]
+}
+
+# Robot 1 - starts at node 37 (1.5, 5.5)
+Pioneer3dx {
+  translation 1.5 5.5 0
+  rotation 0 0 1 0
+  name "AGV_1"
+  controller "agv_mqtt_controller"
+  controllerArgs ["1", "37"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+  ]
+}

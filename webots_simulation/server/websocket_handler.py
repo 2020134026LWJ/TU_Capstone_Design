@@ -20,7 +20,7 @@ class WebSocketHandler:
     """WebSocket 서버"""
 
     def __init__(self, config: Config, request_handler: RequestHandler):
-        self.config = config
+        self.config = config 
         self.request_handler = request_handler
         self.clients: Set[WebSocketServerProtocol] = set()
         self.server: Optional[websockets.WebSocketServer] = None
