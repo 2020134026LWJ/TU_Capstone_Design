@@ -105,6 +105,13 @@ class AGVController:
 
     def node_to_world(self, node_id):
         """Node ID → 월드 좌표"""
+        # 작업대 노드 특수 처리
+        if node_id == 50:  # W1
+            return -0.5, 0.5
+        elif node_id == 51:  # W2
+            return -0.5, 6.5
+
+        # 일반 그리드 노드 (1-49)
         idx = node_id - 1
         col = idx % GRID_COLS
         row = idx // GRID_COLS
@@ -114,11 +121,37 @@ class AGVController:
 
     def world_to_node(self, x, y):
         """월드 좌표 → Node ID"""
+        # 작업대 노드 특수 처리 (그리드 외부)
+        if x < 0:
+            if y < 3.5:
+                return 50  # W1
+            else:
+                return 51  # W2
+
         col = int(x / CELL_SIZE)
         row = int(y / CELL_SIZE)
         col = max(0, min(GRID_COLS - 1, col))
         row = max(0, min(GRID_ROWS - 1, row))
         return row * GRID_COLS + col + 1
+
+    def node_to_grid(self, node_id):
+        """Node ID → 그리드 좌표 (col, row)"""
+        idx = node_id - 1
+        col = idx % GRID_COLS
+        row = idx // GRID_COLS
+        return col, row
+
+    def grid_to_node(self, col, row):
+        """그리드 좌표 → Node ID"""
+        if 0 <= col < GRID_COLS and 0 <= row < GRID_ROWS:
+            return row * GRID_COLS + col + 1
+        return None
+
+    def is_adjacent(self, node1, node2):
+        """두 노드가 인접한지 확인 (상하좌우만)"""
+        col1, row1 = self.node_to_grid(node1)
+        col2, row2 = self.node_to_grid(node2)
+        return abs(col1 - col2) + abs(row1 - row2) == 1
 
     def _setup_mqtt(self):
         """MQTT 클라이언트 설정"""
@@ -154,28 +187,50 @@ class AGVController:
 
         if new_target is not None:
             new_target = int(new_target)
-            if new_target != self.target_node and self.state != "TURNING" and self.state != "MOVING":
+            # 이미 같은 목표로 이동 중이면 무시
+            if new_target == self.target_node and self.state in ["TURNING", "MOVING"]:
+                pass  # 이미 이동 중
+            # IDLE 상태이고 다른 노드로 이동 요청
+            elif self.state == "IDLE" and new_target != self.current_node:
                 self._set_new_target(new_target)
 
         self.speed = v
 
     def _set_new_target(self, new_target):
-        """새 목표 Node 설정"""
+        """
+        새 목표 Node 설정 - 인접 노드로만 이동
+        서버에서 A* 경로 계획 후 bridge가 순차적으로 인접 노드만 전달함
+        """
         self.target_node = new_target
         self.target_pos = self.node_to_world(new_target)
         self.progress = 0.0
 
         current_x, current_y = self.get_position()
+        current_node = self.world_to_node(current_x, current_y)
         self.move_start_pos = (current_x, current_y)
+
+        # 디버그: 현재 위치와 목표 위치 출력
+        print(f"[AGV {self.rid}] DEBUG: current_pos=({current_x:.2f}, {current_y:.2f}), current_node={current_node}")
+        print(f"[AGV {self.rid}] DEBUG: target_node={new_target}, target_pos={self.target_pos}")
+
+        # 이미 목표 위치에 있음
+        if current_node == new_target:
+            self.current_node = new_target
+            self.state = "IDLE"
+            print(f"[AGV {self.rid}] Already at target node {new_target}")
+            return
+
+        # 작업대 노드에서 그리드로 이동할 때 특수 처리
+        if self.current_node in [50, 51] or new_target in [50, 51]:
+            print(f"[AGV {self.rid}] Workstation node involved, adjacency OK")
+        elif not self.is_adjacent(current_node, new_target):
+            print(f"[AGV {self.rid}] WARNING: target {new_target} is NOT adjacent to current {current_node}")
 
         # 이동 방향 계산
         dx = self.target_pos[0] - current_x
         dy = self.target_pos[1] - current_y
 
-        if abs(dx) < 0.01 and abs(dy) < 0.01:
-            # 이미 목표 위치에 있음
-            self.state = "IDLE"
-            return
+        print(f"[AGV {self.rid}] DEBUG: dx={dx:.2f}, dy={dy:.2f}")
 
         # 90도 단위로 목표 각도 결정
         if abs(dx) > abs(dy):
@@ -186,7 +241,7 @@ class AGVController:
             self.target_angle = DIR_NORTH if dy > 0 else DIR_SOUTH
 
         self.state = "TURNING"
-        print(f"[AGV {self.rid}] New target: node {new_target}, angle: {math.degrees(self.target_angle):.0f}°")
+        print(f"[AGV {self.rid}] Moving to node {new_target}, angle: {math.degrees(self.target_angle):.0f}°")
 
     def get_position(self):
         """현재 GPS 위치"""
@@ -262,7 +317,7 @@ class AGVController:
                 self.progress = 1.0
 
             if distance < POSITION_TOLERANCE:
-                # arrived
+                # 목표 노드 도착
                 self.stop()
                 self.current_node = self.target_node
                 self.progress = 1.0

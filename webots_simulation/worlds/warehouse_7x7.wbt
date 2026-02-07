@@ -58,85 +58,136 @@ RectangleArena {
 
 # Row 0 (y=0): nodes 1-7 (all pathway)
 Solid { translation 0.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_1" }
+Transform { translation 0.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["1"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_2" }
+Transform { translation 1.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["2"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_3" }
+Transform { translation 2.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["3"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_4" }
+Transform { translation 3.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["4"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_5" }
+Transform { translation 4.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["5"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_6" }
+Transform { translation 5.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["6"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_7" }
+Transform { translation 6.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["7"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 1 (y=1): nodes 8-14 (9,11,13 are shelves)
 Solid { translation 0.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_8" }
+Transform { translation 0.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["8"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_9_shelf" }
+Transform { translation 1.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["9"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_10" }
+Transform { translation 2.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["10"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_11_shelf" }
+Transform { translation 3.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["11"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_12" }
+Transform { translation 4.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["12"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_13_shelf" }
+Transform { translation 5.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["13"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 1.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_14" }
+Transform { translation 6.5 1.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["14"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 2 (y=2): nodes 15-21 (all pathway)
 Solid { translation 0.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_15" }
+Transform { translation 0.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["15"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_16" }
+Transform { translation 1.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["16"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_17" }
+Transform { translation 2.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["17"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_18" }
+Transform { translation 3.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["18"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_19" }
+Transform { translation 4.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["19"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_20" }
+Transform { translation 5.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["20"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 2.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_21" }
+Transform { translation 6.5 2.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["21"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 3 (y=3): nodes 22-28 (23,25,27 are shelves)
 Solid { translation 0.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_22" }
+Transform { translation 0.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["22"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_23_shelf" }
+Transform { translation 1.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["23"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_24" }
+Transform { translation 2.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["24"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_25_shelf" }
+Transform { translation 3.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["25"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_26" }
+Transform { translation 4.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["26"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_27_shelf" }
+Transform { translation 5.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["27"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 3.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_28" }
+Transform { translation 6.5 3.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["28"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 4 (y=4): nodes 29-35 (all pathway)
 Solid { translation 0.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_29" }
+Transform { translation 0.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["29"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_30" }
+Transform { translation 1.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["30"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_31" }
+Transform { translation 2.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["31"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_32" }
+Transform { translation 3.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["32"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_33" }
+Transform { translation 4.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["33"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_34" }
+Transform { translation 5.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["34"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 4.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_35" }
+Transform { translation 6.5 4.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["35"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 5 (y=5): nodes 36-42 (37,39,41 are shelves)
 Solid { translation 0.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_36" }
+Transform { translation 0.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["36"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_37_shelf" }
+Transform { translation 1.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["37"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_38" }
+Transform { translation 2.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["38"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_39_shelf" }
+Transform { translation 3.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["39"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_40" }
+Transform { translation 4.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["40"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 } geometry Plane { size 0.5 0.5 } } ] name "marker_41_shelf" }
+Transform { translation 5.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["41"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 5.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_42" }
+Transform { translation 6.5 5.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["42"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # Row 6 (y=6): nodes 43-49 (all pathway)
 Solid { translation 0.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_43" }
+Transform { translation 0.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["43"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 1.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_44" }
+Transform { translation 1.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["44"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 2.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_45" }
+Transform { translation 2.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["45"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 3.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_46" }
+Transform { translation 3.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["46"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 4.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_47" }
+Transform { translation 4.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["47"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 5.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_48" }
+Transform { translation 5.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["48"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation 6.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.8 } geometry Plane { size 0.3 0.3 } } ] name "marker_49" }
+Transform { translation 6.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 1 1 1 emissiveColor 1 1 1 } geometry Text { string ["49"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # ============================================================
 # Workstations (W1=50, W2=51)
 # Yellow markers
 # ============================================================
 Solid { translation -0.5 0.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.8 0.8 0.2 } geometry Plane { size 0.6 0.6 } } ] name "marker_50_W1" }
+Transform { translation -0.5 0.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["50"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 Solid { translation -0.5 6.5 0.001 children [ Shape { appearance PBRAppearance { baseColor 0.8 0.8 0.2 } geometry Plane { size 0.6 0.6 } } ] name "marker_51_W2" }
+Transform { translation -0.5 6.5 0.05 rotation 1 0 0 1.5708 children [ Shape { appearance PBRAppearance { baseColor 0 0 0 emissiveColor 0 0 0 } geometry Text { string ["51"] fontStyle FontStyle { size 0.3 justify ["MIDDLE" "MIDDLE"] } } } ] }
 
 # ============================================================
 # AGV Robots (Pioneer 3-DX)
 # ============================================================
 
-# Robot 0 - starts at node 1 (0.5, 0.5)
+# Robot 1 - starts at W1 (node 50) - position (-0.5, 0.5)
 Pioneer3dx {
-  translation 0.5 0.5 0
+  translation -0.5 0.5 0
   rotation 0 0 1 0
-  name "AGV_0"
+  name "AGV_1"
   controller "agv_mqtt_controller"
-  controllerArgs ["0", "1"]
+  controllerArgs ["1", "50"]
   extensionSlot [
     GPS {
       name "gps"
@@ -147,13 +198,13 @@ Pioneer3dx {
   ]
 }
 
-# Robot 1 - starts at node 37 (1.5, 5.5)
+# Robot 2 - starts at W2 (node 51) - position (-0.5, 6.5)
 Pioneer3dx {
-  translation 1.5 5.5 0
+  translation -0.5 6.5 0
   rotation 0 0 1 0
-  name "AGV_1"
+  name "AGV_2"
   controller "agv_mqtt_controller"
-  controllerArgs ["1", "37"]
+  controllerArgs ["2", "51"]
   extensionSlot [
     GPS {
       name "gps"

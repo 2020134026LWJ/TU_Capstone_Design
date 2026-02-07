@@ -21,12 +21,17 @@ from .config import Config
 
 
 class MQTTPublisher:
-    """MQTT 발행기"""
+    """MQTT 발행기 + 구독기"""
 
     def __init__(self, config: Config):
         self.config = config
         self.client: Optional[mqtt.Client] = None
         self.connected = False
+        self._message_callback = None  # 메시지 수신 콜백
+
+    def set_message_callback(self, callback):
+        """MQTT 메시지 수신 콜백 설정"""
+        self._message_callback = callback
 
     def connect(self) -> bool:
         """MQTT 브로커 연결"""
@@ -37,6 +42,7 @@ class MQTTPublisher:
                 self.client = mqtt.Client()
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
+            self.client.on_message = self._on_message
             self.client.connect(self.config.mqtt_host, self.config.mqtt_port, 60)
             self.client.loop_start()
             time.sleep(0.5)  # 연결 대기
@@ -52,8 +58,27 @@ class MQTTPublisher:
         if rc_val == 0:
             self.connected = True
             print(f"[MQTTPublisher] Connected, rc={rc}")
+            # /agv/arrived 토픽 구독
+            client.subscribe("/agv/arrived")
+            print(f"[MQTTPublisher] Subscribed to /agv/arrived")
         else:
             print(f"[MQTTPublisher] Connection failed, rc={rc}")
+
+    def _on_message(self, client, userdata, msg):
+        """MQTT 메시지 수신 처리"""
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+            print(f"[MQTTPublisher] Received on {msg.topic}: {payload}")
+
+            if msg.topic == "/agv/arrived" and self._message_callback:
+                # robot_arrived 형식으로 변환하여 콜백 호출
+                self._message_callback(json.dumps({
+                    "type": "robot_arrived",
+                    "rid": payload.get("rid"),
+                    "node": payload.get("node"),
+                }))
+        except Exception as e:
+            print(f"[MQTTPublisher] Message parse error: {e}")
 
     def _on_disconnect(self, client, userdata, *args):
         self.connected = False
