@@ -2,9 +2,11 @@
 AGV MQTT Controller for Webots Simulation
 TU Capstone Design - AGV Logistics Picking System
 
-Differential Drive AGV Controller
+Differential Drive AGV Controller with KIVA-style Lift
 - Grid-based 90-degree movement
 - MQTT communication with bridge.py
+- Supervisor API for shelf manipulation
+- Lift motor for picking up / putting down shelves
 """
 
 import json
@@ -17,7 +19,7 @@ import os
 controller_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, controller_dir)
 
-from controller import Robot
+from controller import Supervisor
 
 # MQTT 라이브러리
 try:
@@ -35,7 +37,11 @@ except ImportError as e:
 MQTT_HOST = "localhost"
 MQTT_PORT = 1883
 TOPIC_LOWCMD = "/agv/lowcmd"
+TOPIC_PLAN = "/agv/plan"
 TOPIC_STATE = "/agv/state"
+TOPIC_ARRIVED = "/agv/arrived"
+TOPIC_SHELF_CMD = "/agv/shelf_cmd"
+TOPIC_SHELF_ACK = "/agv/shelf_ack"
 
 CELL_SIZE = 1.0  # 그리드 한 칸 크기 (미터)
 GRID_COLS = 7
@@ -55,12 +61,18 @@ DIR_NORTH = math.pi/2    # +Y 방향 (위)
 DIR_WEST = math.pi       # -X 방향 (왼쪽)
 DIR_SOUTH = -math.pi/2   # -Y 방향 (아래)
 
+# 리프트 파라미터
+LIFT_UP = 0.10       # 리프트 최대 높이 (m)
+LIFT_DOWN = 0.0      # 리프트 최소 높이 (m)
+LIFT_TOLERANCE = 0.005  # 리프트 위치 허용 오차 (m)
+SHELF_CARRY_Z = 0.06    # 선반이 AGV 위에 올라간 높이 오프셋
+
 
 class AGVController:
-    """디퍼렌셜 드라이브 AGV 컨트롤러"""
+    """디퍼렌셜 드라이브 AGV 컨트롤러 (Supervisor + Lift)"""
 
     def __init__(self):
-        self.robot = Robot()
+        self.robot = Supervisor()
         self.timestep = int(self.robot.getBasicTimeStep())
 
         # 컨트롤러 인자: [rid, start_node]
@@ -85,17 +97,35 @@ class AGVController:
         self.left_motor.setVelocity(0.0)
         self.right_motor.setVelocity(0.0)
 
+        # 리프트 모터/센서 초기화
+        self.lift_motor = self.robot.getDevice("lift_motor")
+        self.lift_sensor = self.robot.getDevice("lift_sensor")
+        self.lift_sensor.enable(self.timestep)
+        self.lift_motor.setPosition(LIFT_DOWN)
+
         # 상태 변수
         self.current_node = self.start_node
         self.target_node = self.start_node
         self.speed = 0.0
         self.progress = 0.0
 
-        # 이동 상태 머신
-        self.state = "IDLE"  # IDLE, TURNING, MOVING, ARRIVED
+        # 이동 상태 머신: IDLE, TURNING, MOVING, LIFTING, LOWERING
+        self.state = "IDLE"
         self.target_angle = 0.0
         self.target_pos = self.node_to_world(self.start_node)
         self.move_start_pos = self.target_pos
+
+        # 경로 큐 (서버에서 /agv/plan으로 받은 전체 경로를 노드 단위로 분해)
+        self.path_queue = []       # [node1, node2, ...] 이동할 노드 큐
+        self.final_goal = None     # 최종 목적지 노드
+
+        # 선반 운반 상태 (Supervisor API)
+        self.carrying_shelf_id = None        # 운반 중인 선반 노드 ID (예: 9)
+        self.carrying_shelf_node = None      # Supervisor Node 객체
+        self.carrying_shelf_field = None     # translation 필드 참조
+
+        # 대기 중인 shelf_cmd
+        self.pending_shelf_cmd = None  # {"command": "pickup"/"putdown", "shelf_id": 9}
 
         # MQTT
         self.mqtt_client = None
@@ -169,7 +199,9 @@ class AGVController:
     def _on_mqtt_connect(self, client, userdata, flags, rc):
         print(f"[AGV {self.rid}] MQTT connected, rc={rc}")
         client.subscribe(TOPIC_LOWCMD)
-        print(f"[AGV {self.rid}] Subscribed: {TOPIC_LOWCMD}")
+        client.subscribe(TOPIC_PLAN)
+        client.subscribe(TOPIC_SHELF_CMD)
+        print(f"[AGV {self.rid}] Subscribed: {TOPIC_LOWCMD}, {TOPIC_PLAN}, {TOPIC_SHELF_CMD}")
         self.mqtt_connected = True
 
     def _on_mqtt_message(self, client, userdata, msg):
@@ -178,7 +210,17 @@ class AGVController:
         except Exception as e:
             return
 
-        # rid 필터링
+        # /agv/plan 메시지 처리 (서버에서 전체 경로 수신)
+        if msg.topic == TOPIC_PLAN:
+            self._handle_plan_message(cmd)
+            return
+
+        # /agv/shelf_cmd 메시지 처리
+        if msg.topic == TOPIC_SHELF_CMD:
+            self._handle_shelf_cmd(cmd)
+            return
+
+        # /agv/lowcmd 메시지 처리 (기존 호환: 노드 단위 명령)
         if "rid" in cmd and int(cmd["rid"]) != self.rid:
             return
 
@@ -187,14 +229,110 @@ class AGVController:
 
         if new_target is not None:
             new_target = int(new_target)
-            # 이미 같은 목표로 이동 중이면 무시
             if new_target == self.target_node and self.state in ["TURNING", "MOVING"]:
-                pass  # 이미 이동 중
-            # IDLE 상태이고 다른 노드로 이동 요청
+                pass
             elif self.state == "IDLE" and new_target != self.current_node:
                 self._set_new_target(new_target)
 
         self.speed = v
+
+    def _handle_plan_message(self, plan):
+        """
+        /agv/plan 메시지에서 자신의 경로 추출 → 경로 큐에 저장
+
+        서버 메시지 형식:
+        {
+            "robots": [
+                {"rid": 1, "node_path": [50, 1, 2, 9], "speed": 0.3},
+                {"rid": 2, "node_path": [51, 43, 37], "speed": 0.3}
+            ],
+            "speed": 0.3
+        }
+        """
+        robots = plan.get("robots", [])
+        speed = float(plan.get("speed", 0.3))
+
+        for robot_info in robots:
+            rid = int(robot_info.get("rid", -1))
+            if rid != self.rid:
+                continue
+
+            node_path = robot_info.get("node_path", [])
+            if len(node_path) < 2:
+                print(f"[AGV {self.rid}] Plan received but path too short: {node_path}")
+                return
+
+            # 첫 노드는 현재 위치이므로 제외, 나머지를 큐에 저장
+            self.path_queue = list(node_path[1:])
+            self.final_goal = node_path[-1]
+            self.speed = speed
+
+            print(f"[AGV {self.rid}] Plan received: {node_path} (queue: {self.path_queue})")
+
+            # 첫 번째 노드로 이동 시작
+            self._process_next_in_queue()
+            return
+
+    def _handle_shelf_cmd(self, cmd):
+        """
+        /agv/shelf_cmd 메시지 처리
+
+        메시지 형식:
+        {"rid": 1, "command": "pickup", "shelf_id": 9}
+        {"rid": 1, "command": "putdown", "shelf_id": 9}
+        """
+        rid = int(cmd.get("rid", -1))
+        if rid != self.rid:
+            return
+
+        command = cmd.get("command")
+        shelf_id = int(cmd.get("shelf_id", 0))
+
+        print(f"[AGV {self.rid}] Shelf cmd received: {command} shelf {shelf_id}")
+
+        # 대기 큐에 저장 (IDLE 상태에서 처리)
+        self.pending_shelf_cmd = {"command": command, "shelf_id": shelf_id}
+
+    def _process_next_in_queue(self):
+        """경로 큐에서 다음 노드를 꺼내 이동 시작"""
+        if not self.path_queue:
+            return False
+
+        next_node = self.path_queue.pop(0)
+        print(f"[AGV {self.rid}] Queue -> node {next_node} (remaining: {len(self.path_queue)})")
+        self._set_new_target(next_node)
+        return True
+
+    def _publish_arrived(self, node):
+        """최종 목적지 도착 시 /agv/arrived 발행"""
+        if not self.mqtt_connected:
+            return
+
+        payload = {
+            "rid": self.rid,
+            "node": node,
+        }
+        try:
+            self.mqtt_client.publish(TOPIC_ARRIVED, json.dumps(payload), qos=1)
+            print(f"[AGV {self.rid}] Published arrived: node {node}")
+        except Exception as e:
+            print(f"[AGV {self.rid}] Arrived publish failed: {e}")
+
+    def _publish_shelf_ack(self, command, shelf_id):
+        """리프트 동작 완료 후 shelf_ack 발행"""
+        if not self.mqtt_connected:
+            return
+
+        payload = {
+            "rid": self.rid,
+            "command": command,
+            "shelf_id": shelf_id,
+        }
+        try:
+            self.mqtt_client.publish(TOPIC_SHELF_ACK, json.dumps(payload), qos=1)
+            print(f"[AGV {self.rid}] Published shelf_ack: {command} shelf {shelf_id}")
+        except Exception as e:
+            print(f"[AGV {self.rid}] Shelf ack publish failed: {e}")
 
     def _set_new_target(self, new_target):
         """
@@ -272,19 +410,102 @@ class AGVController:
         """정지"""
         self.set_motors(0.0, 0.0)
 
+    def _start_lift(self, shelf_id):
+        """리프트 올리기 시작 (pickup)"""
+        print(f"[AGV {self.rid}] Starting LIFT for shelf {shelf_id}")
+        self.carrying_shelf_id = shelf_id
+
+        # Supervisor API로 선반 노드 참조 획득
+        def_name = f"SHELF_{shelf_id}"
+        shelf_node = self.robot.getFromDef(def_name)
+        if shelf_node:
+            self.carrying_shelf_node = shelf_node
+            self.carrying_shelf_field = shelf_node.getField("translation")
+            print(f"[AGV {self.rid}] Supervisor: got shelf DEF={def_name}")
+        else:
+            print(f"[AGV {self.rid}] WARNING: Supervisor cannot find DEF={def_name}")
+
+        # 리프트 모터 UP
+        self.lift_motor.setPosition(LIFT_UP)
+        self.state = "LIFTING"
+
+    def _start_lower(self, shelf_id):
+        """리프트 내리기 시작 (putdown)"""
+        print(f"[AGV {self.rid}] Starting LOWER for shelf {shelf_id}")
+
+        # 리프트 모터 DOWN
+        self.lift_motor.setPosition(LIFT_DOWN)
+        self.state = "LOWERING"
+
+    def _update_shelf_position(self):
+        """운반 중인 선반을 AGV 위치에 맞춰 이동 (매 timestep)"""
+        if self.carrying_shelf_field is None:
+            return
+
+        agv_x, agv_y = self.get_position()
+        self.carrying_shelf_field.setSFVec3f([agv_x, agv_y, SHELF_CARRY_Z])
+
     def update(self):
         """상태 머신 업데이트"""
-        if self.speed <= 0 and self.state not in ["TURNING", "MOVING"]:
+
+        # 선반 운반 중이면 매 timestep 위치 업데이트
+        if self.state == "MOVING" and self.carrying_shelf_node is not None:
+            self._update_shelf_position()
+
+        if self.state == "IDLE":
             self.stop()
+
+            # IDLE 상태에서 pending_shelf_cmd 확인
+            if self.pending_shelf_cmd is not None:
+                cmd = self.pending_shelf_cmd
+                self.pending_shelf_cmd = None
+                if cmd["command"] == "pickup":
+                    self._start_lift(cmd["shelf_id"])
+                elif cmd["command"] == "putdown":
+                    self._start_lower(cmd["shelf_id"])
+                return
+
+            if self.speed <= 0:
+                return
+
+        elif self.state == "LIFTING":
+            self.stop()
+            # 리프트 센서 확인
+            lift_pos = self.lift_sensor.getValue()
+            if abs(lift_pos - LIFT_UP) < LIFT_TOLERANCE:
+                # 리프트 올리기 완료
+                print(f"[AGV {self.rid}] LIFT complete (pos={lift_pos:.4f})")
+                # 선반 최종 위치 한번 더 설정
+                self._update_shelf_position()
+                self._publish_shelf_ack("pickup", self.carrying_shelf_id)
+                self.state = "IDLE"
+            return
+
+        elif self.state == "LOWERING":
+            self.stop()
+            # 리프트 센서 확인
+            lift_pos = self.lift_sensor.getValue()
+            if abs(lift_pos - LIFT_DOWN) < LIFT_TOLERANCE:
+                # 리프트 내리기 완료 → 선반 최종 위치 고정 후 참조 해제
+                print(f"[AGV {self.rid}] LOWER complete (pos={lift_pos:.4f})")
+                if self.carrying_shelf_field is not None:
+                    # 선반을 현재 AGV 위치의 바닥에 놓기
+                    agv_x, agv_y = self.get_position()
+                    self.carrying_shelf_field.setSFVec3f([agv_x, agv_y, 0.0])
+                    print(f"[AGV {self.rid}] Shelf placed at ({agv_x:.2f}, {agv_y:.2f})")
+
+                shelf_id = self.carrying_shelf_id
+                self.carrying_shelf_node = None
+                self.carrying_shelf_field = None
+                self.carrying_shelf_id = None
+                self._publish_shelf_ack("putdown", shelf_id)
+                self.state = "IDLE"
             return
 
         current_x, current_y = self.get_position()
         current_angle = self.get_bearing()
 
-        if self.state == "IDLE":
-            self.stop()
-
-        elif self.state == "TURNING":
+        if self.state == "TURNING":
             # 목표 각도로 회전
             angle_diff = self.normalize_angle(self.target_angle - current_angle)
 
@@ -323,6 +544,14 @@ class AGVController:
                 self.progress = 1.0
                 self.state = "IDLE"
                 print(f"[AGV {self.rid}] Node {self.current_node} arrived")
+
+                # 경로 큐에 다음 노드가 있으면 계속 이동
+                if self.path_queue:
+                    self._process_next_in_queue()
+                elif self.final_goal is not None and self.current_node == self.final_goal:
+                    # 최종 목적지 도착 → 서버에 알림
+                    self._publish_arrived(self.current_node)
+                    self.final_goal = None
             else:
                 # 직진 중 방향 보정
                 angle_to_target = math.atan2(dy, dx)
@@ -348,6 +577,7 @@ class AGVController:
             "target_node": self.target_node,
             "progress": round(self.progress, 2),
             "state": self.state,
+            "carrying_shelf": self.carrying_shelf_id,
             "ts": int(time.time())
         }
 
@@ -358,7 +588,7 @@ class AGVController:
 
     def run(self):
         """메인 루프"""
-        print(f"[AGV {self.rid}] Started")
+        print(f"[AGV {self.rid}] Started (Supervisor mode)")
 
         # 초기 센서 읽기 대기
         for _ in range(10):

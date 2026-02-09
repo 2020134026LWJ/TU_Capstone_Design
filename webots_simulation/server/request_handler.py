@@ -72,6 +72,7 @@ class RequestHandler:
             "batch_task_request": self._handle_batch_task,
             "pick_complete": self._handle_pick_complete,
             "robot_arrived": self._handle_robot_arrived,
+            "shelf_ack": self._handle_shelf_ack,
             "status_request": self._handle_status_request,
             "task_status_request": self._handle_task_status,
             "shelf_status_request": self._handle_shelf_status,
@@ -227,31 +228,17 @@ class RequestHandler:
         st_type = current_st.subtask_type
 
         if st_type == SubTaskType.GO_TO_SHELF:
-            # 선반에 도착 → 선반 들어올리기 단계로
-            result = self.task_manager.handle_subtask_complete(task.task_id)
-            next_st = task.get_current_subtask()
-
-            if next_st and next_st.subtask_type == SubTaskType.PICKUP_SHELF:
-                self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
-                self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
-                self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)
-
-                # 픽업 완료 → 다음 단계 (배달)로 자동 진행
-                result = self.task_manager.handle_subtask_complete(task.task_id)
-                next_st = task.get_current_subtask()
-
-                if next_st and next_st.subtask_type == SubTaskType.DELIVER_TO_WS:
-                    self.robot_manager.set_robot_status(robot.rid, RobotStatus.DELIVERING_TO_WS)
-                    self._plan_and_publish_move(
-                        robot.rid, robot.current_node, next_st.target_node
-                    )
-                    return {
-                        "type": "robot_arrived_ack",
-                        "success": True,
-                        "action": "delivering_to_ws",
-                        "shelf_id": next_st.shelf_id,
-                        "target_node": next_st.target_node,
-                    }
+            # 선반에 도착 → shelf_cmd "pickup" 발행 (AGV 리프트 동작 대기)
+            shelf_id = current_st.target_node  # GO_TO_SHELF의 target_node가 선반 노드
+            self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
+            self.mqtt_publisher.publish_shelf_command(robot.rid, "pickup", shelf_id)
+            print(f"[RequestHandler] Robot {robot.rid}: shelf_cmd pickup {shelf_id} published, waiting for ack")
+            return {
+                "type": "robot_arrived_ack",
+                "success": True,
+                "action": "waiting_pickup_ack",
+                "shelf_id": shelf_id,
+            }
 
         elif st_type == SubTaskType.DELIVER_TO_WS:
             # 작업대에 도착 → 픽업 대기
@@ -272,58 +259,174 @@ class RequestHandler:
                 }
 
         elif st_type in (SubTaskType.RETURN_SHELF, SubTaskType.FORWARD_SHELF):
-            # 선반 복귀/포워딩 완료
+            # 선반 복귀/포워딩 도착 → shelf_cmd "putdown" 발행 (AGV 리프트 내리기 대기)
             shelf_id = current_st.shelf_id
-
-            if st_type == SubTaskType.RETURN_SHELF:
-                # 선반 반납 완료
-                self.shelf_manager.mark_shelf_returned(shelf_id, current_st.target_node)
-                self.robot_manager.set_carrying_shelf(robot.rid, None)
-
-                result = self.task_manager.handle_subtask_complete(task.task_id)
-
-                if result.get("action") == "task_complete":
-                    self.robot_manager.complete_task(robot.rid)
-                    # 다음 대기 작업 배정 시도
-                    self._try_assign_pending_tasks()
-                    return {
-                        "type": "robot_arrived_ack",
-                        "success": True,
-                        "action": "task_complete",
-                        "task_id": task.task_id,
-                    }
-                elif result.get("action") == "next_subtask":
-                    # 다음 선반으로 이동
-                    next_st = task.get_current_subtask()
-                    if next_st:
-                        self.robot_manager.set_robot_status(robot.rid, RobotStatus.MOVING_TO_SHELF)
-                        self._plan_and_publish_move(
-                            robot.rid, robot.current_node, next_st.target_node
-                        )
-                        return {
-                            "type": "robot_arrived_ack",
-                            "success": True,
-                            "action": "moving_to_next_shelf",
-                            "target_node": next_st.target_node,
-                        }
-
-            elif st_type == SubTaskType.FORWARD_SHELF:
-                # 다른 작업대에 도착 → 픽업 대기
-                self.shelf_manager.mark_shelf_at_workstation(shelf_id, current_st.target_node)
-                result = self.task_manager.handle_subtask_complete(task.task_id)
-                next_st = task.get_current_subtask()
-
-                if next_st and next_st.subtask_type == SubTaskType.WAIT_PICKING:
-                    self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
-                    return {
-                        "type": "robot_arrived_ack",
-                        "success": True,
-                        "action": "wait_picking_at_forward_ws",
-                        "shelf_id": shelf_id,
-                        "items_to_pick": next_st.items_to_pick,
-                    }
+            self.mqtt_publisher.publish_shelf_command(robot.rid, "putdown", shelf_id)
+            print(f"[RequestHandler] Robot {robot.rid}: shelf_cmd putdown {shelf_id} "
+                  f"(type={st_type.value}) published, waiting for ack")
+            return {
+                "type": "robot_arrived_ack",
+                "success": True,
+                "action": "waiting_putdown_ack",
+                "shelf_id": shelf_id,
+                "subtask_type": st_type.value,
+            }
 
         return {"type": "robot_arrived_ack", "success": True, "action": "unknown_state"}
+
+    # ─── 선반 리프트 ACK 처리 ───
+
+    def _handle_shelf_ack(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        AGV에서 리프트 동작 완료 신호 수신
+
+        요청:
+        {"type": "shelf_ack", "rid": 1, "command": "pickup", "shelf_id": 9}
+        {"type": "shelf_ack", "rid": 1, "command": "putdown", "shelf_id": 9}
+        """
+        rid = data.get("rid")
+        command = data.get("command")
+        shelf_id = data.get("shelf_id")
+
+        if rid is None or command is None or shelf_id is None:
+            return self._error_response("Missing 'rid', 'command', or 'shelf_id' in shelf_ack")
+
+        print(f"[RequestHandler] shelf_ack: robot {rid} {command} shelf {shelf_id}")
+
+        robot = self.robot_manager.get_robot(rid)
+        if not robot:
+            return self._error_response(f"Robot {rid} not found")
+
+        task_id = robot.current_task_id
+        if not task_id:
+            return {"type": "shelf_ack_response", "success": True, "action": "no_task"}
+
+        task = self.task_manager.get_task(task_id)
+        if not task:
+            return {"type": "shelf_ack_response", "success": True, "action": "task_not_found"}
+
+        current_st = task.get_current_subtask()
+        if not current_st:
+            return {"type": "shelf_ack_response", "success": True, "action": "no_subtask"}
+
+        if command == "pickup":
+            return self._handle_pickup_ack(robot, task, current_st)
+        elif command == "putdown":
+            return self._handle_putdown_ack(robot, task, current_st)
+
+        return {"type": "shelf_ack_response", "success": False, "error": f"Unknown command: {command}"}
+
+    def _handle_pickup_ack(self, robot, task, current_st) -> Dict[str, Any]:
+        """
+        pickup ack 수신 → GO_TO_SHELF 완료 → PICKUP_SHELF 완료 → DELIVER_TO_WS 시작
+        """
+        # GO_TO_SHELF 완료
+        result = self.task_manager.handle_subtask_complete(task.task_id)
+        next_st = task.get_current_subtask()
+
+        if next_st and next_st.subtask_type == SubTaskType.PICKUP_SHELF:
+            self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
+            self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)
+
+            # PICKUP_SHELF 완료 → 다음 단계 (배달)로 자동 진행
+            result = self.task_manager.handle_subtask_complete(task.task_id)
+            next_st = task.get_current_subtask()
+
+            if next_st and next_st.subtask_type == SubTaskType.DELIVER_TO_WS:
+                self.robot_manager.set_robot_status(robot.rid, RobotStatus.DELIVERING_TO_WS)
+                self._plan_and_publish_move(
+                    robot.rid, robot.current_node, next_st.target_node
+                )
+                return {
+                    "type": "shelf_ack_response",
+                    "success": True,
+                    "action": "delivering_to_ws",
+                    "shelf_id": next_st.shelf_id,
+                    "target_node": next_st.target_node,
+                }
+
+        return {"type": "shelf_ack_response", "success": True, "action": "pickup_processed"}
+
+    def _handle_putdown_ack(self, robot, task, current_st) -> Dict[str, Any]:
+        """
+        putdown ack 수신 → RETURN_SHELF or FORWARD_SHELF 완료 처리
+        """
+        st_type = current_st.subtask_type
+        shelf_id = current_st.shelf_id
+
+        if st_type == SubTaskType.RETURN_SHELF:
+            # 선반 반납 완료
+            self.shelf_manager.mark_shelf_returned(shelf_id, current_st.target_node)
+            self.robot_manager.set_carrying_shelf(robot.rid, None)
+
+            result = self.task_manager.handle_subtask_complete(task.task_id)
+
+            if result.get("action") == "task_complete":
+                self.robot_manager.complete_task(robot.rid)
+                self._try_assign_pending_tasks()
+                return {
+                    "type": "shelf_ack_response",
+                    "success": True,
+                    "action": "task_complete",
+                    "task_id": task.task_id,
+                }
+            elif result.get("action") == "next_subtask":
+                next_st = task.get_current_subtask()
+                if next_st:
+                    self.robot_manager.set_robot_status(robot.rid, RobotStatus.MOVING_TO_SHELF)
+                    self._plan_and_publish_move(
+                        robot.rid, robot.current_node, next_st.target_node
+                    )
+                    return {
+                        "type": "shelf_ack_response",
+                        "success": True,
+                        "action": "moving_to_next_shelf",
+                        "target_node": next_st.target_node,
+                    }
+
+        elif st_type == SubTaskType.FORWARD_SHELF:
+            # 다른 작업대에 선반 내려놓기
+            forward_ws = current_st.target_node
+            self.shelf_manager.mark_shelf_at_workstation(shelf_id, forward_ws)
+            self.robot_manager.set_carrying_shelf(robot.rid, None)
+
+            # 상대방 작업의 서브태스크 수정 (GO_TO_SHELF 목적지 → 작업대)
+            modified_task = self.task_manager.handle_shelf_forwarded(shelf_id, forward_ws)
+            if modified_task:
+                print(f"[RequestHandler] Shelf {shelf_id} forwarded to WS {forward_ws}, "
+                      f"updated task {modified_task}")
+
+            # 이 로봇의 작업 진행 (다음 선반 or 완료)
+            result = self.task_manager.handle_subtask_complete(task.task_id)
+
+            if result.get("action") == "task_complete":
+                self.robot_manager.complete_task(robot.rid)
+                self._try_assign_pending_tasks()
+                return {
+                    "type": "shelf_ack_response",
+                    "success": True,
+                    "action": "forward_complete_task_done",
+                    "shelf_id": shelf_id,
+                    "forwarded_to": forward_ws,
+                    "task_id": task.task_id,
+                }
+            elif result.get("action") == "next_subtask":
+                next_st = task.get_current_subtask()
+                if next_st:
+                    self.robot_manager.set_robot_status(robot.rid, RobotStatus.MOVING_TO_SHELF)
+                    self._plan_and_publish_move(
+                        robot.rid, robot.current_node, next_st.target_node
+                    )
+                    return {
+                        "type": "shelf_ack_response",
+                        "success": True,
+                        "action": "forward_complete_next_shelf",
+                        "shelf_id": shelf_id,
+                        "forwarded_to": forward_ws,
+                        "next_target": next_st.target_node,
+                    }
+
+        return {"type": "shelf_ack_response", "success": True, "action": "putdown_processed"}
 
     # ─── 물품 픽업 완료 ───
 
@@ -591,6 +694,16 @@ class RequestHandler:
 
         result = self._handle_batch_task(batch_data)
 
+        # 선반별 물품 정보 (CLI/UI에서 사용)
+        shelves_detail = []
+        for task in schedule["tasks"]:
+            shelves_detail.append({
+                "order": task.order,
+                "shelf_label": task.shelf_label,
+                "shelf_node": task.shelf_node,
+                "items": task.items,
+            })
+
         return {
             "type": "start_order_response",
             "success": result.get("success", False),
@@ -599,6 +712,7 @@ class RequestHandler:
             "task_id": task_id,
             "items": optimized_items,
             "shelf_sequence": optimized_shelf_sequence,
+            "shelves": shelves_detail,
             "total_shelves": schedule["total_shelves"],
             "message": f"주문 {order_id} 작업 시작 (최적화된 경로: {len(optimized_shelf_sequence)}개 선반)",
         }
@@ -831,6 +945,22 @@ class RequestHandler:
         self, rid: int, start: int, goal: int
     ) -> Optional[Dict]:
         """단일 로봇 이동 경로 계획 및 MQTT 발행"""
+        # 이미 목표 위치에 있으면 즉시 도착 처리 (포워딩된 선반 등)
+        if start == goal:
+            print(f"[RequestHandler] Robot {rid}: already at target {goal}, immediate arrival")
+            self._handle_robot_arrived({
+                "type": "robot_arrived",
+                "rid": rid,
+                "node": goal,
+            })
+            return {
+                "rid": rid,
+                "start": start,
+                "goal": goal,
+                "path_length": 0,
+                "mqtt_published": False,
+            }
+
         timed_path = self.path_planner.plan_single_robot(
             start=start,
             goal=goal,

@@ -58,9 +58,10 @@ class MQTTPublisher:
         if rc_val == 0:
             self.connected = True
             print(f"[MQTTPublisher] Connected, rc={rc}")
-            # /agv/arrived 토픽 구독
+            # /agv/arrived, /agv/shelf_ack 토픽 구독
             client.subscribe("/agv/arrived")
-            print(f"[MQTTPublisher] Subscribed to /agv/arrived")
+            client.subscribe(self.config.mqtt_topic_shelf_ack)
+            print(f"[MQTTPublisher] Subscribed to /agv/arrived, {self.config.mqtt_topic_shelf_ack}")
         else:
             print(f"[MQTTPublisher] Connection failed, rc={rc}")
 
@@ -76,6 +77,14 @@ class MQTTPublisher:
                     "type": "robot_arrived",
                     "rid": payload.get("rid"),
                     "node": payload.get("node"),
+                }))
+            elif msg.topic == self.config.mqtt_topic_shelf_ack and self._message_callback:
+                # shelf_ack 형식으로 변환하여 콜백 호출
+                self._message_callback(json.dumps({
+                    "type": "shelf_ack",
+                    "rid": payload.get("rid"),
+                    "command": payload.get("command"),
+                    "shelf_id": payload.get("shelf_id"),
                 }))
         except Exception as e:
             print(f"[MQTTPublisher] Message parse error: {e}")

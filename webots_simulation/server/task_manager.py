@@ -394,6 +394,43 @@ class TaskManager:
                         return demand["workstation_id"]
         return None
 
+    def handle_shelf_forwarded(self, shelf_id: int, forwarded_to_ws: int) -> Optional[str]:
+        """
+        선반이 다른 작업대로 포워딩됨 → 해당 작업의 서브태스크 수정
+
+        포워딩된 선반이 forwarded_to_ws에 있으므로,
+        해당 작업의 GO_TO_SHELF 목적지를 forwarded_to_ws로 변경
+
+        Returns: 수정된 task_id, 또는 None
+        """
+        demands = self.shelf_demand.get(shelf_id, [])
+        for demand in demands:
+            if demand["workstation_id"] != forwarded_to_ws:
+                continue
+
+            other_task = self.tasks.get(demand["task_id"])
+            if not other_task or other_task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                continue
+
+            # 해당 작업에서 이 선반 관련 서브태스크 찾아서 수정
+            for st in other_task.subtasks:
+                if st.shelf_id != shelf_id:
+                    continue
+                if st.status == TaskStatus.COMPLETED:
+                    continue
+
+                if st.subtask_type == SubTaskType.GO_TO_SHELF:
+                    # 선반이 이미 작업대에 있으므로 목적지를 작업대로 변경
+                    old_target = st.target_node
+                    st.target_node = forwarded_to_ws
+                    print(f"[TaskManager] Forwarded shelf {shelf_id}: "
+                          f"GO_TO_SHELF target {old_target} → {forwarded_to_ws} "
+                          f"(task {other_task.task_id})")
+
+            return other_task.task_id
+
+        return None
+
     def _remove_shelf_demand(self, task_id: str) -> None:
         """완료된 작업의 선반 수요 제거"""
         for shelf_id in list(self.shelf_demand.keys()):
