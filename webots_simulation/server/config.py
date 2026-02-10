@@ -20,6 +20,7 @@ class Config:
     mqtt_topic_plan: str = "/agv/plan"
     mqtt_topic_state: str = "/agv/state"
     mqtt_topic_shelf_cmd: str = "/agv/shelf_cmd"
+    mqtt_topic_shelf_ack: str = "/agv/shelf_ack"
     mqtt_topic_task_status: str = "/agv/task_status"
 
     # WebSocket 설정
@@ -40,12 +41,13 @@ class Config:
     def __post_init__(self):
         if not self.base_dir:
             self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_dir = os.path.join(self.base_dir, "config")
         if not self.map_file:
-            self.map_file = os.path.join(self.base_dir, "map.json")
+            self.map_file = os.path.join(config_dir, "map.json")
         if not self.robot_config_file:
-            self.robot_config_file = os.path.join(self.base_dir, "robot_config.json")
+            self.robot_config_file = os.path.join(config_dir, "robot_config.json")
         if not self.shelf_config_file:
-            self.shelf_config_file = os.path.join(self.base_dir, "shelf_config.json")
+            self.shelf_config_file = os.path.join(config_dir, "shelf_config.json")
 
     @classmethod
     def from_env(cls) -> "Config":

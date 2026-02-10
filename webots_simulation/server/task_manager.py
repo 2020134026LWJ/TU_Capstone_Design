@@ -112,12 +112,18 @@ class TaskManager:
         # shelf_id -> [(task_id, workstation_id, items)] 대기 목록
         self.shelf_demand: Dict[int, List[Dict]] = {}
 
-    def create_task(self, task_id: str, workstation_id: int, items: List[str]) -> Optional[PickingTask]:
+    def create_task(
+        self,
+        task_id: str,
+        workstation_id: int,
+        items: List[str],
+        optimized_shelf_sequence: Optional[List[int]] = None,
+    ) -> Optional[PickingTask]:
         """
         피킹 작업 생성 및 서브태스크 분해
 
         1. 필요 물품 → 선반 매핑
-        2. 선반 방문 순서 결정 (가까운 순)
+        2. 선반 방문 순서 결정 (optimized_shelf_sequence가 있으면 사용, 없으면 거리순)
         3. 각 선반에 대해 서브태스크 시퀀스 생성
         """
         # 물품 → 선반 매핑
@@ -126,9 +132,19 @@ class TaskManager:
             print(f"[TaskManager] Task {task_id}: no shelves found for items {items}")
             return None
 
-        # 선반 방문 순서: 작업대에서 가까운 순
-        shelf_ids = list(shelf_items.keys())
-        shelf_ids.sort(key=lambda sid: self.path_planner._heuristic(workstation_id, sid))
+        # 선반 방문 순서 결정
+        if optimized_shelf_sequence:
+            # TaskScheduler가 최적화한 순서 사용 (유효한 선반만 필터)
+            shelf_ids = [s for s in optimized_shelf_sequence if s in shelf_items]
+            # 최적화 순서에 없는 선반 추가 (fallback)
+            for sid in shelf_items:
+                if sid not in shelf_ids:
+                    shelf_ids.append(sid)
+            print(f"[TaskManager] Using optimized shelf sequence: {shelf_ids}")
+        else:
+            # 기본: 작업대에서 가까운 순
+            shelf_ids = list(shelf_items.keys())
+            shelf_ids.sort(key=lambda sid: self.path_planner._heuristic(workstation_id, sid))
 
         # 서브태스크 생성
         subtasks: List[SubTask] = []
@@ -209,7 +225,8 @@ class TaskManager:
     def create_batch_tasks(self, task_list: List[Dict]) -> List[PickingTask]:
         """
         작업 일괄 등록
-        Input: [{"task_id": "T1", "workstation_id": 50, "items": ["A","B"]}, ...]
+        Input: [{"task_id": "T1", "workstation_id": 50, "items": ["A","B"],
+                 "optimized_shelf_sequence": [9, 23, ...]}, ...]
         """
         created = []
         for task_data in task_list:
@@ -217,6 +234,7 @@ class TaskManager:
                 task_id=task_data["task_id"],
                 workstation_id=task_data["workstation_id"],
                 items=task_data["items"],
+                optimized_shelf_sequence=task_data.get("optimized_shelf_sequence"),
             )
             if task:
                 created.append(task)
@@ -374,6 +392,43 @@ class TaskManager:
                     ]
                     if items_still_needed:
                         return demand["workstation_id"]
+        return None
+
+    def handle_shelf_forwarded(self, shelf_id: int, forwarded_to_ws: int) -> Optional[str]:
+        """
+        선반이 다른 작업대로 포워딩됨 → 해당 작업의 서브태스크 수정
+
+        포워딩된 선반이 forwarded_to_ws에 있으므로,
+        해당 작업의 GO_TO_SHELF 목적지를 forwarded_to_ws로 변경
+
+        Returns: 수정된 task_id, 또는 None
+        """
+        demands = self.shelf_demand.get(shelf_id, [])
+        for demand in demands:
+            if demand["workstation_id"] != forwarded_to_ws:
+                continue
+
+            other_task = self.tasks.get(demand["task_id"])
+            if not other_task or other_task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                continue
+
+            # 해당 작업에서 이 선반 관련 서브태스크 찾아서 수정
+            for st in other_task.subtasks:
+                if st.shelf_id != shelf_id:
+                    continue
+                if st.status == TaskStatus.COMPLETED:
+                    continue
+
+                if st.subtask_type == SubTaskType.GO_TO_SHELF:
+                    # 선반이 이미 작업대에 있으므로 목적지를 작업대로 변경
+                    old_target = st.target_node
+                    st.target_node = forwarded_to_ws
+                    print(f"[TaskManager] Forwarded shelf {shelf_id}: "
+                          f"GO_TO_SHELF target {old_target} → {forwarded_to_ws} "
+                          f"(task {other_task.task_id})")
+
+            return other_task.task_id
+
         return None
 
     def _remove_shelf_demand(self, task_id: str) -> None:
