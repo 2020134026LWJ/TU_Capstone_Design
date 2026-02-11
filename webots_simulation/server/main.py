@@ -54,6 +54,9 @@ class AGVServer:
         # 브로드캐스트 콜백 연결
         self.request_handler.set_broadcast_callback(self.websocket_handler.broadcast)
 
+        # MQTT 메시지 콜백 연결 (arrived 등)
+        self.mqtt_publisher.set_message_callback(self.request_handler.handle_message)
+
         print("[AGVServer] Modules initialized")
 
     async def start(self):
