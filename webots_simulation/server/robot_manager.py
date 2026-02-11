@@ -78,13 +78,13 @@ class RobotManager:
 
         except FileNotFoundError:
             print(f"[RobotManager] Config not found, using defaults")
-            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=50, current_node=50)
-            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=51, current_node=51)
+            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=33, current_node=33)
+            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=34, current_node=34)
 
         except Exception as e:
             print(f"[RobotManager] Error loading config: {e}")
-            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=50, current_node=50)
-            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=51, current_node=51)
+            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=33, current_node=33)
+            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=34, current_node=34)
 
     def get_robot(self, rid: int) -> Optional[Robot]:
         """로봇 조회"""

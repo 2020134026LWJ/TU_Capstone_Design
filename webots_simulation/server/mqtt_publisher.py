@@ -21,12 +21,13 @@ from .config import Config
 
 
 class MQTTPublisher:
-    """MQTT 발행기"""
+    """MQTT 발행/구독"""
 
     def __init__(self, config: Config):
         self.config = config
         self.client: Optional[mqtt.Client] = None
         self.connected = False
+        self._subscriptions: Dict[str, Any] = {}  # topic → callback
 
     def connect(self) -> bool:
         """MQTT 브로커 연결"""
@@ -37,6 +38,7 @@ class MQTTPublisher:
                 self.client = mqtt.Client()
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
+            self.client.on_message = self._on_message
             self.client.connect(self.config.mqtt_host, self.config.mqtt_port, 60)
             self.client.loop_start()
             time.sleep(0.5)  # 연결 대기
@@ -46,14 +48,36 @@ class MQTTPublisher:
             print(f"[MQTTPublisher] Connection failed: {e}")
             return False
 
+    def subscribe(self, topic: str, callback) -> None:
+        """MQTT 토픽 구독 + 콜백 등록"""
+        self._subscriptions[topic] = callback
+        if self.client and self.connected:
+            self.client.subscribe(topic)
+            print(f"[MQTTPublisher] Subscribed: {topic}")
+
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         # paho-mqtt 1.x: rc는 int, 2.x: rc는 ReasonCode 객체
         rc_val = rc if isinstance(rc, int) else getattr(rc, 'value', rc)
         if rc_val == 0:
             self.connected = True
+            # 재연결 시 구독 복원
+            for topic in self._subscriptions:
+                client.subscribe(topic)
+                print(f"[MQTTPublisher] Re-subscribed: {topic}")
             print(f"[MQTTPublisher] Connected, rc={rc}")
         else:
             print(f"[MQTTPublisher] Connection failed, rc={rc}")
+
+    def _on_message(self, client, userdata, msg):
+        """구독 메시지 수신 → 콜백 호출"""
+        callback = self._subscriptions.get(msg.topic)
+        if not callback:
+            return
+        try:
+            data = json.loads(msg.payload.decode("utf-8"))
+            callback(data)
+        except Exception as e:
+            print(f"[MQTTPublisher] Message handling error on {msg.topic}: {e}")
 
     def _on_disconnect(self, client, userdata, *args):
         self.connected = False

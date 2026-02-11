@@ -20,6 +20,7 @@ class Config:
     mqtt_topic_plan: str = "/agv/plan"
     mqtt_topic_state: str = "/agv/state"
     mqtt_topic_shelf_cmd: str = "/agv/shelf_cmd"
+    mqtt_topic_shelf_ack: str = "/agv/shelf_ack"
     mqtt_topic_task_status: str = "/agv/task_status"
 
     # WebSocket 설정

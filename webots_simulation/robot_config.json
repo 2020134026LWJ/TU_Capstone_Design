@@ -1,12 +1,6 @@
 {
   "robots": {
-    "1": {
-      "home_node": 50,
-      "name": "AGV-1"
-    },
-    "2": {
-      "home_node": 51,
-      "name": "AGV-2"
-    }
+    "1": {"name": "AGV-1", "home_node": 33},
+    "2": {"name": "AGV-2", "home_node": 34}
   }
 }

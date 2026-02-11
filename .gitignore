@@ -32,3 +32,6 @@ Thumbs.db
 # Webots
 *.bak
 *.wbproj
+
+# Controller local libraries (OpenCV etc.)
+**/controllers/*/lib/

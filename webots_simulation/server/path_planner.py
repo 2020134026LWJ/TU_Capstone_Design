@@ -1,9 +1,9 @@
 """
 경로 계획 모듈
 - A* 알고리즘 (시간 포함)
-- Prioritized Planning
+- Prioritized Planning (예약 기반, 현재 미사용)
 - 맵 로드 (노드 타입: M=통로, S=선반, W=작업대)
-- 선반 노드 통과 제외
+- 선반 노드 통과 허용 (KIVA 스타일 - AGV가 선반 아래로 이동)
 """
 
 import json
@@ -177,7 +177,6 @@ class PathPlanner:
                 reserved_nodes=reserved_nodes,
                 reserved_edges=reserved_edges,
                 max_time=max_time,
-                excluded_transit=self.shelf_nodes
             )
 
             if path is None:
@@ -210,14 +209,13 @@ class PathPlanner:
         goal: int,
         max_time: int = 50
     ) -> Optional[List[Tuple[int, int]]]:
-        """단일 로봇 경로 계획 (선반 노드 통과 제외 적용)"""
+        """단일 로봇 경로 계획 (선반 노드 통과 허용)"""
         return self.astar_with_time(
             start=start,
             goal=goal,
             reserved_nodes=set(),
             reserved_edges=set(),
             max_time=max_time,
-            excluded_transit=self.shelf_nodes
         )
 
     @staticmethod

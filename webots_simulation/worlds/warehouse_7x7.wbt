@@ -1,0 +1,1348 @@
+#VRML_SIM R2023b utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/adept/pioneer3/protos/Pioneer3dx.proto"
+
+WorldInfo {
+  info [
+    "AGV Warehouse Simulation - 7x7 Grid with ArUco Markers"
+    "TU Capstone Design Project"
+  ]
+  title "AGV Warehouse 7x7 ArUco"
+  basicTimeStep 16
+  contactProperties [
+    ContactProperties {
+      material1 "floor"
+      material2 "wheel"
+      coulombFriction [2]
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -1 0 0 1.5708
+  position 3.5 3.5 14
+}
+
+TexturedBackground {
+  texture "factory"
+}
+
+TexturedBackgroundLight {
+}
+
+RectangleArena {
+  translation 3.5 3.5 0
+  floorSize 9 9
+  floorTileSize 1 1
+  floorAppearance PBRAppearance {
+    baseColor 0.9 0.9 0.9
+    roughness 1
+    metalness 0
+  }
+  wallHeight 0.1
+  wallAppearance PBRAppearance {
+    baseColor 0.3 0.3 0.3
+    roughness 0.5
+  }
+}
+
+# ============================================================
+# ArUco Floor Markers (nodes 1-49)
+# ============================================================
+
+Solid {
+  translation 0.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_1.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_1"
+}
+
+Solid {
+  translation 1.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_2.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_2"
+}
+
+Solid {
+  translation 2.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_3.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_3"
+}
+
+Solid {
+  translation 3.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_4.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_4"
+}
+
+Solid {
+  translation 4.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_5.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_5"
+}
+
+Solid {
+  translation 5.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_6.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_6"
+}
+
+Solid {
+  translation 6.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_7.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_7"
+}
+
+Solid {
+  translation 0.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_8.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_8"
+}
+
+Solid {
+  translation 1.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_9.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_9"
+}
+
+Solid {
+  translation 2.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_10.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_10"
+}
+
+Solid {
+  translation 3.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_11.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_11"
+}
+
+Solid {
+  translation 4.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_12.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_12"
+}
+
+Solid {
+  translation 5.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_13.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_13"
+}
+
+Solid {
+  translation 6.5 1.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_14.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_14"
+}
+
+Solid {
+  translation 0.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_15.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_15"
+}
+
+Solid {
+  translation 1.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_16.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_16"
+}
+
+Solid {
+  translation 2.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_17.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_17"
+}
+
+Solid {
+  translation 3.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_18.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_18"
+}
+
+Solid {
+  translation 4.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_19.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_19"
+}
+
+Solid {
+  translation 5.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_20.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_20"
+}
+
+Solid {
+  translation 6.5 2.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_21.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_21"
+}
+
+Solid {
+  translation 0.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_22.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_22"
+}
+
+Solid {
+  translation 1.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_23.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_23"
+}
+
+Solid {
+  translation 2.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_24.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_24"
+}
+
+Solid {
+  translation 3.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_25.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_25"
+}
+
+Solid {
+  translation 4.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_26.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_26"
+}
+
+Solid {
+  translation 5.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_27.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_27"
+}
+
+Solid {
+  translation 6.5 3.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_28.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_28"
+}
+
+Solid {
+  translation 0.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_29.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_29"
+}
+
+Solid {
+  translation 1.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_30.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_30"
+}
+
+Solid {
+  translation 2.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_31.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_31"
+}
+
+Solid {
+  translation 3.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_32.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_32"
+}
+
+Solid {
+  translation 4.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_33.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_33"
+}
+
+Solid {
+  translation 5.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_34.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_34"
+}
+
+Solid {
+  translation 6.5 4.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_35.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_35"
+}
+
+Solid {
+  translation 0.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_36.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_36"
+}
+
+Solid {
+  translation 1.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_37.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_37"
+}
+
+Solid {
+  translation 2.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_38.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_38"
+}
+
+Solid {
+  translation 3.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_39.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_39"
+}
+
+Solid {
+  translation 4.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_40.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_40"
+}
+
+Solid {
+  translation 5.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_41.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_41"
+}
+
+Solid {
+  translation 6.5 5.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_42.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_42"
+}
+
+Solid {
+  translation 0.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_43.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_43"
+}
+
+Solid {
+  translation 1.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_44.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_44"
+}
+
+Solid {
+  translation 2.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_45.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_45"
+}
+
+Solid {
+  translation 3.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_46.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_46"
+}
+
+Solid {
+  translation 4.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_47.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_47"
+}
+
+Solid {
+  translation 5.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_48.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_48"
+}
+
+Solid {
+  translation 6.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_49.png"]
+        }
+      }
+      geometry Plane {
+        size 0.4 0.4
+      }
+    }
+  ]
+  name "aruco_49"
+}
+
+# ============================================================
+# Workstation ArUco Markers (50=W1, 51=W2)
+# ============================================================
+
+Solid {
+  translation -0.5 0.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_50.png"]
+        }
+      }
+      geometry Plane {
+        size 0.5 0.5
+      }
+    }
+  ]
+  name "aruco_50"
+}
+
+Solid {
+  translation -0.5 6.5 0.001
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url ["textures/aruco_markers/aruco_51.png"]
+        }
+      }
+      geometry Plane {
+        size 0.5 0.5
+      }
+    }
+  ]
+  name "aruco_51"
+}
+
+# ============================================================
+# KIVA-Style 3-Tier Shelves (9 units)
+# ============================================================
+
+DEF SHELF_9 Solid {
+  translation 1.5 1.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_9"
+}
+
+DEF SHELF_11 Solid {
+  translation 3.5 1.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_11"
+}
+
+DEF SHELF_13 Solid {
+  translation 5.5 1.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_13"
+}
+
+DEF SHELF_23 Solid {
+  translation 1.5 3.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_23"
+}
+
+DEF SHELF_25 Solid {
+  translation 3.5 3.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_25"
+}
+
+DEF SHELF_27 Solid {
+  translation 5.5 3.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_27"
+}
+
+DEF SHELF_37 Solid {
+  translation 1.5 5.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_37"
+}
+
+DEF SHELF_39 Solid {
+  translation 3.5 5.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_39"
+}
+
+DEF SHELF_41 Solid {
+  translation 5.5 5.5 0
+  children [
+    Transform { translation -0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 -0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation -0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0.35 0.35 0.14 children [ Shape { appearance PBRAppearance { baseColor 0.6 0.6 0.6 metalness 0.3 } geometry Cylinder { radius 0.03 height 0.28 } } ] }
+    Transform { translation 0 0 0.28 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.4 0.9 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.43 children [ Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+    Transform { translation 0 0 0.58 children [ Shape { appearance PBRAppearance { baseColor 0.9 0.2 0.2 roughness 0.5 } geometry Box { size 0.78 0.78 0.02 } } ] }
+  ]
+  name "shelf_41"
+}
+
+# ============================================================
+# AGV Robots (Pioneer 3-DX) with Camera + Supervisor + Lift
+# ============================================================
+
+# Robot 1 - starts at W1 (node 50)
+Pioneer3dx {
+  translation -0.5 0.5 0
+  rotation 0 0 1 0
+  name "AGV_1"
+  supervisor TRUE
+  controller "agv_mqtt_controller"
+  controllerArgs ["1", "50"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+    Camera {
+      translation 0 0 0.02
+      rotation 1 0 0 3.14159
+      name "floor_camera"
+      fieldOfView 1.2
+      width 320
+      height 240
+      near 0.01
+    }
+    SliderJoint {
+      jointParameters JointParameters {
+        axis 0 0 1
+      }
+      device [
+        LinearMotor {
+          name "lift_motor"
+          maxForce 100
+          minPosition 0
+          maxPosition 0.10
+        }
+        PositionSensor {
+          name "lift_sensor"
+        }
+      ]
+      endPoint Solid {
+        translation 0 0 0.0
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 1.0 0.6 0.0
+              roughness 0.3
+              metalness 0.5
+            }
+            geometry Cylinder {
+              radius 0.15
+              height 0.02
+            }
+          }
+        ]
+        name "lift_platform"
+        boundingObject Cylinder {
+          radius 0.15
+          height 0.02
+        }
+        physics Physics {
+          density -1
+          mass 0.5
+        }
+      }
+    }
+  ]
+}
+
+# Robot 2 - starts at W2 (node 51)
+Pioneer3dx {
+  translation -0.5 6.5 0
+  rotation 0 0 1 0
+  name "AGV_2"
+  supervisor TRUE
+  controller "agv_mqtt_controller"
+  controllerArgs ["2", "51"]
+  extensionSlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+    Camera {
+      translation 0 0 0.02
+      rotation 1 0 0 3.14159
+      name "floor_camera"
+      fieldOfView 1.2
+      width 320
+      height 240
+      near 0.01
+    }
+    SliderJoint {
+      jointParameters JointParameters {
+        axis 0 0 1
+      }
+      device [
+        LinearMotor {
+          name "lift_motor"
+          maxForce 100
+          minPosition 0
+          maxPosition 0.10
+        }
+        PositionSensor {
+          name "lift_sensor"
+        }
+      ]
+      endPoint Solid {
+        translation 0 0 0.0
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 1.0 0.6 0.0
+              roughness 0.3
+              metalness 0.5
+            }
+            geometry Cylinder {
+              radius 0.15
+              height 0.02
+            }
+          }
+        ]
+        name "lift_platform"
+        boundingObject Cylinder {
+          radius 0.15
+          height 0.02
+        }
+        physics Physics {
+          density -1
+          mass 0.5
+        }
+      }
+    }
+  ]
+}

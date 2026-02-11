@@ -57,7 +57,7 @@ class SubTask:
 class PickingTask:
     """피킹 작업"""
     task_id: str
-    workstation_id: int                     # 요청 작업대 노드 (50 or 51)
+    workstation_id: int                     # 요청 작업대 노드 (33=W1, 34=W2)
     items: List[str]                        # 전체 필요 물품
     shelf_sequence: List[int]               # 방문할 선반 순서
     subtasks: List[SubTask] = field(default_factory=list)

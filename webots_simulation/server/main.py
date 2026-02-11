@@ -9,6 +9,7 @@ TU Capstone Design - AGV 물류 피킹 시스템
 """
 
 import asyncio
+import json
 import signal
 import sys
 
@@ -59,9 +60,11 @@ class AGVServer:
         """서버 시작"""
         print("[AGVServer] Starting server...")
 
-        # MQTT 연결
+        # MQTT 연결 + 구독
         if not self.mqtt_publisher.connect():
             print("[AGVServer] Warning: MQTT connection failed")
+        else:
+            self._setup_mqtt_subscriptions()
 
         # WebSocket 서버 시작
         await self.websocket_handler.start()
@@ -78,6 +81,30 @@ class AGVServer:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             pass
+
+    def _setup_mqtt_subscriptions(self):
+        """AGV 컨트롤러로부터 MQTT 메시지 수신 설정"""
+        self.mqtt_publisher.subscribe(
+            "/agv/arrived",
+            lambda data: self._handle_mqtt_arrived(data),
+        )
+        self.mqtt_publisher.subscribe(
+            self.config.mqtt_topic_shelf_ack,
+            lambda data: self._handle_mqtt_shelf_ack(data),
+        )
+        print("[AGVServer] MQTT subscriptions ready (/agv/arrived, /agv/shelf_ack)")
+
+    def _handle_mqtt_arrived(self, data):
+        """AGV 도착 이벤트 → request_handler 라우팅"""
+        data["type"] = "robot_arrived"
+        result = self.request_handler.handle_message(json.dumps(data))
+        print(f"[AGVServer] MQTT arrived: robot {data.get('rid')} at node {data.get('node')} → {result.get('action', '?')}")
+
+    def _handle_mqtt_shelf_ack(self, data):
+        """AGV 선반 리프트 완료 이벤트 → request_handler 라우팅"""
+        data["type"] = "shelf_ack"
+        result = self.request_handler.handle_message(json.dumps(data))
+        print(f"[AGVServer] MQTT shelf_ack: robot {data.get('rid')} {data.get('command')} shelf {data.get('shelf_id')} → {result.get('action', '?')}")
 
     async def stop(self):
         """서버 정지"""
