@@ -1,0 +1,212 @@
+"""작업대 스테이징 관리 모듈
+- 작업대 회랑(corridor) 진입/퇴출 관리
+- 충돌 방지를 위한 AGV 대기 큐
+"""
+
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, Optional, List
+
+STAGING_TIMEOUT = 30  # 타임아웃 (초) - ArUco 인식 실패 시 강제 해제
+
+
+class CorridorState(Enum):
+    """회랑 상태"""
+    FREE = "free"
+    OCCUPIED = "occupied"
+
+
+@dataclass
+class StagedAGV:
+    """대기 중인 AGV 정보"""
+    rid: int
+    staging_node: int
+    target_ws: int
+    staged_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class CorridorInfo:
+    """작업대 회랑 정보"""
+    ws_node: int
+    gateway_node: int
+    staging_node: int
+    trigger_node: int
+    state: CorridorState = CorridorState.FREE
+    occupying_rid: Optional[int] = None
+    occupied_at: float = 0.0
+    queue: deque = field(default_factory=deque)
+
+
+class StagingManager:
+    """작업대 스테이징 관리자"""
+
+    def __init__(self, workstations: Dict[int, Dict]):
+        self.corridors: Dict[int, CorridorInfo] = {}
+
+        # ws_node(33,34) → gateway, staging, trigger 매핑
+        for ws_node_str, ws_info in workstations.items():
+            ws_node = int(ws_node_str)
+            gateway = ws_info.get("gateway_node")
+            staging = ws_info.get("staging_node")
+            trigger = ws_info.get("trigger_node")
+
+            if gateway and staging and trigger:
+                self.corridors[ws_node] = CorridorInfo(
+                    ws_node=ws_node,
+                    gateway_node=gateway,
+                    staging_node=staging,
+                    trigger_node=trigger,
+                )
+
+        # trigger_node → ws_node 역매핑 (마커 인식 시 빠른 조회)
+        self._trigger_to_ws: Dict[int, int] = {}
+        for ws_node, corridor in self.corridors.items():
+            self._trigger_to_ws[corridor.trigger_node] = ws_node
+
+        # staging_node → ws_node 역매핑
+        self._staging_to_ws: Dict[int, int] = {}
+        for ws_node, corridor in self.corridors.items():
+            self._staging_to_ws[corridor.staging_node] = ws_node
+
+        print(f"[StagingManager] Initialized {len(self.corridors)} corridors")
+
+    def get_ws_for_staging_node(self, node: int) -> Optional[int]:
+        """staging 노드 → 해당 작업대 노드 반환"""
+        return self._staging_to_ws.get(node)
+
+    def should_stage(self, ws_node: int, incoming_rid: int) -> Optional[int]:
+        """작업대로 가려는 AGV가 스테이징 필요한지 확인
+
+        Returns:
+            None: 스테이징 불필요 (바로 진입 가능)
+            int: 스테이징 노드 (대기 필요)
+        """
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return None
+
+        # 타임아웃 체크
+        self._check_timeout(corridor)
+
+        if corridor.state == CorridorState.FREE:
+            # 회랑 비어있음 → 바로 진입, 회랑 점유
+            corridor.state = CorridorState.OCCUPIED
+            corridor.occupying_rid = incoming_rid
+            corridor.occupied_at = time.time()
+            print(f"[StagingManager] W{ws_node}: corridor OCCUPIED by AGV-{incoming_rid} (entering)")
+            return None
+        elif corridor.occupying_rid == incoming_rid:
+            # 이미 권한 있음 (스테이징에서 해제된 AGV)
+            print(f"[StagingManager] W{ws_node}: AGV-{incoming_rid} already authorized")
+            return None
+        else:
+            # 회랑 점유 중 → 스테이징 노드로 우회
+            print(f"[StagingManager] W{ws_node}: corridor busy (AGV-{corridor.occupying_rid}), "
+                  f"AGV-{incoming_rid} staging at node {corridor.staging_node}")
+            return corridor.staging_node
+
+    def add_staged_agv(self, ws_node: int, rid: int, staging_node: int):
+        """대기 큐에 AGV 추가"""
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return
+
+        staged = StagedAGV(rid=rid, staging_node=staging_node, target_ws=ws_node)
+        corridor.queue.append(staged)
+        print(f"[StagingManager] W{ws_node}: AGV-{rid} queued at node {staging_node} "
+              f"(queue size: {len(corridor.queue)})")
+
+    def is_staged_agv(self, node: int, rid: int) -> bool:
+        """해당 노드에 도착한 AGV가 스테이징 대기 중인지 확인"""
+        ws_node = self._staging_to_ws.get(node)
+        if not ws_node:
+            return False
+
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return False
+
+        return any(s.rid == rid for s in corridor.queue)
+
+    def handle_marker_trigger(self, rid: int, marker_id: int) -> Optional[StagedAGV]:
+        """마커 인식 이벤트 → 트리거 노드면 대기 AGV 해제
+
+        Args:
+            rid: 마커를 인식한 AGV의 ID (퇴출 중인 AGV)
+            marker_id: 인식된 마커 ID (= 노드 ID)
+
+        Returns:
+            StagedAGV: 해제된 대기 AGV 정보 (진입 시킬 AGV)
+            None: 트리거가 아니거나 대기 AGV 없음
+        """
+        ws_node = self._trigger_to_ws.get(marker_id)
+        if not ws_node:
+            return None
+
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return None
+
+        # 트리거 인식 = 퇴출 AGV가 게이트웨이를 벗어남
+        print(f"[StagingManager] W{ws_node}: AGV-{rid} passed trigger node {marker_id}")
+
+        if corridor.queue:
+            # 대기 AGV 해제 (FIFO)
+            released = corridor.queue.popleft()
+            corridor.state = CorridorState.OCCUPIED
+            corridor.occupying_rid = released.rid
+            corridor.occupied_at = time.time()
+            print(f"[StagingManager] W{ws_node}: releasing AGV-{released.rid} "
+                  f"from staging (queue remaining: {len(corridor.queue)})")
+            return released
+        else:
+            # 대기 AGV 없음 → 회랑 해제
+            corridor.state = CorridorState.FREE
+            corridor.occupying_rid = None
+            print(f"[StagingManager] W{ws_node}: corridor FREE")
+            return None
+
+    def mark_exiting(self, ws_node: int, rid: int):
+        """AGV가 작업대에서 퇴출 시작 (pick_complete → return/forward)"""
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return
+
+        corridor.state = CorridorState.OCCUPIED
+        corridor.occupying_rid = rid
+        corridor.occupied_at = time.time()
+        print(f"[StagingManager] W{ws_node}: AGV-{rid} exiting")
+
+    def _check_timeout(self, corridor: CorridorInfo):
+        """타임아웃 체크 - ArUco 인식 실패 시 강제 해제"""
+        if corridor.state != CorridorState.OCCUPIED:
+            return
+
+        elapsed = time.time() - corridor.occupied_at
+        if elapsed > STAGING_TIMEOUT:
+            print(f"[StagingManager] W{corridor.ws_node}: TIMEOUT ({elapsed:.0f}s), "
+                  f"forcing corridor FREE (was AGV-{corridor.occupying_rid})")
+            if corridor.queue:
+                released = corridor.queue.popleft()
+                corridor.occupying_rid = released.rid
+                corridor.occupied_at = time.time()
+                print(f"[StagingManager] W{corridor.ws_node}: timeout-releasing AGV-{released.rid}")
+                # Note: 실제 이동은 호출자가 처리
+            else:
+                corridor.state = CorridorState.FREE
+                corridor.occupying_rid = None
+
+    def get_status_summary(self) -> Dict:
+        """스테이징 상태 요약"""
+        return {
+            ws_node: {
+                "state": corridor.state.value,
+                "occupying_rid": corridor.occupying_rid,
+                "queue_size": len(corridor.queue),
+                "queued_rids": [s.rid for s in corridor.queue],
+            }
+            for ws_node, corridor in self.corridors.items()
+        }

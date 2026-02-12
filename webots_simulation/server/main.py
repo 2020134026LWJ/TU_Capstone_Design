@@ -18,6 +18,7 @@ from .path_planner import PathPlanner
 from .mqtt_publisher import MQTTPublisher
 from .robot_manager import RobotManager
 from .shelf_manager import ShelfManager
+from .staging_manager import StagingManager
 from .task_manager import TaskManager
 from .request_handler import RequestHandler
 from .websocket_handler import WebSocketHandler
@@ -37,6 +38,7 @@ class AGVServer:
         self.mqtt_publisher = MQTTPublisher(self.config)
         self.robot_manager = RobotManager(self.config)
         self.shelf_manager = ShelfManager(self.config.shelf_config_file)
+        self.staging_manager = StagingManager(self.shelf_manager.workstations)
         self.task_manager = TaskManager(self.shelf_manager, self.path_planner)
         self.request_handler = RequestHandler(
             config=self.config,
@@ -44,6 +46,7 @@ class AGVServer:
             mqtt_publisher=self.mqtt_publisher,
             robot_manager=self.robot_manager,
             shelf_manager=self.shelf_manager,
+            staging_manager=self.staging_manager,
             task_manager=self.task_manager,
         )
         self.websocket_handler = WebSocketHandler(
@@ -53,9 +56,6 @@ class AGVServer:
 
         # 브로드캐스트 콜백 연결
         self.request_handler.set_broadcast_callback(self.websocket_handler.broadcast)
-
-        # MQTT 메시지 콜백 연결 (arrived 등)
-        self.mqtt_publisher.set_message_callback(self.request_handler.handle_message)
 
         print("[AGVServer] Modules initialized")
 
@@ -95,7 +95,11 @@ class AGVServer:
             self.config.mqtt_topic_shelf_ack,
             lambda data: self._handle_mqtt_shelf_ack(data),
         )
-        print("[AGVServer] MQTT subscriptions ready (/agv/arrived, /agv/shelf_ack)")
+        self.mqtt_publisher.subscribe(
+            "/agv/marker",
+            lambda data: self._handle_mqtt_marker(data),
+        )
+        print("[AGVServer] MQTT subscriptions ready (/agv/arrived, /agv/shelf_ack, /agv/marker)")
 
     def _handle_mqtt_arrived(self, data):
         """AGV 도착 이벤트 → request_handler 라우팅"""
@@ -108,6 +112,18 @@ class AGVServer:
         data["type"] = "shelf_ack"
         result = self.request_handler.handle_message(json.dumps(data))
         print(f"[AGVServer] MQTT shelf_ack: robot {data.get('rid')} {data.get('command')} shelf {data.get('shelf_id')} → {result.get('action', '?')}")
+
+    def _handle_mqtt_marker(self, data):
+        """AGV 마커 인식 이벤트 → 스테이징 트리거 처리"""
+        rid = data.get("rid")
+        marker_id = data.get("marker_id")
+        if rid is None or marker_id is None:
+            return
+
+        released = self.request_handler.handle_marker_trigger(rid, marker_id)
+        if released:
+            print(f"[AGVServer] Marker trigger: AGV-{rid} at marker {marker_id} → "
+                  f"releasing AGV-{released.rid} to W{released.target_ws}")
 
     async def stop(self):
         """서버 정지"""

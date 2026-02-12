@@ -145,7 +145,7 @@ class CLIClient:
 
         if next_action == "forward_shelf":
             forward_ws = last_result.get("forward_to_ws", "?")
-            ws_label = "W1" if forward_ws == 50 else "W2" if forward_ws == 51 else f"WS{forward_ws}"
+            ws_label = "W1" if forward_ws == 33 else "W2" if forward_ws == 34 else f"WS{forward_ws}"
             print(f"  [사용자{user_id}] 선반 {shelf['shelf_label']} 완료 ({items_str})")
             print(f"           → 다른 작업대({ws_label})에서도 필요! 포워딩 중...")
         else:
@@ -166,21 +166,21 @@ class CLIClient:
             print("  이미 진행 중인 주문이 있습니다. 서버를 재시작하세요.")
             return
 
-        # 두 사용자 모두 선반 9 (1-1) 필요
+        # 두 사용자 모두 선반 11 (1-1) 필요
         result = await self.send({
             "type": "batch_task_request",
             "tasks": [
                 {
                     "task_id": "FWD_TEST_1",
-                    "workstation_id": 50,
+                    "workstation_id": 33,
                     "items": ["드롭스", "퍼지"],
-                    "optimized_shelf_sequence": [9, 23],
+                    "optimized_shelf_sequence": [11, 15],
                 },
                 {
                     "task_id": "FWD_TEST_2",
-                    "workstation_id": 51,
-                    "items": ["롤리팝", "판사탕"],
-                    "optimized_shelf_sequence": [41, 9],
+                    "workstation_id": 34,
+                    "items": ["롤리팝", "구미"],
+                    "optimized_shelf_sequence": [20, 11],
                 },
             ]
         })
@@ -191,23 +191,23 @@ class CLIClient:
 
         # UserOrder 설정
         self.orders[1] = UserOrder(1, "FWD_TEST_1", [
-            {"order": 1, "shelf_label": "1-1", "shelf_node": 9, "items": ["드롭스"]},
-            {"order": 2, "shelf_label": "2-1", "shelf_node": 23, "items": ["퍼지"]},
+            {"order": 1, "shelf_label": "1-1", "shelf_node": 11, "items": ["드롭스"]},
+            {"order": 2, "shelf_label": "1-4", "shelf_node": 15, "items": ["퍼지"]},
         ])
         self.orders[2] = UserOrder(2, "FWD_TEST_2", [
-            {"order": 1, "shelf_label": "3-3", "shelf_node": 41, "items": ["판사탕"]},
-            {"order": 2, "shelf_label": "1-1", "shelf_node": 9, "items": ["롤리팝"]},
+            {"order": 1, "shelf_label": "2-2", "shelf_node": 20, "items": ["구미"]},
+            {"order": 2, "shelf_label": "1-1", "shelf_node": 11, "items": ["롤리팝"]},
         ])
 
         print(f"\n{'='*55}")
         print(f"  포워딩 테스트 시작")
         print(f"{'='*55}")
-        print(f"  사용자1 (AGV-1, W1): 선반1-1(드롭스) → 선반2-1(퍼지)")
-        print(f"  사용자2 (AGV-2, W2): 선반3-3(판사탕) → 선반1-1(롤리팝)")
-        print(f"  *** 선반 1-1 (노드9) 겹침 → 포워딩 발생 예상 ***")
+        print(f"  사용자1 (AGV-1, W1): 선반1-1(드롭스) → 선반1-4(퍼지)")
+        print(f"  사용자2 (AGV-2, W2): 선반2-2(구미) → 선반1-1(롤리팝)")
+        print(f"  *** 선반 1-1 (노드11) 겹침 → 포워딩 발생 예상 ***")
         print(f"{'='*55}")
         print(f"  사용자1 '완료 1' → 선반1-1이 W2로 포워딩되어야 함")
-        print(f"  사용자2 '완료 2' → 선반3-3 복귀 후, 포워딩된 선반1-1 자동 수령")
+        print(f"  사용자2 '완료 2' → 선반2-2 복귀 후, 포워딩된 선반1-1 자동 수령")
         print(f"{'='*55}")
 
         for uid in [1, 2]:

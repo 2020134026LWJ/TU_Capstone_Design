@@ -30,8 +30,8 @@ async def test_dual_order():
         batch_request = {
             "type": "batch_task_request",
             "tasks": [
-                {"task_id": "USER1_ORDER", "workstation_id": 50, "items": ["드롭스", "퍼지"]},
-                {"task_id": "USER2_ORDER", "workstation_id": 51, "items": ["구미", "무설탕 캔디"]},
+                {"task_id": "USER1_ORDER", "workstation_id": 33, "items": ["드롭스", "퍼지"]},
+                {"task_id": "USER2_ORDER", "workstation_id": 34, "items": ["구미", "무설탕 캔디"]},
             ]
         }
         await ws.send(json.dumps(batch_request))

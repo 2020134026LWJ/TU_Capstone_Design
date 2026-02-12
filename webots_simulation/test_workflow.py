@@ -3,9 +3,9 @@ v4 서버 핵심 로직 테스트
 MQTT/Webots 없이 전체 작업 흐름을 시뮬레이션
 
 테스트 시나리오:
-  T1(W1): 물품 A, B, Z, D 가져와 → 선반 9(A,B), 11(D), 41(Z)
-  T2(W2): 물품 C, X, U, I 가져와 → 선반 9(C), 39(X), 37(U), 13(I)
-  → 선반 9는 T1과 T2 모두 필요 → 포워딩 발생해야 함
+  T1(W1): 물품 A, B, Z, D 가져와 → 선반 11(A,B), 12(D), 23(Z)
+  T2(W2): 물품 C, X, U, I 가져와 → 선반 11(C), 22(X), 19(U), 14(I)
+  → 선반 11는 T1과 T2 모두 필요 → 포워딩 발생해야 함
 """
 
 import sys
@@ -102,11 +102,11 @@ def main():
     # ─── 2. 경로 계획 테스트 ───
     separator("2. 경로 계획 테스트")
     test_routes = [
-        (50, 9,  "W1 → S1(선반9)"),
-        (9, 50,  "S1 → W1(복귀)"),
-        (50, 25, "W1 → S5(선반25, 중앙)"),
-        (51, 41, "W2 → S9(선반41)"),
-        (50, 51, "W1 → W2(작업대간)"),
+        (33, 11, "W1 → S1(선반11)"),
+        (11, 33, "S1 → W1(복귀)"),
+        (33, 20, "W1 → S6(선반20, 중앙)"),
+        (34, 23, "W2 → S8(선반23)"),
+        (33, 34, "W1 → W2(작업대간)"),
     ]
     for start, goal, desc in test_routes:
         path = path_planner.plan_single_robot(start, goal)
@@ -121,8 +121,8 @@ def main():
     batch_msg = json.dumps({
         "type": "batch_task_request",
         "tasks": [
-            {"task_id": "T1", "workstation_id": 50, "items": ["A", "B", "Z", "D"]},
-            {"task_id": "T2", "workstation_id": 51, "items": ["C", "X", "U", "I"]},
+            {"task_id": "T1", "workstation_id": 33, "items": ["A", "B", "Z", "D"]},
+            {"task_id": "T2", "workstation_id": 34, "items": ["C", "X", "U", "I"]},
         ]
     })
     result = handler.handle_message(batch_msg)
@@ -141,44 +141,44 @@ def main():
         print(f"  Robot {r.rid}: status={r.status.value}, node={r.current_node}, "
               f"task={r.current_task_id}, shelf={r.carrying_shelf}")
 
-    # ─── 5. T1 시뮬레이션: 선반9 픽업 → W1 배달 ───
-    separator("5. T1 시뮬레이션: Robot 1이 선반9로 이동 후 도착")
+    # ─── 5. T1 시뮬레이션: 선반11 픽업 → W1 배달 ───
+    separator("5. T1 시뮬레이션: Robot 1이 선반11로 이동 후 도착")
 
-    # Robot 1이 선반 9에 도착
-    arrived_msg = json.dumps({"type": "robot_arrived", "rid": 1, "node": 9})
+    # Robot 1이 선반 11에 도착
+    arrived_msg = json.dumps({"type": "robot_arrived", "rid": 1, "node": 11})
     result = handler.handle_message(arrived_msg)
     print(f"도착 응답: action={result.get('action')}")
     r1 = robot_manager.get_robot(1)
     print(f"  Robot 1: status={r1.status.value}, carrying_shelf={r1.carrying_shelf}")
-    shelf9 = shelf_manager.get_shelf(9)
-    print(f"  선반9: status={shelf9.status.value}, carried_by={shelf9.carried_by}")
+    shelf11 = shelf_manager.get_shelf(11)
+    print(f"  선반11: status={shelf11.status.value}, carried_by={shelf11.carried_by}")
 
     # ─── 6. Robot 1이 작업대 W1에 도착 ───
-    separator("6. Robot 1이 W1(50)에 도착 → 픽업 대기")
-    arrived_msg = json.dumps({"type": "robot_arrived", "rid": 1, "node": 50})
+    separator("6. Robot 1이 W1(33)에 도착 → 픽업 대기")
+    arrived_msg = json.dumps({"type": "robot_arrived", "rid": 1, "node": 33})
     result = handler.handle_message(arrived_msg)
     print(f"도착 응답: action={result.get('action')}, items={result.get('items_to_pick')}")
     print(f"  Robot 1: status={r1.status.value}")
 
     # ─── 7. 작업자가 물품 A 픽업 ───
     separator("7. 작업자: 물품 A 픽업 완료")
-    pick_msg = json.dumps({"type": "pick_complete", "task_id": "T1", "item": "A", "workstation_id": 50})
+    pick_msg = json.dumps({"type": "pick_complete", "task_id": "T1", "item": "A", "workstation_id": 33})
     result = handler.handle_message(pick_msg)
     print(f"픽업 응답: action={result.get('action')}")
     print(f"  남은 물품(이 선반): {result.get('remaining_items_on_shelf')}")
     print(f"  남은 물품(전체): {result.get('total_remaining')}")
 
     # ─── 8. 작업자가 물품 B 픽업 → 선반9 완료 ───
-    separator("8. 작업자: 물품 B 픽업 완료 → 선반9 작업 끝")
-    pick_msg = json.dumps({"type": "pick_complete", "task_id": "T1", "item": "B", "workstation_id": 50})
+    separator("8. 작업자: 물품 B 픽업 완료 → 선반11 작업 끝")
+    pick_msg = json.dumps({"type": "pick_complete", "task_id": "T1", "item": "B", "workstation_id": 33})
     result = handler.handle_message(pick_msg)
     print(f"픽업 응답: action={result.get('action')}, next_action={result.get('next_action')}")
 
-    # T2도 선반9(물품C)가 필요 → 포워딩 발생해야 함
+    # T2도 선반11(물품C)가 필요 → 포워딩 발생해야 함
     if result.get("next_action") == "forward_shelf":
-        print(f"  ★ 포워딩 발생! 선반9 → W2({result.get('forward_to_ws')})")
+        print(f"  포워딩 발생! 선반11 → W2({result.get('forward_to_ws')})")
     elif result.get("next_action") == "return_shelf":
-        print(f"  선반9 복귀 → node {result.get('return_to')}")
+        print(f"  선반11 복귀 → node {result.get('return_to')}")
 
     print(f"  Robot 1: status={r1.status.value}")
 

@@ -15,9 +15,8 @@ class DBLoader:
 
     # 선반 번호 → 노드 ID 매핑
     SHELF_NODE_MAP = {
-        "1-1": 9,  "1-2": 11, "1-3": 13,
-        "2-1": 23, "2-2": 25, "2-3": 27,
-        "3-1": 37, "3-2": 39, "3-3": 41,
+        "1-1": 11, "1-2": 12, "1-3": 14, "1-4": 15,
+        "2-1": 19, "2-2": 20, "2-3": 22, "2-4": 23,
     }
 
     def __init__(self, db_dir: str):
@@ -96,8 +95,8 @@ class DBLoader:
             quantity = int(row["개수"])
             items.append({"name": item_name, "quantity": quantity})
 
-        # 작업대: 사용자1 → W1(50), 사용자2 → W2(51)
-        workstation_id = 50 if user_id == 1 else 51
+        # 작업대: 사용자1 → W1(33), 사용자2 → W2(34)
+        workstation_id = 33 if user_id == 1 else 34
 
         return {
             "workstation_id": workstation_id,

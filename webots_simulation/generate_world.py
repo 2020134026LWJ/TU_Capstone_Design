@@ -82,7 +82,7 @@ def gen_shelf(node_id, label, x, y):
 
 def gen_robot(rid, x, y, start_node):
     """Pioneer3dx 로봇 생성 - 하향 카메라 + GPS/Compass + 리프트"""
-    return f"""Pioneer3dx {{
+    return f"""DEF AGV_{rid} Pioneer3dx {{
   translation {x} {y} 0
   rotation 0 0 1 0
   name "AGV_{rid}"

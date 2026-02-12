@@ -225,8 +225,8 @@ class TaskManager:
     def create_batch_tasks(self, task_list: List[Dict]) -> List[PickingTask]:
         """
         작업 일괄 등록
-        Input: [{"task_id": "T1", "workstation_id": 50, "items": ["A","B"],
-                 "optimized_shelf_sequence": [9, 23, ...]}, ...]
+        Input: [{"task_id": "T1", "workstation_id": 33, "items": ["A","B"],
+                 "optimized_shelf_sequence": [11, 15, ...]}, ...]
         """
         created = []
         for task_data in task_list:
@@ -319,17 +319,21 @@ class TaskManager:
                 "shelf_id": shelf_id,
             }
         elif next_st:
-            # 복귀: 가장 가까운 빈 선반 자리로
-            empty_pos = self.shelf_manager.find_nearest_empty_position(
-                task.workstation_id, self.path_planner
-            )
-            if empty_pos is None:
-                empty_pos = shelf_id  # fallback: 원래 위치
-            next_st.target_node = empty_pos
+            # 복귀: 선반의 홈 노드로 (홈이 점유된 경우만 가장 가까운 빈 자리)
+            home_node = self.shelf_manager.get_shelf_home(shelf_id)
+            if home_node and self.shelf_manager.is_position_available(home_node):
+                return_node = home_node
+            else:
+                return_node = self.shelf_manager.find_nearest_empty_position(
+                    task.workstation_id, self.path_planner
+                )
+                if return_node is None:
+                    return_node = home_node or shelf_id
+            next_st.target_node = return_node
             return {
                 "action": "shelf_done",
                 "next_action": "return",
-                "return_to": empty_pos,
+                "return_to": return_node,
                 "shelf_id": shelf_id,
             }
 

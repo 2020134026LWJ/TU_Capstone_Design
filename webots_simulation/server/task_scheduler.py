@@ -29,17 +29,17 @@ class ScheduledTask:
 class TaskScheduler:
     """작업 스케줄러 - 물품 피킹 순서 최적화"""
 
-    # 노드 좌표 (맵 기준)
+    # 노드 좌표 (맵 기준, 4x8 그리드)
     NODE_COORDS = {
-        # 그리드 노드 (1-49)
-        **{i: ((i-1) % 7, (i-1) // 7) for i in range(1, 50)},
+        # 그리드 노드 (1-32)
+        **{i: ((i-1) % 8, (i-1) // 8) for i in range(1, 33)},
         # 작업대 노드
-        50: (-1, 0),   # W1
-        51: (-1, 6),   # W2
+        33: (-1, 0),   # W1
+        34: (-1, 3),   # W2
     }
 
     # 선반 노드 목록
-    SHELF_NODES = {9, 11, 13, 23, 25, 27, 37, 39, 41}
+    SHELF_NODES = {11, 12, 14, 15, 19, 20, 22, 23}
 
     def __init__(self, db_loader: DBLoader):
         self.db_loader = db_loader
@@ -79,7 +79,7 @@ class TaskScheduler:
     def optimize_order(
         self,
         items: List[str],
-        start_node: int = 50,
+        start_node: int = 33,
         return_to_start: bool = True
     ) -> List[ScheduledTask]:
         """
@@ -87,7 +87,7 @@ class TaskScheduler:
 
         Args:
             items: 피킹할 물품 목록
-            start_node: AGV 시작 노드 (기본: 50=W1)
+            start_node: AGV 시작 노드 (기본: 33=W1)
             return_to_start: 마지막에 시작점으로 복귀 여부
 
         Returns:
@@ -141,7 +141,7 @@ class TaskScheduler:
     def optimize_order_by_distance(
         self,
         items: List[str],
-        start_node: int = 50
+        start_node: int = 33
     ) -> List[ScheduledTask]:
         """
         단순 거리 기반 최적화 (시작점에서 가까운 순)
@@ -251,7 +251,7 @@ class TaskScheduler:
         print("\n" + "=" * 60)
         print(f"  주문 스케줄: 사용자 {schedule['user_id']}, 주문 {schedule['order_id']}")
         print("=" * 60)
-        print(f"  작업대: {schedule['workstation']} (W{'1' if schedule['workstation'] == 50 else '2'})")
+        print(f"  작업대: {schedule['workstation']} (W{'1' if schedule['workstation'] == 33 else '2'})")
         print(f"  총 물품: {schedule['total_items']}개")
         print(f"  방문 선반: {schedule['total_shelves']}개")
         print("-" * 60)

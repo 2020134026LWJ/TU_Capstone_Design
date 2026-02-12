@@ -33,7 +33,7 @@ def create_test_system():
 
     path_planner = PathPlanner(os.path.join(base_dir, "config", "map.json"))
     shelf_manager = ShelfManager(os.path.join(base_dir, "config", "shelf_config.json"))
-    robot_manager = RobotManager(os.path.join(base_dir, "config", "robot_config.json"))
+    robot_manager = RobotManager(config)
     task_manager = TaskManager(shelf_manager, path_planner)
 
     return config, path_planner, shelf_manager, robot_manager, task_manager
@@ -60,26 +60,26 @@ def print_subtask_list(task, highlight_idx=None):
 
 
 def test_forwarding():
-    """포워딩 시나리오 테스트"""
+    """포워딩 시나리오 테스트 (4x8 맵)"""
     config, planner, shelf_mgr, robot_mgr, task_mgr = create_test_system()
 
     print_header("선반 포워딩 테스트")
-    print("  사용자1 (WS50): 드롭스(선반9) + 퍼지(선반23)")
-    print("  사용자2 (WS51): 롤리팝(선반9) + 판사탕(선반41)")
-    print("  → 선반9 겹침: 사용자1 완료 후 WS51로 포워딩 예상")
+    print("  사용자1 (WS33): 드롭스(선반11) + 퍼지(선반15)")
+    print("  사용자2 (WS34): 롤리팝(선반11) + 구미(선반20)")
+    print("  → 선반11 겹침: 사용자1 완료 후 WS34로 포워딩 예상")
 
     # ──── Task 생성 ────
     print_step(1, "작업 생성 (batch)")
 
     t1 = task_mgr.create_task(
-        task_id="T1", workstation_id=50,
+        task_id="T1", workstation_id=33,
         items=["드롭스", "퍼지"],
-        optimized_shelf_sequence=[9, 23],
+        optimized_shelf_sequence=[11, 15],
     )
     t2 = task_mgr.create_task(
-        task_id="T2", workstation_id=51,
-        items=["롤리팝", "판사탕"],
-        optimized_shelf_sequence=[41, 9],
+        task_id="T2", workstation_id=34,
+        items=["롤리팝", "구미"],
+        optimized_shelf_sequence=[20, 11],
     )
 
     assert t1 and t2, "작업 생성 실패"
@@ -87,11 +87,11 @@ def test_forwarding():
     print(f"  T2 shelves: {t2.shelf_sequence}")
 
     # shelf_demand 확인
-    demand_9 = task_mgr.shelf_demand.get(9, [])
-    print(f"\n  선반9 수요: {len(demand_9)}개")
-    for d in demand_9:
+    demand_11 = task_mgr.shelf_demand.get(11, [])
+    print(f"\n  선반11 수요: {len(demand_11)}개")
+    for d in demand_11:
         print(f"    - task={d['task_id']}, ws={d['workstation_id']}, items={d['items']}")
-    assert len(demand_9) == 2, f"선반9 수요가 2개여야 함, 실제: {len(demand_9)}"
+    assert len(demand_11) == 2, f"선반11 수요가 2개여야 함, 실제: {len(demand_11)}"
 
     # ──── 로봇 배정 ────
     print_step(2, "로봇 배정")
@@ -108,22 +108,22 @@ def test_forwarding():
     robot_mgr.set_robot_status(2, RobotStatus.MOVING_TO_SHELF)
     r2.current_task_id = "T2"
 
-    print(f"  AGV-1: {r1.current_node} → {first_st1.target_node} (선반9)")
-    print(f"  AGV-2: {r2.current_node} → {first_st2.target_node} (선반41)")
+    print(f"  AGV-1: {r1.current_node} → {first_st1.target_node} (선반11)")
+    print(f"  AGV-2: {r2.current_node} → {first_st2.target_node} (선반20)")
 
-    # ──── AGV-1: 선반9 도착 → 픽업 → 배달 → 대기 ────
-    print_step(3, "AGV-1: 선반9 도착 → 픽업 → WS50 배달 → 대기")
+    # ──── AGV-1: 선반11 도착 → 픽업 → 배달 → 대기 ────
+    print_step(3, "AGV-1: 선반11 도착 → 픽업 → WS33 배달 → 대기")
 
     # GO_TO_SHELF 완료
-    robot_mgr.update_robot_position(1, 9)
+    robot_mgr.update_robot_position(1, 11)
     result = task_mgr.handle_subtask_complete("T1")
     # PICKUP_SHELF
-    shelf_mgr.mark_shelf_picked_up(9, 1)
-    robot_mgr.set_carrying_shelf(1, 9)
+    shelf_mgr.mark_shelf_picked_up(11, 1)
+    robot_mgr.set_carrying_shelf(1, 11)
     result = task_mgr.handle_subtask_complete("T1")
     # DELIVER_TO_WS
-    robot_mgr.update_robot_position(1, 50)
-    shelf_mgr.mark_shelf_at_workstation(9, 50)
+    robot_mgr.update_robot_position(1, 33)
+    shelf_mgr.mark_shelf_at_workstation(11, 33)
     result = task_mgr.handle_subtask_complete("T1")
     # WAIT_PICKING
     robot_mgr.set_robot_status(1, RobotStatus.WAITING_FOR_PICK)
@@ -133,16 +133,16 @@ def test_forwarding():
     assert current.subtask_type == SubTaskType.WAIT_PICKING
     assert "드롭스" in current.items_to_pick
 
-    # ──── AGV-2: 선반41 도착 → 픽업 → 배달 → 대기 (병렬) ────
-    print_step(4, "AGV-2: 선반41 도착 → 픽업 → WS51 배달 → 대기")
+    # ──── AGV-2: 선반20 도착 → 픽업 → 배달 → 대기 (병렬) ────
+    print_step(4, "AGV-2: 선반20 도착 → 픽업 → WS34 배달 → 대기")
 
-    robot_mgr.update_robot_position(2, 41)
+    robot_mgr.update_robot_position(2, 20)
     task_mgr.handle_subtask_complete("T2")
-    shelf_mgr.mark_shelf_picked_up(41, 2)
-    robot_mgr.set_carrying_shelf(2, 41)
+    shelf_mgr.mark_shelf_picked_up(20, 2)
+    robot_mgr.set_carrying_shelf(2, 20)
     task_mgr.handle_subtask_complete("T2")
-    robot_mgr.update_robot_position(2, 51)
-    shelf_mgr.mark_shelf_at_workstation(41, 51)
+    robot_mgr.update_robot_position(2, 34)
+    shelf_mgr.mark_shelf_at_workstation(20, 34)
     task_mgr.handle_subtask_complete("T2")
     robot_mgr.set_robot_status(2, RobotStatus.WAITING_FOR_PICK)
 
@@ -158,37 +158,37 @@ def test_forwarding():
 
     assert result["action"] == "shelf_done", f"Expected shelf_done, got {result['action']}"
     assert result["next_action"] == "forward", f"Expected forward, got {result.get('next_action')}"
-    assert result["forward_to_ws"] == 51, f"Expected forward to 51, got {result.get('forward_to_ws')}"
+    assert result["forward_to_ws"] == 34, f"Expected forward to 34, got {result.get('forward_to_ws')}"
 
-    print(f"\n  ✓ 포워딩 결정됨! 선반9 → WS51로 포워딩")
+    print(f"\n  -> 포워딩 결정됨! 선반11 → WS34로 포워딩")
 
     # RETURN_SHELF이 FORWARD_SHELF로 변환되었는지 확인
     forward_st = t1.get_current_subtask()
     print(f"  현재 서브태스크: {forward_st.subtask_type.value}, target={forward_st.target_node}")
     assert forward_st.subtask_type == SubTaskType.FORWARD_SHELF
-    assert forward_st.target_node == 51
+    assert forward_st.target_node == 34
 
-    # ──── AGV-1: 선반9를 WS51로 운반 → FORWARD_SHELF 도착 ────
-    print_step(6, "AGV-1: 선반9 → WS51 운반 (FORWARD_SHELF)")
+    # ──── AGV-1: 선반11를 WS34로 운반 → FORWARD_SHELF 도착 ────
+    print_step(6, "AGV-1: 선반11 → WS34 운반 (FORWARD_SHELF)")
 
     robot_mgr.set_robot_status(1, RobotStatus.DELIVERING_TO_WS)
-    robot_mgr.update_robot_position(1, 51)
+    robot_mgr.update_robot_position(1, 34)
 
     # FORWARD_SHELF 도착 처리
-    shelf_mgr.mark_shelf_at_workstation(9, 51)
+    shelf_mgr.mark_shelf_at_workstation(11, 34)
     robot_mgr.set_carrying_shelf(1, None)
 
     # 상대방 작업 수정
-    modified = task_mgr.handle_shelf_forwarded(9, 51)
+    modified = task_mgr.handle_shelf_forwarded(11, 34)
     print(f"  handle_shelf_forwarded 결과: {modified}")
     assert modified == "T2", f"Expected T2 modified, got {modified}"
 
-    # T2의 GO_TO_SHELF(선반9) 목적지 확인
+    # T2의 GO_TO_SHELF(선반11) 목적지 확인
     for st in t2.subtasks:
-        if st.shelf_id == 9 and st.subtask_type == SubTaskType.GO_TO_SHELF:
-            print(f"  T2 GO_TO_SHELF(선반9): target_node = {st.target_node}")
-            assert st.target_node == 51, f"Expected target 51, got {st.target_node}"
-            print(f"  ✓ T2의 GO_TO_SHELF 목적지가 51(WS2)로 변경됨!")
+        if st.shelf_id == 11 and st.subtask_type == SubTaskType.GO_TO_SHELF:
+            print(f"  T2 GO_TO_SHELF(선반11): target_node = {st.target_node}")
+            assert st.target_node == 34, f"Expected target 34, got {st.target_node}"
+            print(f"  -> T2의 GO_TO_SHELF 목적지가 34(WS2)로 변경됨!")
 
     # AGV-1의 작업 진행 (다음 선반 or 완료)
     result = task_mgr.handle_subtask_complete("T1")
@@ -198,64 +198,63 @@ def test_forwarding():
         next_st = t1.get_current_subtask()
         print(f"  AGV-1 다음 선반: {next_st.subtask_type.value}, target={next_st.target_node}")
 
-    # ──── 사용자2: 판사탕 픽업 완료 → 선반41 복귀 ────
-    print_step(7, "사용자2: '판사탕' 픽업 완료 → 선반41 복귀")
+    # ──── 사용자2: 구미 픽업 완료 → 선반20 복귀 ────
+    print_step(7, "사용자2: '구미' 픽업 완료 → 선반20 복귀")
 
-    result = task_mgr.handle_item_picked("T2", "판사탕")
+    result = task_mgr.handle_item_picked("T2", "구미")
     print(f"  결과: action={result['action']}, next={result.get('next_action')}")
     assert result["next_action"] == "return", f"Expected return, got {result.get('next_action')}"
 
-    # 선반41 복귀
+    # 선반20 복귀
     robot_mgr.set_robot_status(2, RobotStatus.RETURNING_SHELF)
-    return_to = result.get("return_to", 41)
+    return_to = result.get("return_to", 20)
     robot_mgr.update_robot_position(2, return_to)
-    shelf_mgr.mark_shelf_returned(41, return_to)
+    shelf_mgr.mark_shelf_returned(20, return_to)
     robot_mgr.set_carrying_shelf(2, None)
 
     result = task_mgr.handle_subtask_complete("T2")
     print(f"  AGV-2 다음: {result['action']}")
 
-    # ──── AGV-2: 포워딩된 선반9를 WS51에서 수령 ────
-    print_step(8, "AGV-2: 포워딩된 선반9 수령 (이미 WS51에 있음)")
+    # ──── AGV-2: 포워딩된 선반11를 WS34에서 수령 ────
+    print_step(8, "AGV-2: 포워딩된 선반11 수령 (이미 WS34에 있음)")
 
     next_st = t2.get_current_subtask()
     print(f"  현재 서브태스크: {next_st.subtask_type.value}, "
           f"shelf={next_st.shelf_id}, target={next_st.target_node}")
     assert next_st.subtask_type == SubTaskType.GO_TO_SHELF
-    assert next_st.target_node == 51, "GO_TO_SHELF target should be 51 (forwarded)"
+    assert next_st.target_node == 34, "GO_TO_SHELF target should be 34 (forwarded)"
 
-    # AGV-2의 현재 위치 (선반41 복귀 후 위치)
+    # AGV-2의 현재 위치 (선반20 복귀 후 위치)
     print(f"  AGV-2 현재 위치: {r2.current_node}")
     print(f"  GO_TO_SHELF 목적지: {next_st.target_node}")
 
-    # 시나리오: AGV-2가 WS51(노드51)에 있는 경우 → start == goal
-    # request_handler의 _plan_and_publish_move가 이 경우를 처리해야 함
+    # 시나리오: AGV-2가 WS34(노드34)에 있는 경우 → start == goal
     if r2.current_node == next_st.target_node:
-        print(f"  ⚠ start == goal! (둘 다 {r2.current_node})")
+        print(f"  ! start == goal! (둘 다 {r2.current_node})")
         print(f"  → _plan_and_publish_move에서 즉시 도착 처리 필요")
     else:
         print(f"  AGV-2가 {r2.current_node} → {next_st.target_node}로 이동 필요")
 
-    # GO_TO_SHELF(51) 도착 시뮬레이션
-    robot_mgr.update_robot_position(2, 51)
+    # GO_TO_SHELF(34) 도착 시뮬레이션
+    robot_mgr.update_robot_position(2, 34)
     task_mgr.handle_subtask_complete("T2")  # GO_TO_SHELF done
 
     # PICKUP_SHELF
     next_st = t2.get_current_subtask()
     assert next_st.subtask_type == SubTaskType.PICKUP_SHELF
-    shelf_mgr.mark_shelf_picked_up(9, 2)
-    robot_mgr.set_carrying_shelf(2, 9)
+    shelf_mgr.mark_shelf_picked_up(11, 2)
+    robot_mgr.set_carrying_shelf(2, 11)
     task_mgr.handle_subtask_complete("T2")  # PICKUP done
 
-    # DELIVER_TO_WS(51) - 이미 51에 있으므로 start == goal
+    # DELIVER_TO_WS(34) - 이미 34에 있으므로 start == goal
     next_st = t2.get_current_subtask()
     assert next_st.subtask_type == SubTaskType.DELIVER_TO_WS
-    assert next_st.target_node == 51
+    assert next_st.target_node == 34
     print(f"  DELIVER_TO_WS target={next_st.target_node}, AGV-2 at={r2.current_node}")
     print(f"  → start == goal! 즉시 도착 처리됨")
 
     # 도착 처리
-    shelf_mgr.mark_shelf_at_workstation(9, 51)
+    shelf_mgr.mark_shelf_at_workstation(11, 34)
     task_mgr.handle_subtask_complete("T2")  # DELIVER done
 
     # WAIT_PICKING
@@ -264,19 +263,19 @@ def test_forwarding():
     assert "롤리팝" in next_st.items_to_pick
     robot_mgr.set_robot_status(2, RobotStatus.WAITING_FOR_PICK)
 
-    print(f"  ✓ AGV-2 WAIT_PICKING 상태, items={next_st.items_to_pick}")
+    print(f"  -> AGV-2 WAIT_PICKING 상태, items={next_st.items_to_pick}")
 
-    # ──── 사용자2: 롤리팝 픽업 완료 → 선반9 복귀 ────
-    print_step(9, "사용자2: '롤리팝' 픽업 완료 → 선반9 복귀")
+    # ──── 사용자2: 롤리팝 픽업 완료 → 선반11 복귀 ────
+    print_step(9, "사용자2: '롤리팝' 픽업 완료 → 선반11 복귀")
 
     result = task_mgr.handle_item_picked("T2", "롤리팝")
     print(f"  결과: action={result['action']}, next={result.get('next_action')}")
     assert result["next_action"] == "return"
 
-    # 선반9 복귀
-    return_to = result.get("return_to", 9)
+    # 선반11 복귀
+    return_to = result.get("return_to", 11)
     robot_mgr.update_robot_position(2, return_to)
-    shelf_mgr.mark_shelf_returned(9, return_to)
+    shelf_mgr.mark_shelf_returned(11, return_to)
     robot_mgr.set_carrying_shelf(2, None)
     result = task_mgr.handle_subtask_complete("T2")
 
@@ -289,18 +288,18 @@ def test_forwarding():
     t1_status = t1.status.value
     t2_status = t2.status.value
 
-    # T1은 아직 선반23 작업이 남아있을 수 있음
+    # T1은 아직 선반15 작업이 남아있을 수 있음
     print(f"  T1 상태: {t1_status} (현재 서브태스크: {t1.current_subtask_idx}/{len(t1.subtasks)})")
     print(f"  T2 상태: {t2_status} (현재 서브태스크: {t2.current_subtask_idx}/{len(t2.subtasks)})")
 
     assert t2.status == TaskStatus.COMPLETED, f"T2 should be completed, got {t2_status}"
 
-    print(f"\n  선반9 최종 위치: node {shelf_mgr.get_shelf(9).current_node}, "
-          f"status={shelf_mgr.get_shelf(9).status.value}")
-    print(f"  선반41 최종 위치: node {shelf_mgr.get_shelf(41).current_node}, "
-          f"status={shelf_mgr.get_shelf(41).status.value}")
+    print(f"\n  선반11 최종 위치: node {shelf_mgr.get_shelf(11).current_node}, "
+          f"status={shelf_mgr.get_shelf(11).status.value}")
+    print(f"  선반20 최종 위치: node {shelf_mgr.get_shelf(20).current_node}, "
+          f"status={shelf_mgr.get_shelf(20).status.value}")
 
-    print(f"\n  ✓ 모든 포워딩 테스트 통과!")
+    print(f"\n  -> 모든 포워딩 테스트 통과!")
     print(f"{'='*60}\n")
 
 

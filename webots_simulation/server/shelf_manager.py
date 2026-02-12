@@ -142,6 +142,18 @@ class ShelfManager:
         print(f"[ShelfManager] Shelf {shelf.label} returned to node {return_node}")
         return True
 
+    def get_shelf_home(self, shelf_id: int) -> Optional[int]:
+        """선반의 원래 홈 노드 반환"""
+        shelf = self.shelves.get(shelf_id)
+        return shelf.home_node if shelf else None
+
+    def is_position_available(self, node: int) -> bool:
+        """해당 노드에 다른 선반이 IN_PLACE 상태로 있는지 확인"""
+        for shelf in self.shelves.values():
+            if shelf.status == ShelfStatus.IN_PLACE and shelf.current_node == node:
+                return False
+        return True
+
     def get_empty_shelf_positions(self) -> List[int]:
         """현재 비어있는 선반 자리 반환"""
         occupied = set()

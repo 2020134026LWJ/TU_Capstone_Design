@@ -44,20 +44,12 @@ class PathPlanner:
             a, b, c = int(e["from"]), int(e["to"]), float(e.get("cost", 1.0))
             self.graph.setdefault(a, []).append((b, c))
 
-        # 작업대 노드의 이웃을 명시적으로 제한 (50↔1, 51↔43)
-        self.graph[50] = [(1, 1.0)]
-        self.graph[51] = [(43, 1.0)]
-        # 역방향도 확인
-        if 50 not in [n for n, c in self.graph.get(1, [])]:
-            self.graph[1].append((50, 1.0))
-        if 51 not in [n for n, c in self.graph.get(43, [])]:
-            self.graph[43].append((51, 1.0))
-
         print(f"[PathPlanner] Loaded {len(self.nodes)} nodes "
               f"(M={len(self.nodes) - len(self.shelf_nodes) - len(self.workstation_nodes)}, "
               f"S={len(self.shelf_nodes)}, W={len(self.workstation_nodes)}) "
               f"from {self.map_file}")
-        print(f"[PathPlanner] Workstation edges: 50->{self.graph[50]}, 51->{self.graph[51]}")
+        for ws in self.workstation_nodes:
+            print(f"[PathPlanner] Workstation {ws} edges: {self.graph.get(ws, [])}")
 
     def _heuristic(self, a: int, b: int) -> float:
         """유클리드 거리 휴리스틱"""
