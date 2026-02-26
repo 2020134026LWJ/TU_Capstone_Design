@@ -36,7 +36,7 @@ class DBLoader:
     def _load_inventory(self) -> None:
         """재고 DB 로드 및 물품→선반 매핑 생성"""
         if not os.path.exists(self.inventory_file):
-            print(f"[DBLoader] Warning: {self.inventory_file} not found")
+            print(f"[DBLoader] Inventory file not found: {self.inventory_file}")
             return
 
         df = pd.read_excel(self.inventory_file)
@@ -130,7 +130,7 @@ class DBLoader:
                     "shelf_label": shelf_info[0],
                 })
             else:
-                print(f"[DBLoader] Warning: item '{name}' not found in inventory")
+                print(f"[DBLoader] Item '{name}' not found in inventory")
                 result.append({
                     "name": name,
                     "shelf_node": None,

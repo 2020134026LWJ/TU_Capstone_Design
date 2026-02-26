@@ -74,10 +74,14 @@ class PickingTask:
         return None
 
     def advance_subtask(self) -> Optional[SubTask]:
-        """다음 서브태스크로 진행"""
+        """다음 서브태스크로 진행 (COMPLETED로 미리 표시된 서브태스크 자동 스킵)"""
         if self.current_subtask_idx < len(self.subtasks):
             self.subtasks[self.current_subtask_idx].status = TaskStatus.COMPLETED
         self.current_subtask_idx += 1
+        # 포워딩 스킵으로 미리 COMPLETED된 서브태스크 건너뜀
+        while (self.current_subtask_idx < len(self.subtasks) and
+               self.subtasks[self.current_subtask_idx].status == TaskStatus.COMPLETED):
+            self.current_subtask_idx += 1
         nxt = self.get_current_subtask()
         if nxt:
             nxt.status = TaskStatus.IN_PROGRESS
@@ -262,39 +266,41 @@ class TaskManager:
             first.assigned_robot = robot_id
         return first
 
-    def handle_item_picked(self, task_id: str, item: str) -> Dict[str, Any]:
+    def handle_shelf_complete(self, task_id: str) -> Dict[str, Any]:
         """
-        작업자가 물품 픽업 완료 신호를 보냈을 때 처리
+        작업자가 선반의 모든 물품 픽업 완료 (선반 단위)
 
         Returns:
-            {"action": "continue_picking", "remaining": [...]}
-            또는
             {"action": "shelf_done", "next_action": "return"/"forward", ...}
+            또는
+            {"action": "shelf_done_pickup_for_return", "shelf_id": ...}
         """
         task = self.tasks.get(task_id)
         if not task:
             return {"action": "error", "message": f"Task {task_id} not found"}
 
-        # 물품 픽업 기록
-        if item not in task.items_picked:
-            task.items_picked.append(item)
-
-        # 현재 서브태스크 (WAIT_PICKING이어야 함)
         current_st = task.get_current_subtask()
         if not current_st or current_st.subtask_type != SubTaskType.WAIT_PICKING:
             return {"action": "error", "message": "Not in WAIT_PICKING state"}
 
-        # 이 선반에서 아직 가져올 물품이 남았는지 확인
-        remaining = [i for i in current_st.items_to_pick if i not in task.items_picked]
+        # 이 선반의 모든 items 한번에 picked 처리
+        for item in current_st.items_to_pick:
+            if item not in task.items_picked:
+                task.items_picked.append(item)
 
-        if remaining:
-            return {
-                "action": "continue_picking",
-                "remaining_items_on_shelf": remaining,
-                "total_remaining": [i for i in task.items if i not in task.items_picked],
-            }
+        # 포워딩 재픽업 사이클 확인: 다음 서브태스크가 PICKUP_SHELF(같은 선반)이면
+        # → _decide_shelf_action 대신 재픽업 액션 반환
+        next_idx = task.current_subtask_idx + 1
+        if next_idx < len(task.subtasks):
+            peek_next = task.subtasks[next_idx]
+            if (peek_next.subtask_type == SubTaskType.PICKUP_SHELF and
+                    peek_next.shelf_id == current_st.shelf_id):
+                task.advance_subtask()  # WAIT_PICKING → PICKUP_SHELF
+                return {
+                    "action": "shelf_done_pickup_for_return",
+                    "shelf_id": current_st.shelf_id,
+                }
 
-        # 이 선반의 모든 물품 픽업 완료 → 다음 단계 결정
         return self._decide_shelf_action(task, current_st.shelf_id)
 
     def _decide_shelf_action(self, task: PickingTask, shelf_id: int) -> Dict[str, Any]:
@@ -352,7 +358,7 @@ class TaskManager:
         if not current_st:
             return {"action": "error", "message": "No current subtask"}
 
-        # WAIT_PICKING은 handle_item_picked에서 처리
+        # WAIT_PICKING은 handle_shelf_complete에서 처리
         if current_st.subtask_type == SubTaskType.WAIT_PICKING:
             return {
                 "action": "wait_picking",
@@ -435,6 +441,118 @@ class TaskManager:
 
         return None
 
+    def insert_forward_return_subtasks(
+        self, task_id: str, shelf_id: int, dest_ws: int, items_to_pick: List[str]
+    ) -> None:
+        """포워딩 후 목적지 WS에서 재픽업+반납 서브태스크 삽입
+
+        FORWARD_SHELF(현재 서브태스크) 바로 다음에 삽입:
+          WAIT_PICKING(dest_ws, items)  → 목적지 WS에서 픽업 대기
+          PICKUP_SHELF(dest_ws)         → 선반 다시 들어올리기
+          RETURN_SHELF(home_node)       → 원래 위치로 반납 (target은 _handle_pickup_ack에서 확정)
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return
+
+        idx = task.current_subtask_idx  # 현재 = FORWARD_SHELF
+        base_id = f"{task_id}_FWD{shelf_id}"
+
+        new_subtasks = [
+            SubTask(
+                subtask_id=f"{base_id}_WAIT",
+                subtask_type=SubTaskType.WAIT_PICKING,
+                shelf_id=shelf_id,
+                target_node=dest_ws,
+                items_to_pick=items_to_pick,
+            ),
+            SubTask(
+                subtask_id=f"{base_id}_PICKUP",
+                subtask_type=SubTaskType.PICKUP_SHELF,
+                shelf_id=shelf_id,
+                target_node=dest_ws,  # 선반이 AT_WORKSTATION, 로봇은 이미 여기 있음
+            ),
+            SubTask(
+                subtask_id=f"{base_id}_RETURN",
+                subtask_type=SubTaskType.RETURN_SHELF,
+                shelf_id=shelf_id,
+                target_node=shelf_id,  # placeholder; _handle_pickup_ack에서 실제 위치로 갱신
+            ),
+        ]
+
+        # FORWARD_SHELF 바로 다음에 삽입 (원래 next 서브태스크 앞)
+        task.subtasks = task.subtasks[:idx + 1] + new_subtasks + task.subtasks[idx + 1:]
+        print(f"[TaskManager] Task {task_id}: inserted WAIT+PICKUP+RETURN for shelf {shelf_id} "
+              f"at dest WS {dest_ws} (items: {items_to_pick})")
+
+    def skip_shelf_subtasks_for_forwarding(
+        self, task_id: str, shelf_id: int
+    ) -> Optional[SubTask]:
+        """포워딩 로봇(T1)이 선반을 대신 처리하므로, T2의 해당 선반 서브태스크 건너뜀
+
+        현재 인덱스 이후 shelf_id에 해당하는 모든 서브태스크를 COMPLETED로 표시하고
+        current_subtask_idx를 다음 활성 서브태스크로 이동.
+
+        Returns: 다음으로 실행할 서브태스크 (없으면 None = 작업 완료)
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+
+        # 현재 위치 이후 shelf_id 관련 서브태스크 모두 COMPLETED 표시
+        for st in task.subtasks[task.current_subtask_idx:]:
+            if st.shelf_id == shelf_id:
+                st.status = TaskStatus.COMPLETED
+
+        # 현재 인덱스를 첫 번째 비완료 서브태스크로 이동
+        while (task.current_subtask_idx < len(task.subtasks) and
+               task.subtasks[task.current_subtask_idx].status == TaskStatus.COMPLETED):
+            task.current_subtask_idx += 1
+
+        next_st = task.get_current_subtask()
+        if next_st:
+            next_st.status = TaskStatus.IN_PROGRESS
+            print(f"[TaskManager] Task {task_id}: skipped shelf {shelf_id} subtasks, "
+                  f"next = {next_st.subtask_type.value} (node {next_st.target_node})")
+        else:
+            task.status = TaskStatus.COMPLETED
+            self._remove_shelf_demand(task_id)
+            print(f"[TaskManager] Task {task_id}: completed after skipping shelf {shelf_id}")
+
+        return next_st
+
+    def get_demand_items_for_ws(self, shelf_id: int, ws_id: int) -> List[str]:
+        """dest WS에서 아직 필요한 선반의 물품 목록 반환"""
+        demands = self.shelf_demand.get(shelf_id, [])
+        for d in demands:
+            if d["workstation_id"] == ws_id:
+                other_task = self.tasks.get(d["task_id"])
+                if other_task:
+                    return [i for i in d["items"] if i not in other_task.items_picked]
+        return []
+
+    def find_task_waiting_for_shelf(self, shelf_id: int) -> Optional["PickingTask"]:
+        """shelf_id를 WAIT_PICKING 중인 task 찾기 (포워딩 재픽업 케이스 포함)"""
+        for task in self.tasks.values():
+            if task.status != TaskStatus.IN_PROGRESS:
+                continue
+            current_st = task.get_current_subtask()
+            if (current_st and
+                    current_st.subtask_type == SubTaskType.WAIT_PICKING and
+                    current_st.shelf_id == shelf_id):
+                return task
+        return None
+
+    def remove_shelf_demand_for_shelf(self, task_id: str, shelf_id: int) -> None:
+        """특정 작업의 특정 선반 수요 제거"""
+        if shelf_id in self.shelf_demand:
+            self.shelf_demand[shelf_id] = [
+                d for d in self.shelf_demand[shelf_id]
+                if d["task_id"] != task_id
+            ]
+            if not self.shelf_demand[shelf_id]:
+                del self.shelf_demand[shelf_id]
+
     def _remove_shelf_demand(self, task_id: str) -> None:
         """완료된 작업의 선반 수요 제거"""
         for shelf_id in list(self.shelf_demand.keys()):
@@ -444,6 +562,46 @@ class TaskManager:
             ]
             if not self.shelf_demand[shelf_id]:
                 del self.shelf_demand[shelf_id]
+
+    def rotate_shelf_to_end(self, task_id: str) -> Optional[int]:
+        """Bug A: 현재 블록된 선반 서브태스크 5개를 남은 순서 맨 뒤로 이동.
+        다음 시도할 선반 ID를 반환; 더 이상 다음 선반이 없으면 None.
+
+        선반당 서브태스크: GO, PICKUP, DELIVER, WAIT, RETURN = 5개
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+
+        idx = task.current_subtask_idx
+        SHELF_SUBTASKS = 5
+        remaining = len(task.subtasks) - idx
+        remaining_shelves = remaining // SHELF_SUBTASKS
+
+        if remaining_shelves <= 1:
+            return None  # 다음 선반 없음, 순서 변경 불가
+
+        # 블록된 선반 5개 서브태스크를 남은 서브태스크 맨 뒤로 이동
+        blocked_group = task.subtasks[idx:idx + SHELF_SUBTASKS]
+        rest_group = task.subtasks[idx + SHELF_SUBTASKS:]
+        task.subtasks = task.subtasks[:idx] + rest_group + blocked_group
+
+        # shelf_sequence에서 현재(블록된) 선반을 남은 선반 맨 뒤로 이동
+        completed_count = idx // SHELF_SUBTASKS
+        if completed_count < len(task.shelf_sequence):
+            remaining_seq = task.shelf_sequence[completed_count:]
+            if len(remaining_seq) > 1:
+                task.shelf_sequence = (
+                    task.shelf_sequence[:completed_count]
+                    + remaining_seq[1:]
+                    + [remaining_seq[0]]
+                )
+
+        # 새 첫 번째 서브태스크 (다음 선반) 확인
+        new_first = task.get_current_subtask()
+        if new_first and new_first.subtask_type == SubTaskType.GO_TO_SHELF:
+            return new_first.shelf_id
+        return None
 
     def get_task(self, task_id: str) -> Optional[PickingTask]:
         """작업 조회"""

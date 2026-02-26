@@ -54,6 +54,8 @@ class Robot:
 class RobotManager:
     """로봇 관리자"""
 
+    # ─── 초기화 ───
+
     def __init__(self, config: Config):
         self.config = config
         self.robots: Dict[int, Robot] = {}
@@ -86,6 +88,8 @@ class RobotManager:
             self.robots[1] = Robot(rid=1, name="AGV-1", home_node=33, current_node=33)
             self.robots[2] = Robot(rid=2, name="AGV-2", home_node=34, current_node=34)
 
+    # ─── 조회 ───
+
     def get_robot(self, rid: int) -> Optional[Robot]:
         """로봇 조회"""
         return self.robots.get(rid)
@@ -93,13 +97,6 @@ class RobotManager:
     def get_all_robots(self) -> List[Robot]:
         """모든 로봇 조회"""
         return list(self.robots.values())
-
-    def get_idle_robot(self) -> Optional[Robot]:
-        """유휴 로봇 조회"""
-        for robot in self.robots.values():
-            if robot.status == RobotStatus.IDLE:
-                return robot
-        return None
 
     def get_available_robot(self, target_node: int = None, path_planner=None) -> Optional[Robot]:
         """유휴 로봇 조회 (target_node 지정 시 가장 가까운 로봇 우선)"""
@@ -111,6 +108,8 @@ class RobotManager:
             idle_robots.sort(key=lambda r: path_planner._heuristic(r.current_node, target_node))
 
         return idle_robots[0]
+
+    # ─── 업데이트 ───
 
     def update_robot_position(self, rid: int, node: int) -> bool:
         """로봇 위치 업데이트"""
@@ -184,9 +183,7 @@ class RobotManager:
 
         return completed_task
 
-    def get_robot_by_worker(self, worker_id: int) -> Optional[Robot]:
-        """작업자 ID로 로봇 조회 (worker_id = robot_id로 매핑)"""
-        return self.robots.get(worker_id)
+    # ─── 상태 ───
 
     def get_status_summary(self) -> Dict[str, Any]:
         """전체 상태 요약"""

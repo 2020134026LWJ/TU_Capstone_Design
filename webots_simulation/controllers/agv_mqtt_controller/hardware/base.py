@@ -94,6 +94,10 @@ class CollisionSensorInterface(ABC):
         """다른 로봇의 거리 및 전방 여부 반환"""
         ...
 
+    def get_other_robot_position(self) -> Optional[Tuple[float, float]]:
+        """다른 로봇의 (x, y) 좌표 반환. 미지원 구현은 None"""
+        return None
+
 
 class TimestepInterface(ABC):
     """시뮬레이션/실행 타임스텝 인터페이스"""

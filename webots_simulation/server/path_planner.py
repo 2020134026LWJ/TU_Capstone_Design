@@ -1,7 +1,6 @@
 """
 경로 계획 모듈
 - A* 알고리즘 (시간 포함)
-- Prioritized Planning (예약 기반, 현재 미사용)
 - 맵 로드 (노드 타입: M=통로, S=선반, W=작업대)
 - 선반 노드 통과 허용 (KIVA 스타일 - AGV가 선반 아래로 이동)
 """
@@ -143,67 +142,6 @@ class PathPlanner:
                     heapq.heappush(open_heap, (f_next, tentative_g, nxt_node, nt))
 
         return None
-
-    def prioritized_planning(
-        self,
-        starts: List[int],
-        goals: List[int],
-        max_time: int = 50,
-        stay_time_at_goal: int = 3
-    ) -> Optional[List[List[Tuple[int, int]]]]:
-        """
-        Prioritized Planning - 다중 로봇 경로 계획
-
-        Args:
-            starts: 시작 노드 리스트
-            goals: 목표 노드 리스트
-            max_time: 최대 시간
-            stay_time_at_goal: 목표 도착 후 대기 시간
-
-        Returns:
-            각 로봇의 시간 포함 경로 리스트 또는 None
-        """
-        num_robots = len(starts)
-        reserved_nodes: Set[Tuple[int, int]] = set()
-        reserved_edges: Set[Tuple[int, int, int]] = set()
-
-        paths: List[Optional[List[Tuple[int, int]]]] = [None] * num_robots
-
-        for rid in range(num_robots):
-            start = starts[rid]
-            goal = goals[rid]
-
-            path = self.astar_with_time(
-                start=start,
-                goal=goal,
-                reserved_nodes=reserved_nodes,
-                reserved_edges=reserved_edges,
-                max_time=max_time,
-            )
-
-            if path is None:
-                print(f"[PathPlanner] Robot {rid}: no path found ({start} -> {goal})")
-                return None
-
-            # 경로 예약
-            for i in range(len(path)):
-                node_i, t_i = path[i]
-                reserved_nodes.add((node_i, t_i))
-
-                if i + 1 < len(path):
-                    node_j, t_j = path[i + 1]
-                    if node_j != node_i:
-                        reserved_edges.add((node_i, node_j, t_i))
-
-            # 목표 노드에서 대기 시간 예약
-            goal_node, goal_t = path[-1]
-            for dt in range(1, stay_time_at_goal + 1):
-                reserved_nodes.add((goal_node, goal_t + dt))
-
-            paths[rid] = path
-            print(f"[PathPlanner] Robot {rid}: path found ({start} -> {goal}), length={len(path)}")
-
-        return [p for p in paths if p is not None]
 
     def plan_single_robot(
         self,

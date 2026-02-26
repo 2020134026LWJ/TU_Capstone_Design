@@ -135,6 +135,15 @@ class WebotsCollisionSensor(CollisionSensorInterface):
         else:
             print(f"[AGV {rid}] Warning: {other_def} not found (no collision avoidance)")
 
+    def get_other_robot_position(self) -> Optional[Tuple[float, float]]:
+        if not self._other_node:
+            return None
+        try:
+            pos = self._other_node.getField("translation").getSFVec3f()
+            return pos[0], pos[1]
+        except Exception:
+            return None
+
     def get_other_robot_distance_and_ahead(
         self, x: float, y: float, heading: float
     ) -> Tuple[float, bool]:

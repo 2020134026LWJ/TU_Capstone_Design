@@ -3,7 +3,7 @@
 import math
 from typing import Callable, List, Optional, Tuple
 
-from hardware.base import CollisionSensorInterface, MotorInterface, PositionInterface
+from hardware.base import MotorInterface, PositionInterface
 
 # ─── 그리드 설정 ───
 CELL_SIZE = 1.0
@@ -15,10 +15,6 @@ MOVE_SPEED = 3.0
 TURN_SPEED = 2.0
 POSITION_TOLERANCE = 0.05
 ANGLE_TOLERANCE = 0.03
-
-# ─── 충돌 회피 ───
-COLLISION_SLOW_DIST = 0.7
-COLLISION_STOP_DIST = 0.45
 
 # ─── 방향 ───
 DIR_EAST = 0.0
@@ -34,16 +30,12 @@ class Navigator:
         self,
         position: PositionInterface,
         motors: MotorInterface,
-        collision: CollisionSensorInterface,
         rid: int,
-        other_rid: int,
         start_node: int,
     ):
         self._position = position
         self._motors = motors
-        self._collision = collision
         self._rid = rid
-        self._other_rid = other_rid
 
         # ─── 상태 ───
         self.current_node = start_node
@@ -59,10 +51,15 @@ class Navigator:
 
         # ─── 콜백 ───
         self._on_arrived_callback: Optional[Callable[[int], None]] = None
+        self._on_node_callback: Optional[Callable[[int], None]] = None
 
     def set_on_arrived(self, callback: Callable[[int], None]):
         """목표 도착 시 콜백 설정"""
         self._on_arrived_callback = callback
+
+    def set_on_node(self, callback: Callable[[int], None]):
+        """중간 노드 통과 시 콜백 설정"""
+        self._on_node_callback = callback
 
     # ─── 좌표 변환 ───
 
@@ -77,6 +74,27 @@ class Navigator:
         col = idx % GRID_COLS
         row = idx // GRID_COLS
         return (col + 0.5) * CELL_SIZE, (row + 0.5) * CELL_SIZE
+
+    @staticmethod
+    def world_to_node(x: float, y: float) -> Optional[int]:
+        """월드 좌표 → 노드 ID. 노드 중심에서 CELL_SIZE*0.45 이내일 때만 반환"""
+        SNAP = CELL_SIZE * 0.45
+        # WS 노드 체크
+        if x < 0.0:
+            if abs(y - 0.5) < SNAP:
+                return 33
+            if abs(y - 3.5) < SNAP:
+                return 34
+            return None
+        # 그리드 노드
+        col = round(x - 0.5)
+        row = round(y - 0.5)
+        if 0 <= col < GRID_COLS and 0 <= row < GRID_ROWS:
+            cx = (col + 0.5) * CELL_SIZE
+            cy = (row + 0.5) * CELL_SIZE
+            if abs(x - cx) < SNAP and abs(y - cy) < SNAP:
+                return row * GRID_COLS + col + 1
+        return None
 
     @staticmethod
     def normalize_angle(angle: float) -> float:
@@ -98,32 +116,6 @@ class Navigator:
         """이미 목표에 위치한 경우"""
         self.goal_node = goal
         self.current_node = goal
-
-    # ─── 충돌 회피 ───
-
-    def get_collision_speed_factor(self) -> float:
-        """방향 인식 충돌 회피 - 다른 로봇이 전방에 있을 때만 감속"""
-        x, y = self._position.get_position()
-        heading = self._position.get_bearing()
-        dist, is_ahead = self._collision.get_other_robot_distance_and_ahead(
-            x, y, heading
-        )
-
-        if not is_ahead:
-            return 1.0
-
-        if dist <= COLLISION_STOP_DIST:
-            if self._rid < self._other_rid:
-                return 0.2
-            return 0.0
-        elif dist <= COLLISION_SLOW_DIST:
-            factor = (dist - COLLISION_STOP_DIST) / (
-                COLLISION_SLOW_DIST - COLLISION_STOP_DIST
-            )
-            if self._rid < self._other_rid:
-                return max(0.3, factor)
-            return factor
-        return 1.0
 
     # ─── 경로 추종 (내부) ───
 
@@ -159,7 +151,11 @@ class Navigator:
         print(f"[AGV {self._rid}] Reached node {node}")
 
         if self.path_queue:
-            self._move_to_next_node()
+            # 중간 노드: 서버에 위치 알리고 NODE_WAIT (서버 resume 대기)
+            self._motors.stop()
+            self.state = "NODE_WAIT"
+            if self._on_node_callback:
+                self._on_node_callback(node)
         else:
             self.state = "IDLE"
             self._motors.stop()
@@ -168,19 +164,21 @@ class Navigator:
                     self._on_arrived_callback(node)
                 self.goal_node = None
 
+    def resume(self):
+        """서버로부터 다음 노드 이동 허가 수신"""
+        if self.state == "NODE_WAIT" and self.path_queue:
+            self._move_to_next_node()
+
     # ─── 상태 머신 ───
 
     def update(self):
-        speed_factor = self.get_collision_speed_factor()
-
         if self.state == "IDLE":
             self._motors.stop()
 
-        elif self.state == "TURNING":
-            if speed_factor <= 0.0:
-                self._motors.stop()
-                return
+        elif self.state == "NODE_WAIT":
+            self._motors.stop()
 
+        elif self.state == "TURNING":
             current_angle = self._position.get_bearing()
             angle_diff = self.normalize_angle(self.target_angle - current_angle)
 
@@ -191,14 +189,10 @@ class Navigator:
                 self.move_start_pos = (cx, cy)
             else:
                 speed = TURN_SPEED if angle_diff > 0 else -TURN_SPEED
-                speed *= min(1.0, abs(angle_diff) / 0.5) * speed_factor
+                speed *= min(1.0, abs(angle_diff) / 0.5)
                 self._motors.set_speeds(-speed, speed)
 
         elif self.state == "MOVING":
-            if speed_factor <= 0.0:
-                self._motors.stop()
-                return
-
             cx, cy = self._position.get_position()
             tx, ty = self.target_pos
             dx, dy = tx - cx, ty - cy
@@ -212,5 +206,4 @@ class Navigator:
                 angle_to_target = math.atan2(dy, dx)
                 angle_diff = self.normalize_angle(angle_to_target - current_angle)
                 correction = max(-1.0, min(1.0, angle_diff * 2.0))
-                move_spd = MOVE_SPEED * speed_factor
-                self._motors.set_speeds(move_spd - correction, move_spd + correction)
+                self._motors.set_speeds(MOVE_SPEED - correction, MOVE_SPEED + correction)

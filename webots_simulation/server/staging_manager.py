@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 STAGING_TIMEOUT = 30  # 타임아웃 (초) - ArUco 인식 실패 시 강제 해제
 
@@ -38,6 +38,7 @@ class CorridorInfo:
     occupying_rid: Optional[int] = None
     occupied_at: float = 0.0
     queue: deque = field(default_factory=deque)
+    is_exiting: bool = False  # mark_exiting() 호출 이후 퇴출 중 여부
 
 
 class StagingManager:
@@ -70,6 +71,9 @@ class StagingManager:
         self._staging_to_ws: Dict[int, int] = {}
         for ws_node, corridor in self.corridors.items():
             self._staging_to_ws[corridor.staging_node] = ws_node
+
+        # 타임아웃으로 해제된 대기 AGV 목록 (request_handler가 드레인해서 이동 명령 발행)
+        self.pending_timeout_releases: List[StagedAGV] = []
 
         print(f"[StagingManager] Initialized {len(self.corridors)} corridors")
 
@@ -153,12 +157,17 @@ class StagingManager:
         # 트리거 인식 = 퇴출 AGV가 게이트웨이를 벗어남
         print(f"[StagingManager] W{ws_node}: AGV-{rid} passed trigger node {marker_id}")
 
+        if corridor.occupying_rid != rid:
+            # 이미 처리된 트리거 or 다른 로봇이 점유 중 → 무시
+            return None
+
         if corridor.queue:
             # 대기 AGV 해제 (FIFO)
             released = corridor.queue.popleft()
             corridor.state = CorridorState.OCCUPIED
             corridor.occupying_rid = released.rid
             corridor.occupied_at = time.time()
+            corridor.is_exiting = False
             print(f"[StagingManager] W{ws_node}: releasing AGV-{released.rid} "
                   f"from staging (queue remaining: {len(corridor.queue)})")
             return released
@@ -166,7 +175,40 @@ class StagingManager:
             # 대기 AGV 없음 → 회랑 해제
             corridor.state = CorridorState.FREE
             corridor.occupying_rid = None
+            corridor.is_exiting = False
             print(f"[StagingManager] W{ws_node}: corridor FREE")
+            return None
+
+    def release_corridor_without_trigger(self, ws_node: int, rid: int) -> Optional["StagedAGV"]:
+        """포워딩 시 소스 회랑 즉시 해제 (트리거 노드 없이)
+
+        RETURN_SHELF는 트리거 ArUco로 회랑을 해제하지만,
+        FORWARD_SHELF는 트리거 노드를 지나지 않을 수 있으므로 직접 해제.
+        포워딩 경로를 _robot_planned_paths에 등록한 뒤 호출해야 함.
+        """
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return None
+
+        if corridor.occupying_rid != rid:
+            print(f"[StagingManager] W{ws_node}: release_without_trigger skip "
+                  f"(occupying={corridor.occupying_rid}, rid={rid})")
+            return None
+
+        if corridor.queue:
+            released = corridor.queue.popleft()
+            corridor.state = CorridorState.OCCUPIED
+            corridor.occupying_rid = released.rid
+            corridor.occupied_at = time.time()
+            corridor.is_exiting = False
+            print(f"[StagingManager] W{ws_node}: forwarding release → "
+                  f"AGV-{released.rid} corridor transferred (queue remaining: {len(corridor.queue)})")
+            return released
+        else:
+            corridor.state = CorridorState.FREE
+            corridor.occupying_rid = None
+            corridor.is_exiting = False
+            print(f"[StagingManager] W{ws_node}: forwarding release → corridor FREE")
             return None
 
     def mark_exiting(self, ws_node: int, rid: int):
@@ -178,7 +220,29 @@ class StagingManager:
         corridor.state = CorridorState.OCCUPIED
         corridor.occupying_rid = rid
         corridor.occupied_at = time.time()
+        corridor.is_exiting = True
         print(f"[StagingManager] W{ws_node}: AGV-{rid} exiting")
+
+    def check_position_release(self, rid: int, node: int) -> Optional["StagedAGV"]:
+        """위치 기반 회랑 자동 해제.
+
+        퇴출 중인(is_exiting=True) 로봇이 회랑 구역(WS + 게이트웨이) 밖으로
+        이동하면 즉시 회랑을 해제한다. ArUco 트리거가 경로에 없는 경우에도 동작.
+
+        Returns:
+            StagedAGV: 해제된 대기 AGV (이동 명령 발행 필요)
+            None: 해제 없음 또는 해제 후 대기 AGV 없음 (FREE)
+        """
+        for ws_node, corridor in self.corridors.items():
+            if (corridor.occupying_rid == rid
+                    and corridor.state == CorridorState.OCCUPIED
+                    and corridor.is_exiting):
+                corridor_area = {corridor.ws_node, corridor.gateway_node}
+                if node not in corridor_area:
+                    print(f"[StagingManager] W{ws_node}: position-based release, "
+                          f"AGV-{rid} moved to node {node}")
+                    return self.release_corridor_without_trigger(ws_node, rid)
+        return None
 
     def _check_timeout(self, corridor: CorridorInfo):
         """타임아웃 체크 - ArUco 인식 실패 시 강제 해제"""
@@ -194,12 +258,13 @@ class StagingManager:
                 corridor.occupying_rid = released.rid
                 corridor.occupied_at = time.time()
                 print(f"[StagingManager] W{corridor.ws_node}: timeout-releasing AGV-{released.rid}")
-                # Note: 실제 이동은 호출자가 처리
+                # 이동 명령은 pending_timeout_releases에 저장 → request_handler가 처리
+                self.pending_timeout_releases.append(released)
             else:
                 corridor.state = CorridorState.FREE
                 corridor.occupying_rid = None
 
-    def get_status_summary(self) -> Dict:
+    def get_status_summary(self) -> Dict[int, Dict[str, Any]]:
         """스테이징 상태 요약"""
         return {
             ws_node: {

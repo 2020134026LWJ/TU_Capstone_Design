@@ -185,6 +185,13 @@ class MQTTPublisher:
             print(f"[MQTTPublisher] Shelf command publish failed: {e}")
             return False
 
+    def publish_resume(self, rid: int) -> None:
+        """노드 이동 허가 (resume) 발행"""
+        if not self.client or not self.connected:
+            return
+        payload = {"rid": rid, "cmd": "resume"}
+        self.client.publish(self.config.mqtt_topic_control, json.dumps(payload), qos=0)
+
     def is_connected(self) -> bool:
         """연결 상태 확인"""
         return self.connected

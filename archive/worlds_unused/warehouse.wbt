@@ -1,0 +1,100 @@
+#VRML_SIM R2023b utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/kuka/youbot/protos/Youbot.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/factory/containers/protos/WoodenBox.proto"
+
+WorldInfo {
+  info [
+    "AGV Warehouse Simulation"
+    "TU Capstone Design Project"
+  ]
+  title "AGV Warehouse"
+  basicTimeStep 16
+  contactProperties [
+    ContactProperties {
+      material1 "floor"
+      material2 "wheel"
+      coulombFriction [2]
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -0.5 0.5 0.7 1.9
+  position 0 -8 12
+  follow "agv_0"
+}
+
+TexturedBackground {
+  texture "factory"
+}
+
+TexturedBackgroundLight {
+}
+
+# 창고 바닥 (7x5 그리드, 각 셀 1m)
+RectangleArena {
+  translation 3 2 0
+  floorSize 7 5
+  floorTileSize 1 1
+  floorAppearance PBRAppearance {
+    baseColor 0.8 0.8 0.8
+    roughness 1
+    metalness 0
+  }
+  wallHeight 0.3
+  wallAppearance PBRAppearance {
+    baseColor 0.5 0.5 0.5
+    roughness 0.5
+  }
+}
+
+# AGV 로봇 0 (youBot 기반)
+Youbot {
+  translation 0.5 0.5 0.1
+  rotation 0 0 1 0
+  name "agv_0"
+  controller "agv_controller"
+  controllerArgs ["0"]
+  bodySlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+    InertialUnit {
+      name "imu"
+    }
+  ]
+}
+
+# AGV 로봇 1
+Youbot {
+  translation 0.5 4.5 0.1
+  rotation 0 0 1 0
+  name "agv_1"
+  controller "agv_controller"
+  controllerArgs ["1"]
+  bodySlot [
+    GPS {
+      name "gps"
+    }
+    Compass {
+      name "compass"
+    }
+    InertialUnit {
+      name "imu"
+    }
+  ]
+}
+
+# 선반/박스 배치 (선택적 장애물)
+WoodenBox {
+  translation 3.5 2.5 0.3
+  name "shelf_0"
+  size 0.8 0.8 0.6
+}

@@ -10,6 +10,7 @@ TOPIC_ARRIVED = "/agv/arrived"
 TOPIC_SHELF_CMD = "/agv/shelf_cmd"
 TOPIC_SHELF_ACK = "/agv/shelf_ack"
 TOPIC_MARKER = "/agv/marker"
+TOPIC_CONTROL = "/agv/control"
 
 # ─── 기본 설정 ───
 DEFAULT_HOST = "localhost"
@@ -78,6 +79,12 @@ class MQTTHandler:
         msg = {"type": "robot_arrived", "rid": self.rid, "node": node}
         self._client.publish(TOPIC_ARRIVED, json.dumps(msg))
         print(f"[AGV {self.rid}] → arrived at node {node}")
+
+    def publish_position(self, node: int):
+        if not self._connected:
+            return
+        msg = {"type": "robot_position", "rid": self.rid, "node": node}
+        self._client.publish(TOPIC_ARRIVED, json.dumps(msg))
 
     def publish_shelf_ack(self, shelf_id: int, command: str):
         if not self._connected:

@@ -4,7 +4,7 @@ import time
 
 from hardware.base import HardwarePack
 from aruco_detector import ArucoDetector
-from mqtt_handler import MQTTHandler, TOPIC_PLAN, TOPIC_SHELF_CMD
+from mqtt_handler import MQTTHandler, TOPIC_PLAN, TOPIC_SHELF_CMD, TOPIC_CONTROL
 from navigation import Navigator
 
 # ─── 설정 ───
@@ -26,9 +26,7 @@ class AGVMainController:
         self.nav = Navigator(
             position=hw.position,
             motors=hw.motors,
-            collision=hw.collision,
             rid=hw.rid,
-            other_rid=hw.other_rid,
             start_node=hw.start_node,
         )
 
@@ -37,8 +35,10 @@ class AGVMainController:
 
         # ─── 콜백 연결 ───
         self.nav.set_on_arrived(self._on_goal_arrived)
+        self.nav.set_on_node(self._on_intermediate_node)
         self.mqtt.register_callback(TOPIC_PLAN, self._handle_plan)
         self.mqtt.register_callback(TOPIC_SHELF_CMD, self._handle_shelf_cmd)
+        self.mqtt.register_callback(TOPIC_CONTROL, self._handle_control)
         self.mqtt.connect()
 
     # ─── MQTT 콜백 ───
@@ -88,6 +88,19 @@ class AGVMainController:
         """Navigator가 목표 도착 시 호출"""
         self.mqtt.publish_arrived(node)
 
+    def _on_intermediate_node(self, node: int):
+        """Navigator가 중간 노드 통과 시 호출"""
+        self.mqtt.publish_position(node)
+
+    def _handle_control(self, data):
+        """서버 제어 명령 수신 (resume)"""
+        if int(data.get("rid", -1)) != self.hw.rid:
+            return
+        cmd = data.get("cmd")
+        if cmd == "resume":
+            print(f"[AGV {self.hw.rid}] ← resume from server")
+            self.nav.resume()
+
     # ─── 상태 발행 ───
 
     def _publish_state(self):
@@ -130,8 +143,9 @@ class AGVMainController:
             if marker_counter >= MARKER_DETECT_INTERVAL:
                 if self.hw.camera:
                     gray = self.hw.camera.capture()
+                    prev_marker = self.aruco.detected_marker
                     marker_id = self.aruco.detect(gray)
-                    if marker_id is not None:
+                    if marker_id is not None and marker_id != prev_marker:
                         self.mqtt.publish_marker(marker_id)
                 marker_counter = 0
 

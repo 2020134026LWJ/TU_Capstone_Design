@@ -86,7 +86,7 @@ class AGVServer:
             pass
 
     def _setup_mqtt_subscriptions(self):
-        """AGV 컨트롤러로부터 MQTT 메시지 수신 설정"""
+        """AGV 컨트롤러 및 GUI로부터 MQTT 메시지 수신 설정"""
         self.mqtt_publisher.subscribe(
             "/agv/arrived",
             lambda data: self._handle_mqtt_arrived(data),
@@ -99,10 +99,18 @@ class AGVServer:
             "/agv/marker",
             lambda data: self._handle_mqtt_marker(data),
         )
-        print("[AGVServer] MQTT subscriptions ready (/agv/arrived, /agv/shelf_ack, /agv/marker)")
+        self.mqtt_publisher.subscribe(
+            "agv/algorithm",
+            lambda data: self._handle_mqtt_gui(data),
+        )
+        print("[AGVServer] MQTT subscriptions ready "
+              "(/agv/arrived, /agv/shelf_ack, /agv/marker, agv/algorithm)")
 
     def _handle_mqtt_arrived(self, data):
-        """AGV 도착 이벤트 → request_handler 라우팅"""
+        """AGV 도착/위치 이벤트 → request_handler 라우팅"""
+        if data.get("type") == "robot_position":
+            self.request_handler.handle_message(json.dumps(data))
+            return
         data["type"] = "robot_arrived"
         result = self.request_handler.handle_message(json.dumps(data))
         print(f"[AGVServer] MQTT arrived: robot {data.get('rid')} at node {data.get('node')} → {result.get('action', '?')}")
@@ -124,6 +132,13 @@ class AGVServer:
         if released:
             print(f"[AGVServer] Marker trigger: AGV-{rid} at marker {marker_id} → "
                   f"releasing AGV-{released.rid} to W{released.target_ws}")
+
+    def _handle_mqtt_gui(self, data):
+        """GUI로부터 MQTT 메시지 수신 → request_handler 라우팅"""
+        result = self.request_handler.handle_message(json.dumps(data))
+        msg_type = data.get("type", "?")
+        status = result.get("action", result.get("success", "?"))
+        print(f"[AGVServer] GUI MQTT ({msg_type}) → {status}")
 
     async def stop(self):
         """서버 정지"""

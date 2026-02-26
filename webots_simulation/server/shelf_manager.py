@@ -44,6 +44,8 @@ class Shelf:
 class ShelfManager:
     """선반 관리자"""
 
+    # ─── 초기화 ───
+
     def __init__(self, shelf_config_file: str):
         self.shelf_config_file = shelf_config_file
         self.shelves: Dict[int, Shelf] = {}          # shelf_id -> Shelf
@@ -85,6 +87,8 @@ class ShelfManager:
         except Exception as e:
             print(f"[ShelfManager] Error loading config: {e}")
 
+    # ─── 조회 ───
+
     def get_shelf(self, shelf_id: int) -> Optional[Shelf]:
         """선반 조회"""
         return self.shelves.get(shelf_id)
@@ -108,8 +112,10 @@ class ShelfManager:
                     result[shelf_id] = []
                 result[shelf_id].append(item)
             else:
-                print(f"[ShelfManager] Warning: item '{item}' not found on any shelf")
+                print(f"[ShelfManager] Item '{item}' not found on any shelf")
         return result
+
+    # ─── 업데이트 ───
 
     def mark_shelf_picked_up(self, shelf_id: int, robot_id: int) -> bool:
         """선반을 로봇이 들어올림"""
@@ -141,6 +147,13 @@ class ShelfManager:
         shelf.carried_by = None
         print(f"[ShelfManager] Shelf {shelf.label} returned to node {return_node}")
         return True
+
+    def get_shelf_at_ws(self, ws_node: int) -> Optional[int]:
+        """해당 작업대 노드에 AT_WORKSTATION 상태인 선반 ID 반환"""
+        for shelf_id, shelf in self.shelves.items():
+            if shelf.status == ShelfStatus.AT_WORKSTATION and shelf.current_node == ws_node:
+                return shelf_id
+        return None
 
     def get_shelf_home(self, shelf_id: int) -> Optional[int]:
         """선반의 원래 홈 노드 반환"""
@@ -180,6 +193,8 @@ class ShelfManager:
     def get_all_shelf_nodes(self) -> Set[int]:
         """모든 선반 노드 ID 집합"""
         return self.all_shelf_nodes.copy()
+
+    # ─── 상태 ───
 
     def get_status_summary(self) -> Dict[str, Any]:
         """전체 선반 상태 요약"""

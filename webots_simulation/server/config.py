@@ -22,6 +22,7 @@ class Config:
     mqtt_topic_shelf_cmd: str = "/agv/shelf_cmd"
     mqtt_topic_shelf_ack: str = "/agv/shelf_ack"
     mqtt_topic_task_status: str = "/agv/task_status"
+    mqtt_topic_control: str = "/agv/control"
 
     # WebSocket 설정
     websocket_host: str = "0.0.0.0"
