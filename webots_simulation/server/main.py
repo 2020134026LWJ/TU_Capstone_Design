@@ -100,11 +100,31 @@ class AGVServer:
             lambda data: self._handle_mqtt_marker(data),
         )
         self.mqtt_publisher.subscribe(
-            "agv/algorithm",
-            lambda data: self._handle_mqtt_gui(data),
+            "warehouse/order/start",
+            lambda data: self._handle_mqtt_gui({
+                "type": "start_order",
+                "사용자ID": data.get("사용자ID"),
+                "주문번호": data.get("주문번호"),
+            }),
+        )
+        self.mqtt_publisher.subscribe(
+            "warehouse/shelf/complete",
+            lambda data: self._handle_mqtt_gui({
+                "type": "shelf_complete",
+                "사용자ID": data.get("사용자ID"),
+            }),
+        )
+        self.mqtt_publisher.subscribe(
+            "warehouse/order/complete",
+            lambda data: self._handle_mqtt_gui({
+                "type": "order_complete",
+                "사용자ID": data.get("사용자ID"),
+                "주문번호": data.get("주문번호"),
+            }),
         )
         print("[AGVServer] MQTT subscriptions ready "
-              "(/agv/arrived, /agv/shelf_ack, /agv/marker, agv/algorithm)")
+              "(/agv/arrived, /agv/shelf_ack, /agv/marker, "
+              "warehouse/order/start, warehouse/shelf/complete, warehouse/order/complete)")
 
     def _handle_mqtt_arrived(self, data):
         """AGV 도착/위치 이벤트 → request_handler 라우팅"""

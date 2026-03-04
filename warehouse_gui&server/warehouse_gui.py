@@ -12,6 +12,7 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
+from kivy.uix.textinput import TextInput
 from kivy.core.window import Window
 from kivy.core.text import LabelBase
 from kivy.graphics import Color, Rectangle
@@ -28,9 +29,25 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '172.30.1.72'  # 노트북 서버 IP
 MQTT_PORT = 1883
 HTTP_PORT = 5000
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+def load_server_ip():
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f).get('server_ip', '172.30.1.72')
+    except:
+        return '172.30.1.72'
+
+def save_server_ip(ip):
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump({'server_ip': ip}, f)
+    except:
+        pass
+
+SERVER_IP = load_server_ip()
 
 # 윈도우 크기 설정 (라즈베리파이 5인치 터치스크린)
 Window.size = (800, 450)  # 높이를 450으로 유지
@@ -121,7 +138,7 @@ class WarehouseGUI(BoxLayout):
         
         # MQTT 클라이언트
         self.mqtt_client = None
-        self.init_mqtt()
+        Clock.schedule_once(lambda dt: self.show_ip_popup(), 0.3)
         
         # UI 구성
         self.build_top_section()
@@ -134,6 +151,47 @@ class WarehouseGUI(BoxLayout):
             self.rect.size = self.size
             self.rect.pos = self.pos
     
+    def show_ip_popup(self):
+        """서버 IP 입력 팝업"""
+        global SERVER_IP
+
+        content = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        content.add_widget(Label(
+            text=f'서버 IP 주소를 입력하세요',
+            font_name=FONT_NAME, font_size='16sp', size_hint_y=None, height=40
+        ))
+        ip_input = TextInput(
+            text=SERVER_IP,
+            multiline=False,
+            font_size='18sp',
+            size_hint_y=None, height=44
+        )
+        content.add_widget(ip_input)
+        btn = Button(
+            text='확인',
+            font_name=FONT_NAME,
+            size_hint_y=None, height=50,
+            background_color=(0.2, 0.6, 0.2, 1)
+        )
+        content.add_widget(btn)
+
+        popup = Popup(
+            title='서버 IP 설정',
+            content=content,
+            size_hint=(0.6, 0.45),
+            auto_dismiss=False
+        )
+
+        def on_confirm(instance):
+            global SERVER_IP
+            SERVER_IP = ip_input.text.strip()
+            save_server_ip(SERVER_IP)
+            popup.dismiss()
+            self.init_mqtt()
+
+        btn.bind(on_press=on_confirm)
+        popup.open()
+
     def init_mqtt(self):
         """MQTT 클라이언트 초기화"""
         if mqtt is None:
