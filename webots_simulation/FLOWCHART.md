@@ -779,3 +779,60 @@ if shelf_obj:
 - ArUco 트리거가 경로에 없는 모든 케이스 커버 (ArUco는 백업으로 유지)
 - 교차 WS 납품, 포워딩, 인터셉트 등 모든 경로 패턴에서 교착 방지
 - 시뮬레이션 검증 완료: 2로봇 4선반+3선반 포워딩 교차 납품 정상 동작 ✅
+
+---
+
+## Isaac Sim 이전 이력
+
+> Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
+> `server/`, `config/`, `Database/`는 변경 없음. 컨트롤러 레이어만 교체.
+
+### Isaac Step 3 완료: AGV 이동 + MQTT 연동 (`step3_agv_mqtt.py`)
+
+**완료 내용**:
+
+씬 구성:
+- 3층 선반: 사각 기둥 4개 + 각 층마다 전/후/좌/우 빔 4개 + 밝은 회색 판
+- 선반 치수: 기둥 높이 0.85m, 층 높이 0.40 / 0.62 / 0.84m
+- 작업대: 초록 납작 박스
+- ArUco 바닥 마커: USD Mesh + UsdPreviewSurface 텍스처 (Webots PNG 재사용)
+
+AGV 외형:
+- 바디: 납작 직육면체 (AGV1=빨강, AGV2=파랑)
+- 바퀴: 좌/우 2개 (VisualCylinder, x축 90도 회전)
+- 시저리프트: X자 교차 막대 2개 (y축 ±45도) + 상판 (노란색)
+- 시저리프트 상판 z=0.25 < 선반 1층 z=0.40 → 선반 아래 진입 가능
+
+MQTT 연동 (`MQTTBridge` 클래스):
+- 구독: `/agv/plan` → `IsaacAGV.set_plan()` / `/agv/control` → `IsaacAGV.resume()`
+- 발행: `/agv/arrived` (최종 도착) / `/agv/arrived` (중간 위치) / `/agv/marker` (노드 통과 시)
+
+`IsaacAGV` 상태머신:
+```
+IDLE → MOVING (선형 보간) → 노드 도착
+                              ├─ 중간 노드: NODE_WAIT (resume 대기)
+                              └─ 최종 목표: IDLE + arrived 발행
+```
+
+**수정 파일**: `isaac_simulation/step3_agv_mqtt.py` (신규)
+
+---
+
+### Isaac Step 4 계획: 리프트 + 선반 이동 (`step4_lift_shelf.py`)
+
+**구현 예정**:
+
+1. `/agv/shelf_cmd` 수신
+   - `pickup`: 시저리프트 상판 애니메이션 (z 올리기) + 선반 prim을 AGV에 붙여서 이동
+   - `putdown`: 상판 내리기 + 선반 prim 원위치 해제
+
+2. 리프트 애니메이션
+   - 매 `world.step()`마다 상판 z값을 목표 높이로 선형 보간
+   - 들어올린 상태: `LIFT_PLATE_Z_UP` (선반 1층 판 아래에서 위로)
+   - 내린 상태: `LIFT_PLATE_Z` (기본 위치)
+
+3. 선반 추적 (attach)
+   - pickup 완료 후 AGV 이동 시 선반 prim도 동일 offset으로 위치 동기화
+   - `ShelfAttach` 딕셔너리: `{rid: shelf_node_id}` 관리
+
+4. `/agv/shelf_ack` 발행 (pickup/putdown 완료 시)
