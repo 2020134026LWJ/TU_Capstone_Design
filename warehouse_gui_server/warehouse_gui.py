@@ -202,7 +202,9 @@ class WarehouseGUI(BoxLayout):
             import random
             client_id = f"raspberrypi_gui_{random.randint(1000, 9999)}"
             self.mqtt_client = mqtt.Client(client_id=client_id)
+            self.mqtt_client.on_message = self.on_mqtt_message
             self.mqtt_client.connect(SERVER_IP, MQTT_PORT, 60)
+            self.mqtt_client.subscribe("warehouse/agv/at_ws")
             self.mqtt_client.loop_start()
             print(f"✅ MQTT 연결: {SERVER_IP}:{MQTT_PORT} (ID: {client_id})")
         except Exception as e:
@@ -326,12 +328,16 @@ class WarehouseGUI(BoxLayout):
         """작업 시작 버튼 - MQTT 전송 + HTTP 요청"""
         if not self.selected_user_id:
             return
-        
+
+        # 중복 클릭 방지
+        self.start_work_btn.disabled = True
+        self.start_work_btn.background_color = (0.5, 0.5, 0.5, 1)
+
         print(f"\n🚀 작업 시작: 사용자{self.selected_user_id}, 주문{self.current_order_number}")
-        
+
         # 1. MQTT로 주문 시작 알림
         self.send_mqtt_start_order()
-        
+
         # 2. HTTP로 피킹 리스트 받기
         self.fetch_picking_list()
     
@@ -392,15 +398,35 @@ class WarehouseGUI(BoxLayout):
             cell.background_color = (0.9, 0.9, 0.9, 1)
             cell.is_completed = False
         
-        # 피킹 리스트 표시 (최대 8개)
+        # 피킹 리스트 표시 (최대 8개) - AGV 도착 전까지 비활성화
         for i, pick_item in enumerate(self.picking_list[:8]):
             cell = self.work_cells[i]
             cell.shelf_number = pick_item['선반번호']
             cell.item = pick_item['물건']
             cell.quantity = pick_item['개수']
             cell.text = f"{cell.shelf_number}\n{cell.item}\n({cell.quantity}개)"
-            cell.background_color = (0.93, 0.93, 0.93, 1)
+            cell.background_color = (0.7, 0.7, 0.7, 1)  # 회색: AGV 대기 중
+            cell.disabled = True
     
+    def on_mqtt_message(self, client, userdata, msg):
+        """MQTT 수신 - AGV 도착 알림"""
+        try:
+            data = json.loads(msg.payload.decode())
+            if msg.topic == "warehouse/agv/at_ws":
+                user_id = data.get("사용자ID")
+                if user_id == self.selected_user_id:
+                    Clock.schedule_once(lambda dt: self.enable_cells())
+        except Exception as e:
+            print(f"❌ MQTT 수신 오류: {e}")
+
+    def enable_cells(self):
+        """AGV 도착 후 셀 활성화"""
+        for cell in self.work_cells:
+            if cell.text and not cell.is_completed:
+                cell.disabled = False
+                cell.background_color = (0.93, 0.93, 0.93, 1)
+        print("✅ AGV 도착 - 셀 활성화")
+
     def on_shelf_complete(self, shelf_number):
         """선반 완료 콜백 - 같은 선반(구역-열)의 모든 층 완료 시 MQTT 전송"""
         print(f"📦 셀 완료: {shelf_number}")
@@ -499,6 +525,7 @@ class WarehouseGUI(BoxLayout):
             cell.text = ''
             cell.background_color = (0.9, 0.9, 0.9, 1)
             cell.is_completed = False
+            cell.disabled = False
     
     def blink_cells(self, cells, count):
         """셀 깜빡임 (노란색)"""
