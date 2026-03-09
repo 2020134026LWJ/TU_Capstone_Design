@@ -333,12 +333,33 @@ GET http://서버IP:5000/api/picking/user/1/order/1
 | 4 | `SERVER_IP` 하드코딩 | 핫스팟 연결마다 IP가 바뀌는데 코드에 고정값 | 시작 시 IP 입력 팝업 추가, `config.json`에 저장 ✅ |
 | 5 | 작업시작 버튼 중복 클릭 방지 없음 | 빠르게 두 번 누르면 `start_order` 두 번 전송 → AGV 2대 동시 배정 | 버튼 누르면 즉시 비활성화 ✅ |
 | 6 | AGV 도착 전 셀 클릭 가능 | 피킹 리스트 뜨자마자 셀 클릭 가능 → 서버 WAIT_PICKING 에러 | AGV가 WS 도착 후 `warehouse/agv/at_ws` 수신 시 셀 활성화 ✅ |
-| 7 | 도착하지 않은 선반 셀 클릭 가능 | AGV가 선반A를 가져왔을 때 선반B 셀도 클릭 가능 → 잘못된 shelf_complete 전송 | 미수정 🔲 (AGV 도착 알림에 선반 ID 포함하여 해당 선반 셀만 활성화 필요) |
+| 7 | 도착하지 않은 선반 셀 클릭 가능 | AGV가 선반A를 가져왔을 때 선반B 셀도 클릭 가능 → 잘못된 shelf_complete 전송 | 미수정 🔲 — 아래 수정 방법 참고 |
+| 8 | 아무 셀이나 눌러도 shelf_complete 처리됨 | `shelf_complete` 메시지에 선반ID 없이 사용자ID만 전송 → 서버가 WS의 AT_WORKSTATION 선반을 자동 탐색하여 무조건 처리 | 미수정 🔲 — 버그 7번과 동일 원인, 아래 수정 방법 참고 |
 
 ### 추가된 MQTT 토픽
 | 토픽 | 방향 | 설명 |
 |------|------|------|
-| `warehouse/agv/at_ws` | 서버 → 라파 | AGV가 작업대 도착, 피킹 가능 알림 |
+| `warehouse/agv/at_ws` | 서버 → 라파 | AGV가 작업대 도착, 피킹 가능 알림 (`{"사용자ID": 1, "선반번호": "1-1"}`) |
+
+### 🔲 버그 7·8 수정 방법 (미완료)
+
+**문제 요약**: 어떤 셀을 눌러도 해당 WS의 AT_WORKSTATION 선반이 자동으로 완료 처리됨
+
+**수정 내용**:
+
+1. **`warehouse_gui.py`**: `enable_cells(shelf_label)` — `warehouse/agv/at_ws` 수신 시 `선반번호`에 해당하는 셀만 활성화, 나머지는 계속 비활성 유지
+   - 현재: AGV 도착 시 모든 셀 활성화 → 잘못된 선반 셀 클릭 가능
+   - 수정: `shelf_label`로 필터링해서 해당 선반 셀만 활성화
+
+2. **`warehouse/shelf/complete` 메시지에 선반번호 포함** (선택적 강화):
+   ```json
+   {
+     "type": "shelf_complete",
+     "사용자ID": 1,
+     "선반번호": "1-1"
+   }
+   ```
+   서버(`request_handler.py` `_handle_shelf_complete`)에서 선반번호 검증 추가
 
 ---
 
@@ -577,6 +598,6 @@ A: 주문번호 2, 3이 엑셀 파일에 있는지 확인
 
 ---
 
-**버전:** v2.0  
-**최종 업데이트:** 2026-03-04  
+**버전:** v2.1
+**최종 업데이트:** 2026-03-06
 **작성자:** AGV Warehouse System Team

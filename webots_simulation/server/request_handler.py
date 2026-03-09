@@ -129,58 +129,46 @@ class RequestHandler:
             return self._error_response(f"Order not found: user={user_id}, order={order_id}")
 
         workstation_id = schedule["workstation"]
-        shelf_sequence = schedule["shelf_sequence"]
-        item_names = []
-        for t in schedule["tasks"]:
-            item_names.extend(t.items)
+        group_id = f"T{user_id}_{order_id}"
 
-        task_id = f"T{user_id}_{order_id}"
-        task = self.task_manager.create_task(
-            task_id=task_id,
-            workstation_id=workstation_id,
-            items=item_names,
-            optimized_shelf_sequence=shelf_sequence,
-        )
+        # 선반 1개 단위로 태스크 분리 → 여러 로봇이 동시에 각 선반 처리 가능
+        created_tasks = []
+        for idx, shelf_task in enumerate(schedule["tasks"]):
+            sub_task_id = f"{group_id}_{idx}"
+            task = self.task_manager.create_task(
+                task_id=sub_task_id,
+                workstation_id=workstation_id,
+                items=shelf_task.items,
+                optimized_shelf_sequence=[shelf_task.shelf_node],
+            )
+            if task:
+                created_tasks.append((sub_task_id, shelf_task))
 
-        if not task:
-            return self._error_response("Failed to create task")
+        if not created_tasks:
+            return self._error_response("Failed to create tasks")
 
-        msgs = self._try_assign_pending_tasks()
+        self._try_assign_pending_tasks()
 
-        # _try_assign_pending_tasks가 shelf 순서를 로테이션했을 수 있으므로
-        # 실제 task.shelf_sequence 기준으로 응답 구성 (CLI-서버 순서 동기화)
-        task_obj = self.task_manager.get_task(task_id)
-        if task_obj:
-            schedule_map = {t.shelf_node: t for t in schedule["tasks"]}
-            wait_picking_items: Dict[int, List] = {}
-            for st in task_obj.subtasks:
-                if (st.subtask_type == SubTaskType.WAIT_PICKING
-                        and st.shelf_id not in wait_picking_items):
-                    wait_picking_items[st.shelf_id] = st.items_to_pick
-            shelves = [
-                {
-                    "order": idx + 1,
-                    "shelf_label": schedule_map[sid].shelf_label if sid in schedule_map else str(sid),
-                    "shelf_node": sid,
-                    "items": wait_picking_items.get(sid, []),
-                }
-                for idx, sid in enumerate(task_obj.shelf_sequence)
-            ]
-        else:
-            shelves = [
-                {
-                    "order": t.order,
-                    "shelf_label": t.shelf_label,
-                    "shelf_node": t.shelf_node,
-                    "items": t.items,
-                }
-                for t in schedule["tasks"]
-            ]
+        shelves = []
+        for idx, (sub_task_id, shelf_task) in enumerate(created_tasks):
+            task_obj = self.task_manager.get_task(sub_task_id)
+            items = []
+            if task_obj:
+                for st in task_obj.subtasks:
+                    if st.subtask_type == SubTaskType.WAIT_PICKING:
+                        items = st.items_to_pick
+                        break
+            shelves.append({
+                "order": idx + 1,
+                "shelf_label": shelf_task.shelf_label,
+                "shelf_node": shelf_task.shelf_node,
+                "items": items,
+            })
 
         return {
             "type": "start_order_response",
             "success": True,
-            "task_id": task_id,
+            "task_id": group_id,
             "user_id": user_id,
             "workstation_id": workstation_id,
             "shelves": shelves,
@@ -228,13 +216,31 @@ class RequestHandler:
             "assignments": assignments,
         }
 
+    def _count_active_robots_per_ws(self) -> Dict[int, int]:
+        """WS별 현재 비유휴 로봇 수 계산 (공정 배정용)"""
+        counts: Dict[int, int] = {}
+        for robot in self.robot_manager.get_all_robots():
+            if robot.status == RobotStatus.IDLE:
+                continue
+            if robot.current_task_id:
+                task = self.task_manager.get_task(robot.current_task_id)
+                if task:
+                    ws = task.workstation_id
+                    counts[ws] = counts.get(ws, 0) + 1
+        return counts
+
     def _try_assign_pending_tasks(self) -> List[Dict]:
-        """대기 중인 작업에 유휴 로봇 할당 시도"""
+        """대기 중인 작업에 유휴 로봇 할당 시도 (공정 배정: WS별 활성 로봇 수 기반)"""
         assignments = []
         rotation_counts: Dict[str, int] = {}  # Bug A: 선반 순서 변경 시도 횟수
+        blocked_task_ids: Set[str] = set()     # 이번 호출에서 블록된 태스크 (재시도 방지)
 
         while True:
-            task = self.task_manager.get_next_pending_task()
+            # 매 iteration마다 WS별 활성 로봇 수 재계산 (직전 배정 반영)
+            active_per_ws = self._count_active_robots_per_ws()
+            task = self.task_manager.get_next_pending_task_fair(
+                active_per_ws, exclude=blocked_task_ids
+            )
             if not task:
                 break
 
@@ -247,7 +253,7 @@ class RequestHandler:
             if not robot:
                 if self._try_intercept_returning_shelf(task):
                     continue  # 인터셉트 성공 → 다음 대기 작업 처리 시도
-                break         # 인터셉트도 불가 → 종료
+                break         # 유휴 로봇 없음 → 종료
 
             # 작업 시작
             first_st = self.task_manager.start_task(task.task_id, robot.rid)
@@ -266,7 +272,7 @@ class RequestHandler:
                     print(f"[RequestHandler] F-node: shelf {actual_first_shelf} at WS {shelf_obj.current_node}, "
                           f"task {task.task_id} → direct to WS")
                 elif avail == "pending":
-                    # Bug A: 다음 선반이 있으면 순서 변경 후 재시도
+                    # Bug A: 다음 선반이 있으면 순서 변경 후 재시도 (단일 선반 태스크는 즉시 pass)
                     rotations = rotation_counts.get(task.task_id, 0)
                     max_rotations = len(task.shelf_sequence) - 1
                     if rotations < max_rotations:
@@ -280,14 +286,15 @@ class RequestHandler:
                                   f"rotating to shelf {next_shelf_id} (task {task.task_id}, "
                                   f"attempt {rotations + 1}/{max_rotations})")
                             continue  # 같은 task, 새 first_shelf로 재시도
-                    # 모든 선반 차단 또는 단일 선반 → PENDING
+                    # 선반 차단 → 이번 호출에서 이 태스크 건너뜀, 다른 태스크 시도
                     rotation_counts.pop(task.task_id, None)
                     task.status = TaskStatus.PENDING
                     task.assigned_robot = None
                     first_st.status = TaskStatus.PENDING
                     print(f"[RequestHandler] F-node: shelf {actual_first_shelf} unavailable "
-                          f"(status={shelf_obj.status.value}), task {task.task_id} → PENDING")
-                    break
+                          f"(status={shelf_obj.status.value}), task {task.task_id} → skip")
+                    blocked_task_ids.add(task.task_id)
+                    continue  # 다른 태스크 시도 (break 대신 continue)
                 # else "go": IN_PLACE + 예약 없음 → 그대로 진행
             rotation_counts.pop(task.task_id, None)  # 성공적 배정 시 카운터 초기화
 
@@ -443,16 +450,10 @@ class RequestHandler:
 
             other_current = other_robot.current_node
 
-            # 다른 로봇이 next_node에 있는 경우
+            # 다른 로봇이 next_node에 있는 경우 → 무조건 대기
+            # (claim이 있어도 물리적으로 떠나기 전까지는 진입 불가)
             if other_current == next_node:
-                # 그 로봇이 이미 다른 노드로 이동 예약(claim)됐으면 → 떠나는 중 → 안전
-                other_claimed = next(
-                    (n for n, r in self._claimed_nodes.items() if r == other_rid), None
-                )
-                if other_claimed is None:
-                    # 상대가 아직 next_node에 물리적으로 있음 → 우선순위 무관하게 대기
-                    # (우선순위는 같은 빈 노드를 동시에 요청할 때만 적용)
-                    return False
+                return False
 
         return True
 
@@ -561,9 +562,10 @@ class RequestHandler:
                 self._try_assign_pending_tasks()
                 # GUI에 AGV 도착 알림 (warehouse/agv/at_ws)
                 user_id = int(task.task_id.split("_")[0][1:])
+                shelf_label = self.shelf_manager.shelves[next_st.shelf_id].label
                 self.mqtt_publisher.client.publish(
                     "warehouse/agv/at_ws",
-                    json.dumps({"사용자ID": user_id})
+                    json.dumps({"사용자ID": user_id, "선반번호": shelf_label})
                 )
                 return {
                     "type": "robot_arrived_ack",
@@ -958,14 +960,18 @@ class RequestHandler:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
-        task_id = f"T{user_id}_{order_id}"
-        task = self.task_manager.get_task(task_id)
-        if not task:
-            return self._error_response(f"Task not found: {task_id}")
+        group_id = f"T{user_id}_{order_id}"
+        order_tasks = [
+            t for t in self.task_manager.tasks.values()
+            if t.task_id.startswith(f"{group_id}_")
+        ]
+        if not order_tasks:
+            return self._error_response(f"No tasks found for order: {group_id}")
 
-        print(f"[RequestHandler] order_complete: user={user_id}, task={task_id}, "
-              f"status={task.status.value}")
-        return {"success": True, "action": "order_complete", "task_id": task_id}
+        statuses = [t.status.value for t in order_tasks]
+        print(f"[RequestHandler] order_complete: user={user_id}, group={group_id}, "
+              f"task_statuses={statuses}")
+        return {"success": True, "action": "order_complete", "task_id": group_id}
 
     # ─── 상태 조회 ───
 

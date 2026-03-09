@@ -99,6 +99,8 @@ class AGVServer:
             "/agv/marker",
             lambda data: self._handle_mqtt_marker(data),
         )
+        # [추가] warehouse GUI(라즈베리파이)로부터 주문/선반완료/주문완료 수신
+        # 기존 agv/algorithm 토픽 대신 warehouse/* 토픽 3개로 분리
         self.mqtt_publisher.subscribe(
             "warehouse/order/start",
             lambda data: self._handle_mqtt_gui({

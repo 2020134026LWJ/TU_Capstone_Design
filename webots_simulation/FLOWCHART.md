@@ -782,6 +782,50 @@ if shelf_obj:
 
 ---
 
+## 수정 21: 다중 로봇 협업 배정 + 공정성 알고리즘
+
+**파일**: `server/request_handler.py`, `server/task_manager.py`
+
+**문제**:
+- 기존: 주문 1개 = 태스크 1개 = 로봇 1개가 모든 선반 순차 처리
+- 작업자1만 시작하면 AGV-1이 선반을 혼자 처리하는 동안 AGV-2는 유휴
+- 두 작업자가 동시 진행해도 각 로봇이 자기 작업자 선반만 처리
+
+**변경 내용**:
+
+1. **태스크 단위 변경**: 주문 1개 → 선반 1개당 독립 태스크로 분리
+   - 기존: `T{user}_{order}` (선반 N개를 하나의 태스크로 묶음)
+   - 변경: `T{user}_{order}_{idx}` (선반 1개 = 태스크 1개)
+   - `_handle_start_order`: schedule["tasks"]를 순회하며 각 선반별 태스크 생성
+   - RETURN_SHELF 완료 시 `task_complete` → 로봇 IDLE → 다음 태스크 자동 배정
+
+2. **공정 배정 알고리즘**: `_count_active_robots_per_ws()` + `get_next_pending_task_fair()`
+   - 매 배정 iteration마다 WS별 활성 로봇 수 재계산
+   - 활성 로봇 수가 적은 WS 태스크 우선 배정 (독점 방지)
+   - 동순위 시 `created_at` 기준 (먼저 생성된 태스크 우선)
+
+3. **블록된 태스크 건너뜀**: `blocked_task_ids: Set[str]`
+   - F-노드 "pending" 판정 시 `break` → `blocked_task_ids.add() + continue`로 변경
+   - 선반이 블록된 태스크는 건너뛰고 다른 태스크를 계속 시도
+
+4. **`_handle_order_complete`**: 단일 task_id 조회 → `group_id_{*}` prefix 기반 탐색으로 변경
+
+**동작 예시**:
+```
+작업자1 시작 (선반 3개) → T1_1_0, T1_1_1, T1_1_2 생성
+R1 → T1_1_0, R2 → T1_1_1 동시 출발 (T1_1_2 대기)
+
+작업자2 시작 (선반 2개) → T2_1_0, T2_1_1 생성
+다음 유휴 로봇 → active={W1:2, W2:0} → W2 우선 → T2_1_0 배정
+```
+
+**호환성**:
+- `task.task_id.split("_")[0][1:]` user_id 추출: `T1_1_0` → `"T1"[1:]` = `"1"` ✅
+- `find_task_waiting_for_shelf`: shelf_id 기반 탐색, 변경 불필요 ✅
+- STG/TRG/Node U/포워딩 로직: 단일 선반 태스크와 동일하게 작동 ✅
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
@@ -818,21 +862,43 @@ IDLE → MOVING (선형 보간) → 노드 도착
 
 ---
 
-### Isaac Step 4 계획: 리프트 + 선반 이동 (`step4_lift_shelf.py`)
+### 수정 22: 충돌 버그 수정 — `_is_safe_to_resume` 보수적 정책 적용
 
-**구현 예정**:
+**문제**: 다른 AGV가 next_node에 있어도 `_claimed_nodes`(이동 예약)가 있으면 "떠나는 중"으로 판단해 진입 허용 → 물리적으로 아직 그 노드에 있는 동안 다른 AGV가 진입 → 충돌
 
-1. `/agv/shelf_cmd` 수신
-   - `pickup`: 시저리프트 상판 애니메이션 (z 올리기) + 선반 prim을 AGV에 붙여서 이동
-   - `putdown`: 상판 내리기 + 선반 prim 원위치 해제
+**원인 시나리오**:
+1. AGV1이 노드 6에서 claim[7]=1 등록 → resume 발행 (아직 물리적으로 6에 있음)
+2. AGV2가 next=6, AGV1 current=6, claim=7 → "떠나는 중" 판단 → resume 발행
+3. AGV1이 6을 떠나기 전에 AGV2가 6 진입 → 충돌
 
-2. 리프트 애니메이션
-   - 매 `world.step()`마다 상판 z값을 목표 높이로 선형 보간
-   - 들어올린 상태: `LIFT_PLATE_Z_UP` (선반 1층 판 아래에서 위로)
-   - 내린 상태: `LIFT_PLATE_Z` (기본 위치)
+**수정 내용** (`server/request_handler.py`, `_is_safe_to_resume`):
 
-3. 선반 추적 (attach)
-   - pickup 완료 후 AGV 이동 시 선반 prim도 동일 offset으로 위치 동기화
-   - `ShelfAttach` 딕셔너리: `{rid: shelf_node_id}` 관리
+```python
+# 수정 전: claim 있으면 "떠나는 중"으로 간주 → 진입 허용
+if other_current == next_node:
+    other_claimed = next(...)
+    if other_claimed is None:
+        return False  # claim 있으면 여기서 통과
 
-4. `/agv/shelf_ack` 발행 (pickup/putdown 완료 시)
+# 수정 후: 물리적으로 있으면 무조건 대기
+if other_current == next_node:
+    return False  # claim 여부 관계없이 대기
+```
+
+**효과**: 다른 AGV가 실제로 노드를 떠나 position 메시지를 보낼 때까지 대기 → 충돌 방지 (속도 소폭 감소는 허용)
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
+### Isaac Step 4 현황: 리프트 + 선반 이동 (`step4_lift_shelf.py`)
+
+**구현 완료 (코드 작성)**:
+- 리프트 RAISING/LOWERING 애니메이션 (매 프레임 z 선형 보간)
+- MQTT shelf_cmd/shelf_ack 연동
+- AGV 이동 시 부착된 선반 prim 함께 이동
+
+**발견된 버그 (미수정)**:
+- `build_shelf`에서 자식 prim 생성 시 절대 좌표 사용 + 루트 translate에 AGV 절대좌표 더함
+- → 선반 이동 시 `원래위치 + AGV위치`로 위치가 두 배가 됨
+- **수정 방법**: `build_shelf` 루트에 원래 위치를 설정하고 자식 prim들을 상대 좌표(0-centered)로 변경

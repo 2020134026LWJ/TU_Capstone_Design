@@ -230,19 +230,21 @@ class IsaacAGV:
         self._set_translate(stage, f"/World/AGV_{self.rid}_lift_plate",
                             x, y, self.lift_z)
 
-        # 부착된 선반도 함께 이동
+        # 부착된 선반도 함께 이동 (delta 방식: 루트에 변위만 적용)
         if self.carrying_shelf is not None:
             shelf_root = f"/World/Shelf_{self.carrying_shelf}"
             prim = stage.GetPrimAtPath(shelf_root)
             if prim.IsValid():
-                # 선반 전체 Xform 이동 (자식 prim 포함)
+                orig = shelf_origins.get(self.carrying_shelf, (x, y))
+                dx = x - orig[0]
+                dy = y - orig[1]
                 xform = UsdGeom.Xformable(prim)
                 ops = xform.GetOrderedXformOps()
                 for op in ops:
                     if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                        op.Set(Gf.Vec3d(x, y, 0.0))
+                        op.Set(Gf.Vec3d(dx, dy, 0.0))
                         return
-                xform.AddTranslateOp().Set(Gf.Vec3d(x, y, 0.0))
+                xform.AddTranslateOp().Set(Gf.Vec3d(dx, dy, 0.0))
 
     def _sync_lift(self, stage):
         """상판 z만 업데이트 (리프트 애니메이션)"""
@@ -314,6 +316,8 @@ class MQTTBridge:
             node_path = r.get("node_path", [])
             goal      = r.get("goal")
             if node_path and len(node_path) > 1:
+                # 출발 노드로 위치 스냅 → 대각선 이동 방지
+                agv.pos = node_xy(node_path[0]).copy()
                 agv.set_plan(list(node_path[1:]), goal)
                 print(f"[AGV {rid}] Plan: {node_path} → goal {goal}")
             elif goal is not None:
@@ -402,9 +406,13 @@ SCISSOR_QUAT_A = np.array([0.9239, 0.0,    0.3827,  0.0])
 SCISSOR_QUAT_B = np.array([0.9239, 0.0,   -0.3827,  0.0])
 
 
+shelf_origins: dict = {}  # node_id → (orig_x, orig_y)
+
+
 def build_shelf(stage, node_id: int, x: float, y: float):
     root = f"/World/Shelf_{node_id}"
-    UsdGeom.Xform.Define(stage, root)
+    UsdGeom.Xform.Define(stage, root)  # 루트 translate 없음 (delta 방식)
+    shelf_origins[node_id] = (x, y)    # 원래 위치 저장
 
     for i, (dx, dy) in enumerate(LEG_CORNERS):
         VisualCuboid(

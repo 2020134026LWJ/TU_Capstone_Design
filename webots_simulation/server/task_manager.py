@@ -9,7 +9,7 @@
 import time
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 
 class TaskStatus(Enum):
@@ -250,6 +250,23 @@ class TaskManager:
             if task.status == TaskStatus.PENDING:
                 return task
         return None
+
+    def get_next_pending_task_fair(
+        self,
+        active_per_ws: Dict[int, int],
+        exclude: Optional[Set[str]] = None,
+    ) -> Optional[PickingTask]:
+        """공정 배정: 활성 로봇이 적은 WS 태스크 우선, exclude 태스크 제외"""
+        pending = [
+            t for t in self.tasks.values()
+            if t.status == TaskStatus.PENDING
+            and (exclude is None or t.task_id not in exclude)
+        ]
+        if not pending:
+            return None
+        # 1순위: 활성 로봇이 적은 WS, 2순위: 먼저 생성된 태스크
+        pending.sort(key=lambda t: (active_per_ws.get(t.workstation_id, 0), t.created_at))
+        return pending[0]
 
     def start_task(self, task_id: str, robot_id: int) -> Optional[SubTask]:
         """작업 시작 → 첫 서브태스크 반환"""

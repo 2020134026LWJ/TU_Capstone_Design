@@ -202,9 +202,9 @@ class WarehouseGUI(BoxLayout):
             import random
             client_id = f"raspberrypi_gui_{random.randint(1000, 9999)}"
             self.mqtt_client = mqtt.Client(client_id=client_id)
-            self.mqtt_client.on_message = self.on_mqtt_message
+            self.mqtt_client.on_message = self.on_mqtt_message  # AGV WS 도착 알림 수신 콜백 등록
             self.mqtt_client.connect(SERVER_IP, MQTT_PORT, 60)
-            self.mqtt_client.subscribe("warehouse/agv/at_ws")
+            self.mqtt_client.subscribe("warehouse/agv/at_ws")  # AGV가 작업대 도착 시 서버가 발행하는 토픽
             self.mqtt_client.loop_start()
             print(f"✅ MQTT 연결: {SERVER_IP}:{MQTT_PORT} (ID: {client_id})")
         except Exception as e:
@@ -408,6 +408,7 @@ class WarehouseGUI(BoxLayout):
             cell.background_color = (0.7, 0.7, 0.7, 1)  # 회색: AGV 대기 중
             cell.disabled = True
     
+    # [추가] AGV가 작업대에 선반을 가져왔을 때 서버로부터 수신 → 해당 선반 셀만 클릭 가능하게 활성화
     def on_mqtt_message(self, client, userdata, msg):
         """MQTT 수신 - AGV 도착 알림"""
         try:
@@ -415,17 +416,26 @@ class WarehouseGUI(BoxLayout):
             if msg.topic == "warehouse/agv/at_ws":
                 user_id = data.get("사용자ID")
                 if user_id == self.selected_user_id:
-                    Clock.schedule_once(lambda dt: self.enable_cells())
+                    shelf_label = data.get("선반번호")
+                    Clock.schedule_once(lambda dt, sl=shelf_label: self.enable_cells(sl))
         except Exception as e:
             print(f"❌ MQTT 수신 오류: {e}")
 
-    def enable_cells(self):
-        """AGV 도착 후 셀 활성화"""
+    # [추가] shelf_label(예: "1-1")과 일치하는 셀만 활성화, 나머지는 비활성 유지
+    # shelf_label=None이면 전체 활성화 (fallback)
+    def enable_cells(self, shelf_label=None):
+        """AGV 도착 후 해당 선반 셀만 활성화"""
         for cell in self.work_cells:
             if cell.text and not cell.is_completed:
-                cell.disabled = False
-                cell.background_color = (0.93, 0.93, 0.93, 1)
-        print("✅ AGV 도착 - 셀 활성화")
+                if shelf_label is None:
+                    cell.disabled = False
+                    cell.background_color = (0.93, 0.93, 0.93, 1)
+                else:
+                    cell_group = '-'.join(cell.shelf_number.split('-')[:2])
+                    if cell_group == shelf_label:
+                        cell.disabled = False
+                        cell.background_color = (0.93, 0.93, 0.93, 1)
+        print(f"✅ AGV 도착 - 셀 활성화 (선반: {shelf_label})")
 
     def on_shelf_complete(self, shelf_number):
         """선반 완료 콜백 - 같은 선반(구역-열)의 모든 층 완료 시 MQTT 전송"""
