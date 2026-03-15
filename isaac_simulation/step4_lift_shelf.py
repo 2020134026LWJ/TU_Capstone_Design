@@ -79,12 +79,15 @@ def node_xy(node_id: int) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class IsaacAGV:
-    BODY_Z        = 0.10
-    WHEEL_Z       = 0.06
-    SCISSOR_Z     = 0.195
-    LIFT_PLATE_Z  = 0.25    # 리프트 내린 상태 (기본)
-    LIFT_PLATE_UP = 0.42    # 리프트 올린 상태 (선반 1층 0.40 위로)
-    WHEEL_OFFSETS = [(0.0, +0.22), (0.0, -0.22)]
+    BODY_Z          = 0.10
+    WHEEL_Z         = 0.06
+    SCISSOR_Z       = 0.195
+    LIFT_PLATE_Z    = 0.25    # 리프트 내린 상태 (기본)
+    LIFT_PLATE_UP   = 0.42    # 리프트 올린 상태
+    LIFT_CONTACT_Z  = 0.3775  # 상판 top이 선반 하판 bottom에 닿는 lift_z
+                               # (선반 1층 board center=0.40, 두께=0.025 → bottom=0.3875
+                               #  상판 half-height=0.01 → contact = 0.3875 - 0.01 = 0.3775)
+    WHEEL_OFFSETS   = [(0.0, +0.22), (0.0, -0.22)]
 
     def __init__(self, rid: int, home_node: int):
         self.rid          = rid
@@ -94,6 +97,7 @@ class IsaacAGV:
         self.state      = "IDLE"
         self.path_queue = []
         self.goal_node  = None
+        self.heading    = 0.0   # 현재 진행 방향 (라디안, Z축 회전)
 
         home = node_xy(home_node)
         self.pos             = home.copy()
@@ -174,6 +178,7 @@ class IsaacAGV:
                 if self.on_arrived:
                     self.on_arrived(self.rid, self.current_node)
         else:
+            self.heading = float(np.arctan2(diff[1], diff[0]))
             step = min(MOVE_SPEED * dt, dist)
             self.pos += (diff / dist) * step
             self._sync_prim(stage)
@@ -209,48 +214,64 @@ class IsaacAGV:
     # ─── USD 동기화 ──────────────────────────────────────────────────────────
 
     def _sync_prim(self, stage):
-        """바디 + 바퀴 + 시저리프트 위치 동기화"""
+        """바디 + 바퀴 + 시저리프트 위치/방향 동기화"""
         x, y = float(self.pos[0]), float(self.pos[1])
+        h = self.heading
+        cos_h, sin_h = np.cos(h), np.sin(h)
 
-        # 바디
+        # 바디 (위치 + Z축 회전)
         self._set_translate(stage, f"/World/AGV_{self.rid}_body", x, y, self.BODY_Z)
+        self._set_orient_z(stage, f"/World/AGV_{self.rid}_body", h)
 
-        # 바퀴
-        for i, (dx, dy) in enumerate(self.WHEEL_OFFSETS):
+        # 바퀴 (heading 방향으로 offset 회전)
+        for i, (wdx, wdy) in enumerate(self.WHEEL_OFFSETS):
+            rx = wdx * cos_h - wdy * sin_h
+            ry = wdx * sin_h + wdy * cos_h
             self._set_translate(stage, f"/World/AGV_{self.rid}_wheel_{i}",
-                                x + dx, y + dy, self.WHEEL_Z)
+                                x + rx, y + ry, self.WHEEL_Z)
 
-        # 시저리프트 막대
+        # 시저리프트 막대 (offset ±0.06 을 heading으로 회전)
         self._set_translate(stage, f"/World/AGV_{self.rid}_scissor_a",
-                            x, y + 0.06, self.SCISSOR_Z)
+                            x - 0.06 * sin_h, y + 0.06 * cos_h, self.SCISSOR_Z)
         self._set_translate(stage, f"/World/AGV_{self.rid}_scissor_b",
-                            x, y - 0.06, self.SCISSOR_Z)
+                            x + 0.06 * sin_h, y - 0.06 * cos_h, self.SCISSOR_Z)
 
         # 상판
         self._set_translate(stage, f"/World/AGV_{self.rid}_lift_plate",
                             x, y, self.lift_z)
 
-        # 부착된 선반도 함께 이동 (delta 방식: 루트에 변위만 적용)
+        # 부착된 선반 (x,y + z 업데이트)
         if self.carrying_shelf is not None:
-            shelf_root = f"/World/Shelf_{self.carrying_shelf}"
-            prim = stage.GetPrimAtPath(shelf_root)
-            if prim.IsValid():
-                orig = shelf_origins.get(self.carrying_shelf, (x, y))
-                dx = x - orig[0]
-                dy = y - orig[1]
-                xform = UsdGeom.Xformable(prim)
-                ops = xform.GetOrderedXformOps()
-                for op in ops:
-                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                        op.Set(Gf.Vec3d(dx, dy, 0.0))
-                        return
-                xform.AddTranslateOp().Set(Gf.Vec3d(dx, dy, 0.0))
+            self._sync_shelf(stage)
+
+    def _sync_shelf(self, stage):
+        """선반 위치 동기화 (delta 방식: x,y 변위 + 리프트 z 반영)"""
+        if self.carrying_shelf is None:
+            return
+        x, y = float(self.pos[0]), float(self.pos[1])
+        orig = shelf_origins.get(self.carrying_shelf, (x, y))
+        dx = x - orig[0]
+        dy = y - orig[1]
+        dz = max(0.0, self.lift_z - self.LIFT_CONTACT_Z)  # 리프트가 선반에 닿은 후 상승분
+
+        shelf_root = f"/World/Shelf_{self.carrying_shelf}"
+        prim = stage.GetPrimAtPath(shelf_root)
+        if not prim.IsValid():
+            return
+        xform = UsdGeom.Xformable(prim)
+        for op in xform.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                op.Set(Gf.Vec3d(dx, dy, dz))
+                return
+        xform.AddTranslateOp().Set(Gf.Vec3d(dx, dy, dz))
 
     def _sync_lift(self, stage):
-        """상판 z만 업데이트 (리프트 애니메이션)"""
+        """상판 z 업데이트 (리프트 애니메이션) + 선반 z 연동"""
         x, y = float(self.pos[0]), float(self.pos[1])
         self._set_translate(stage, f"/World/AGV_{self.rid}_lift_plate",
                             x, y, self.lift_z)
+        if self.carrying_shelf is not None:
+            self._sync_shelf(stage)
 
     @staticmethod
     def _set_translate(stage, path: str, x: float, y: float, z: float):
@@ -260,6 +281,20 @@ class IsaacAGV:
         attr = prim.GetAttribute("xformOp:translate")
         if attr:
             attr.Set(Gf.Vec3d(x, y, z))
+
+    @staticmethod
+    def _set_orient_z(stage, path: str, angle_rad: float):
+        """Z축 회전 설정 (heading 방향)"""
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid():
+            return
+        half = angle_rad / 2
+        q = Gf.Quatd(float(np.cos(half)), Gf.Vec3d(0.0, 0.0, float(np.sin(half))))
+        attr = prim.GetAttribute("xformOp:orient")
+        if attr and attr.IsValid():
+            attr.Set(q)
+        else:
+            UsdGeom.Xformable(prim).AddOrientOp().Set(q)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -316,9 +351,15 @@ class MQTTBridge:
             node_path = r.get("node_path", [])
             goal      = r.get("goal")
             if node_path and len(node_path) > 1:
-                # 출발 노드로 위치 스냅 → 대각선 이동 방지
-                agv.pos = node_xy(node_path[0]).copy()
-                agv.set_plan(list(node_path[1:]), goal)
+                start_node = node_path[0]
+                if agv.state == "MOVING" and agv._moving_to_node == start_node:
+                    # 이미 start_node를 향해 이동 중 → 도착 후 자연스럽게 이어지도록 경로만 교체
+                    agv.path_queue = list(node_path[1:])
+                    agv.goal_node  = goal
+                else:
+                    # IDLE 또는 NODE_WAIT → 현재 위치와 start_node가 일치하므로 스냅 안전
+                    agv.pos = node_xy(start_node).copy()
+                    agv.set_plan(list(node_path[1:]), goal)
                 print(f"[AGV {rid}] Plan: {node_path} → goal {goal}")
             elif goal is not None:
                 agv.current_node = goal
@@ -547,7 +588,6 @@ for rid, home_node in sorted(robot_homes.items()):
     agvs[rid] = IsaacAGV(rid, home_node)
     print(f"[AGV {rid}] Home: node {home_node}  ({x}, {y})")
 
-# world.reset()
 world.reset()
 print("  선반/작업대/AGV 배치 완료, world.reset() 완료")
 

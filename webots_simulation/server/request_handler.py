@@ -339,6 +339,9 @@ class RequestHandler:
         if carrying_robot.status != RobotStatus.RETURNING_SHELF:
             return False
 
+        if carrying_robot.rid not in self._waiting_robots:
+            return False  # 이동 중 → 다음 NODE_WAIT에서 재시도
+
         task_id = carrying_robot.current_task_id
         if not task_id:
             return False
@@ -370,7 +373,7 @@ class RequestHandler:
                     released_robot = self.robot_manager.get_robot(released.rid)
                     if released_robot:
                         self._plan_and_publish_move(
-                            released_robot.rid, released.staging_node, ws_node
+                            released_robot.rid, released_robot.current_node, ws_node
                         )
                     print(f"[RequestHandler] W{ws_node}: staged AGV-{released.rid} released "
                           f"(AGV-{carrying_robot.rid} intercepted)")
@@ -399,21 +402,18 @@ class RequestHandler:
             return {}
 
         self.robot_manager.update_robot_position(rid, node)
-
-        # 이 로봇이 이전에 예약했던 노드 claim 해제
         self._claimed_nodes = {k: v for k, v in self._claimed_nodes.items() if v != rid}
+        self._waiting_robots.add(rid)  # 인터셉트/resume 체크 전에 등록
 
-        # 위치 기반 회랑 자동 해제:
-        # 퇴출 중(is_exiting=True) 로봇이 회랑 구역(WS+게이트웨이) 밖으로 나가면 즉시 해제.
-        # ArUco 트리거 경로에 없는 경우에도 동작 (handle_marker_trigger의 보완).
         released = self.staging_manager.check_position_release(rid, node)
         if released is not None:
-            self._plan_and_publish_move(released.rid, released.staging_node, released.target_ws)
+            self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
+            released_robot = self.robot_manager.get_robot(released.rid)
+            start = released_robot.current_node if released_robot else released.staging_node
+            self._plan_and_publish_move(released.rid, start, released.target_ws)
         else:
             self._try_assign_pending_tasks()
 
-        # NODE_WAIT 등록 후 전체 대기 로봇 resume 시도
-        self._waiting_robots.add(rid)
         self._try_resume_waiting_robots()
         return {}
 
@@ -549,6 +549,9 @@ class RequestHandler:
                 }
 
         elif st_type == SubTaskType.DELIVER_TO_WS:
+            # 스테이징 노드 재도착(arrived re-pub) 시 목표 WS가 아니면 무시
+            if robot.current_node != current_st.target_node:
+                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
             # 작업대에 도착 → 픽업 대기
             self.shelf_manager.mark_shelf_at_workstation(
                 current_st.shelf_id, current_st.target_node
@@ -691,9 +694,10 @@ class RequestHandler:
                 self.robot_manager.complete_task(robot.rid)
                 self._robot_planned_paths.pop(robot.rid, None)
                 self._try_assign_pending_tasks()
-                # 새 작업이 없으면 홈 작업대로 복귀
-                if robot.status == RobotStatus.IDLE and robot.current_node != robot.home_node:
-                    self._plan_and_publish_move(robot.rid, robot.current_node, robot.home_node)
+                # 새 작업이 없으면 홈 staging 노드에서 대기
+                idle_wait = self._get_idle_wait_node(robot.rid)
+                if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
+                    self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
                     "type": "shelf_ack_response",
                     "success": True,
@@ -722,8 +726,9 @@ class RequestHandler:
                                   f"(status={next_shelf_obj.status.value}), "
                                   f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
                             self._try_assign_pending_tasks()
-                            if robot.status == RobotStatus.IDLE and robot.current_node != robot.home_node:
-                                self._plan_and_publish_move(robot.rid, robot.current_node, robot.home_node)
+                            idle_wait = self._get_idle_wait_node(robot.rid)
+                            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
+                                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                             return {
                                 "type": "shelf_ack_response",
                                 "success": True,
@@ -785,8 +790,9 @@ class RequestHandler:
                 self.robot_manager.complete_task(robot.rid)
                 self._robot_planned_paths.pop(robot.rid, None)
                 self._try_assign_pending_tasks()
-                if robot.status == RobotStatus.IDLE and robot.current_node != robot.home_node:
-                    self._plan_and_publish_move(robot.rid, robot.current_node, robot.home_node)
+                idle_wait = self._get_idle_wait_node(robot.rid)
+                if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
+                    self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
                     "type": "shelf_ack_response",
                     "success": True,
@@ -827,8 +833,9 @@ class RequestHandler:
                                   f"(status={next_shelf_obj.status.value}), "
                                   f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
                             self._try_assign_pending_tasks()
-                            if robot.status == RobotStatus.IDLE and robot.current_node != robot.home_node:
-                                self._plan_and_publish_move(robot.rid, robot.current_node, robot.home_node)
+                            idle_wait = self._get_idle_wait_node(robot.rid)
+                            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
+                                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                             return {
                                 "type": "shelf_ack_response",
                                 "success": True,
@@ -864,17 +871,12 @@ class RequestHandler:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
-        # user_id → 작업대 WS 노드 탐색 (IN_PROGRESS task 기준)
-        user_task = next(
-            (t for t in self.task_manager.tasks.values()
-             if t.task_id.startswith(f"T{user_id}_") and
-             t.status.value == "in_progress"),
-            None
-        )
-        if not user_task:
-            return self._error_response(f"No active task for user {user_id}")
+        # user_id → WS 노드: robot home 기준 (포워딩 시 해당 user의 task가 없을 수 있음)
+        robot = self.robot_manager.get_robot(user_id)
+        if not robot:
+            return self._error_response(f"Unknown user {user_id}")
 
-        ws_node = user_task.workstation_id
+        ws_node = robot.home_node
 
         # 해당 WS에 AT_WORKSTATION인 선반 자동 탐색
         shelf_id = self.shelf_manager.get_shelf_at_ws(ws_node)
@@ -1171,6 +1173,16 @@ class RequestHandler:
                 occupied.add(shelf.current_node)
         return occupied
 
+    def _get_idle_wait_node(self, rid: int) -> int:
+        """idle 로봇의 대기 노드: 홈 WS의 staging 노드 반환 (staging 없으면 home_node)"""
+        robot = self.robot_manager.get_robot(rid)
+        if not robot:
+            return None
+        corridor = self.staging_manager.corridors.get(robot.home_node)
+        if corridor:
+            return corridor.staging_node
+        return robot.home_node
+
     def _plan_and_publish_move(
         self, rid: int, start: int, goal: int
     ) -> Optional[Dict]:
@@ -1209,7 +1221,7 @@ class RequestHandler:
                     print(f"[RequestHandler] Timeout-release: sending AGV-{t_released.rid} "
                           f"from staging {t_released.staging_node} → WS {t_released.target_ws}")
                     self._plan_and_publish_move(
-                        t_released.rid, t_released.staging_node, t_released.target_ws
+                        t_released.rid, t_robot.current_node, t_released.target_ws
                     )
 
         # 선반 운반 중이면 다른 선반이 놓인 노드 통과 불가
@@ -1287,9 +1299,10 @@ class RequestHandler:
         released = self.staging_manager.handle_marker_trigger(rid, marker_id)
         if released:
             # 대기 AGV를 작업대로 진입시킴
-            self._plan_and_publish_move(
-                released.rid, released.staging_node, released.target_ws
-            )
+            self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
+            released_robot = self.robot_manager.get_robot(released.rid)
+            start = released_robot.current_node if released_robot else released.staging_node
+            self._plan_and_publish_move(released.rid, start, released.target_ws)
         else:
             # Bug B fix: 대기 AGV 없이 회랑 FREE → PENDING 작업 재배정 시도
             # (AT_WORKSTATION + 회랑 점유로 PENDING됐던 작업이 이제 배정 가능)
@@ -1315,12 +1328,13 @@ class RequestHandler:
             return
 
         if new_current_st is None:
-            # 작업 완료: 로봇 → IDLE → 홈 복귀
+            # 작업 완료: 로봇 → IDLE → 홈 staging 노드 대기
             self.robot_manager.complete_task(robot.rid)
             self._robot_planned_paths.pop(robot.rid, None)
-            if robot.current_node != robot.home_node:
-                self._plan_and_publish_move(robot.rid, robot.current_node, robot.home_node)
-            print(f"[RequestHandler] T2(robot {robot.rid}): task complete after skip, → home")
+            idle_wait = self._get_idle_wait_node(robot.rid)
+            if robot.current_node != idle_wait:
+                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
+            print(f"[RequestHandler] T2(robot {robot.rid}): task complete after skip, → staging")
             return
 
         if new_current_st.subtask_type == SubTaskType.GO_TO_SHELF:

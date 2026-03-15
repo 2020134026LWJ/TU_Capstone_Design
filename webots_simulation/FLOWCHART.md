@@ -51,11 +51,11 @@ flowchart TB
 
     Q -- 필요 --> R["퇴출 (다른 작업대)"]
     R -- "필요 작업대로 경로 계획" --> STG
-    R -. "마커 통과" .-> TRG
+    R -. "회랑 이탈 또는 마커 통과" .-> TRG
 
     Q -- 불필요 --> S["퇴출 (복귀)"]
     S -- "경로 계획" --> T(("기존 선반 자리로 이동"))
-    S -. "마커 통과" .-> TRG
+    S -. "회랑 이탈 또는 마커 통과" .-> TRG
 
     %% 5. 복귀 중 서버 인터셉트 및 작업 종료
     T --> U{"서버 인터셉트 수신?<br>(목적지 변경)"}
@@ -69,7 +69,7 @@ flowchart TB
     %% 6. 완료 후 분기
     X --> Y{"대기 중인 태스크<br>(작업 대기열)?"}
     Y -- Yes --> C
-    Y -- No --> ROBOT_IDLE(("잉여 로봇 상태 / 대기"))
+    Y -- No --> ROBOT_IDLE(("staging 노드 대기<br>(home WS 앞 대기)"))
 
     ROBOT_IDLE -- "새 주문 대기 (무한 반복)" --> A
 ```
@@ -86,206 +86,18 @@ flowchart TB
 3. **STG (스테이징 게이팅)**:
    - 목표 작업대가 비어있음 → 작업대로 이동
    - 목표 작업대가 점유 중 → 스테이징 대기
-   - 퇴출 로봇이 마커 통과 → 대기 AGV 해제 → 작업대로 이동
+   - 퇴출 로봇이 회랑 구역 이탈(위치 기반) 또는 마커 통과 → 대기 AGV 해제 → 작업대로 이동
 4. **피킹 대기**: GUI가 작업 그리드에서 물품 클릭 → 모든 물품 완료 시 `shelf_complete` 전송 → 서버가 AGV 이동 명령
 5. **완료 후 분기**:
    - 다른 작업대에서 필요(포워딩) → 퇴출 → STG (마커 통과 시 대기 AGV 해제)
    - 불필요 → 퇴출 → 선반 원위치 복귀 (마커 통과 시 대기 AGV 해제)
 6. **복귀 중 인터셉트**: 서버가 MQTT 재경로 발행 → 복귀 취소 → STG (새 작업대로)
 7. **남은 선반 있으면** → 다음 선반으로 (F 노드부터 반복)
-8. **태스크 완료 후**: TASK_WAIT에 대기 태스크 있으면 C 노드로 복귀해 재배정
+8. **태스크 완료 후**: TASK_WAIT에 대기 태스크 있으면 C 노드로 복귀해 재배정 / 없으면 staging 노드(home WS 앞)에서 대기
 
 ---
 
 ## 서버 알고리즘 수정 이력
-
-### 수정 16: UI 통신 채널 변경 + 아이템 단위 → 선반 단위 간소화
-
-**배경**:
-- 실제 작업대 UI(GUI_backend.py)가 MQTT(`agv/algorithm` 토픽)로 서버와 통신
-- GUI가 작업 그리드에서 물품 클릭을 내부 처리하고 선반 단위로만 완료 신호를 서버에 전송
-- 기존 아이템 단위 `pick_complete` 방식은 불필요
-
-**다이어그램 변경**:
-- `PICK → O["피킹 완료"] → P{"남은 물품?"} → 루프` 제거
-- `PICK(("피킹 대기 (GUI: 작업 그리드 표시)")) → O["GUI: shelf_complete 수신 (선반 단위 완료 신호)"]` 로 교체
-
-**수정 내용**:
-
-`server/main.py` — `_setup_mqtt_subscriptions()`:
-- `agv/algorithm` 구독 추가
-- `_handle_mqtt_gui(data)` 핸들러 추가 → `request_handler.handle_message()` 라우팅
-
-`server/task_manager.py`:
-- `handle_item_picked(task_id, item)` 제거 (아이템 단위)
-- `find_task_with_item_at_ws(item, ws_node)` 제거
-- `handle_shelf_complete(task_id)` 추가: WAIT_PICKING의 모든 items 일괄 picked 처리 → `_decide_shelf_action` 호출
-- `find_task_waiting_for_shelf(shelf_id)` 추가: `shelf_id` 기준 WAIT_PICKING 탐색 (포워딩 재픽업 케이스 포함)
-
-`server/request_handler.py`:
-- `pick_complete` 핸들러 제거 → `shelf_complete`, `order_complete` 핸들러 추가
-- `_handle_shelf_complete(data)`: `{사용자ID, 선반번호}` 수신 → `find_task_waiting_for_shelf(선반번호)` → return/forward/pickup_for_return 처리
-- `_handle_order_complete(data)`: `{사용자ID, 주문번호}` 수신 → 완료 기록
-
-**라우팅 주의사항 (포워딩 재픽업)**:
-- `shelf_complete`가 `사용자ID=2`로 오더라도, 선반을 실제로 WAIT_PICKING 중인 task는 T1(포워딩 로봇)일 수 있음
-- `find_task_waiting_for_shelf(shelf_id)` — user_id 무관, 해당 선반의 WAIT_PICKING task 탐색으로 해결
-
-`webots_simulation/mqtt_test.py` — 신규 MQTT CLI 테스트 도구:
-- `시작 1/2` → `start_order` 발행
-- `선반완료 1 [노드번호]` → `shelf_complete` 발행
-- `완료 1/2` → `order_complete` 발행
-- `websocket_test.py`는 `archive/`로 이동
-
-**수정 파일**: `server/main.py`, `server/task_manager.py`, `server/request_handler.py`, `mqtt_test.py`(신규)
-
----
-
-### 수정 15: FORWARD_SHELF 후 포워딩 로봇이 목적지 WS 전체 사이클 담당
-
-**문제**: FORWARD_SHELF putdown 후 T1이 즉시 다음 선반으로 이동해 버림
-→ 선반이 목적지 WS(WS2)에 방치됨
-→ T2 로봇이 나중에 같은 WS2 노드에 도착 시 선반 2개 동시 존재 → 충돌/텔레포팅
-
-**원인**:
-- `_decide_shelf_action`이 RETURN_SHELF → FORWARD_SHELF 변환만 하고 목적지 WS 처리 서브태스크를 삽입하지 않음
-- `_handle_putdown_ack` FORWARD_SHELF 브랜치에서 putdown 후 바로 다음 선반(GO_TO_SHELF)으로 이동
-- T2의 선반 서브태스크 취소 로직 없음 → T2 로봇도 WS2로 진입 시도 → 충돌
-
-**수정 내용**:
-
-`task_manager.py` — `advance_subtask()` 수정:
-- 포워딩 스킵으로 미리 COMPLETED된 서브태스크를 자동으로 건너뜀
-
-`task_manager.py` — `handle_shelf_complete()` (수정 16에서 `handle_item_picked`에서 개명):
-- 이 선반의 다음 서브태스크가 PICKUP_SHELF(같은 선반)이면 `_decide_shelf_action` 대신
-  `{"action": "shelf_done_pickup_for_return"}` 반환 (포워딩 재픽업 사이클 감지)
-
-`task_manager.py` — 신규 메서드 5개 추가:
-- `insert_forward_return_subtasks(task_id, shelf_id, dest_ws, items)`:
-  FORWARD_SHELF 다음에 WAIT_PICKING(dest_ws, T2_items) + PICKUP_SHELF(dest_ws) + RETURN_SHELF(home) 삽입
-- `skip_shelf_subtasks_for_forwarding(task_id, shelf_id)`:
-  T2의 해당 선반 서브태스크 전체를 COMPLETED 표시 + current_idx 이동 → next subtask 반환
-- `get_demand_items_for_ws(shelf_id, ws_id)`: 목적지 WS의 아직 미픽업 아이템 조회
-- `find_task_with_item_at_ws(item, ws_node)`: 교차-태스크 라우팅용 — 해당 WS의 WAIT_PICKING 중인 태스크 탐색
-- `remove_shelf_demand_for_shelf(task_id, shelf_id)`: 특정 작업의 특정 선반 수요만 제거
-
-`request_handler.py` — `_handle_putdown_ack` FORWARD_SHELF 브랜치 재작성:
-```
-1. mark_shelf_at_workstation + set_carrying_shelf(None)
-2. get_demand_items_for_ws(shelf_id, dest_ws) → T2 아이템 목록
-3. insert_forward_return_subtasks() → T1에 WAIT+PICKUP+RETURN 삽입
-4. skip_shelf_subtasks_for_forwarding(T2) → T2 선반 서브태스크 스킵
-5. remove_shelf_demand_for_shelf(T2, shelf_id) → T2 수요 제거
-6. _reroute_robot_after_skip() → T2 로봇 재라우팅
-7. handle_subtask_complete() → T1: FORWARD_SHELF → WAIT_PICKING
-8. robot → WAITING_FOR_PICK
-```
-
-`request_handler.py` — `_handle_pickup_ack()` 수정:
-- `next_st.subtask_type == RETURN_SHELF` 케이스 추가:
-  포워딩된 선반 재픽업 완료 → `mark_exiting` + 홈으로 이동 계획
-
-`request_handler.py` — `_handle_shelf_complete()` (수정 16에서 `_handle_pick_complete`에서 개명):
-- `shelf_done_pickup_for_return` 액션 처리: T1 로봇에 pickup 명령 발행
-- (아이템 단위 교차-태스크 라우팅 제거 → `find_task_waiting_for_shelf(shelf_id)` 선반 단위 탐색으로 대체)
-
-`request_handler.py` — `_reroute_robot_after_skip()` 신규 추가:
-- T2의 선반 서브태스크 스킵 후 T2 로봇의 경로를 새 목적지(다음 선반 or 홈)로 재계획
-
-**수정 후 포워딩 전체 플로우**:
-```
-T1: WS1 pick_complete → FORWARD_SHELF(WS2로 이동)
-  → FORWARD_SHELF putdown at WS2
-  → T2 선반 서브태스크 스킵 (T1이 대신 처리)
-  → T1: WAIT_PICKING(WS2, T2_items) ← WAITING_FOR_PICK
-  → pick_complete(T2 task_id) → 교차-라우팅 → T1.handle_item_picked
-  → 모든 아이템 완료 → shelf_done_pickup_for_return
-  → T1: pickup 명령(re-pickup) → PICKING_UP_SHELF
-  → pickup ack → RETURN_SHELF to home → RETURNING_SHELF
-  → putdown at home → IN_PLACE → 다음 선반 or task_complete
-T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
-```
-
----
-
-### 수정 13: 동시 포워딩 시 횡방향 이동 중 충돌 방지
-
-**문제**: 두 AGV가 동시에 포워딩 중 한 AGV가 횡방향으로 비키는 도중 다른 AGV가 기다리지 않아 충돌
-
-**원인 1 — 방향 기반 감지 한계**:
-- 기존 충돌 회피: `is_ahead`(전방 180° 이내) 기준, 전방이 아니면 감속 없음
-- AGV-1이 동쪽으로 이동 중, AGV-2가 북쪽으로 진행 → `is_ahead=False` → 풀속도 → 충돌
-
-**원인 2 — A* 타이밍 오차**:
-- A*는 이산 타임스텝 기준 계획, 실제 실행은 회전 지연 등으로 타이밍 어긋남
-- 계획 충돌 없어도 실행 시 같은 노드에 동시 도착 가능
-
-**수정 내용**:
-
-`base.py`: `CollisionSensorInterface`에 `get_other_robot_position() → Optional[Tuple]` 기본 메서드 추가
-
-`webots_hw.py`: `WebotsCollisionSensor.get_other_robot_position()` 구현 (Supervisor API 활용)
-
-`navigation.py`:
-- `world_to_node(x, y)` 정적 메서드 추가 (월드 좌표 → 노드 ID, SNAP_DIST=0.45 이내)
-- `get_collision_speed_factor()` 노드 기반 체크 추가:
-  - 다른 로봇의 위치를 노드로 변환 → 내 `_moving_to_node`와 같으면 방향 무관 감속/정지
-  - 기존 방향 기반 체크는 fallback으로 유지
-
-`request_handler.py` `_get_other_robot_reservations()`:
-- 이동 로봇 예약에 **+1 타임스텝 버퍼** 추가 (회전 지연 보정)
-- 목표 도착 후 대기 예약: 3스텝 → 5스텝으로 확대
-
----
-
-### 수정 12: 포워딩 시 소스 회랑 무한 스테이징 버그 수정
-
-**문제**: 포워딩 로봇이 소스 WS 트리거 노드를 통과하지 못해 대기 AGV가 무한 스테이징
-
-**원인**:
-- RETURN_SHELF는 퇴출 경로(WS→gateway→trigger)가 고정되어 ArUco 트리거 확실히 통과
-- FORWARD_SHELF는 퇴출 후 다른 WS로 직행 → 소스 WS 트리거 노드가 경로에 없을 수 있음
-- 교착상태: AGV-1 WS1→WS2 포워딩 + AGV-2 WS2→WS1 포워딩 동시 시 `mark_exiting`이 서로의 회랑을 점유 → 둘 다 스테이징 → 트리거 통과 불가 → 영구 대기
-
-**수정 내용**:
-
-`staging_manager.py` — `release_corridor_without_trigger(ws_node, rid)` 추가:
-- 포워딩 전용 소스 회랑 즉시 해제
-- 대기 AGV 있으면 corridor 소유권 이전 후 반환 / 없으면 FREE
-
-`request_handler.py` — `_handle_pick_complete` forward 분기:
-- `mark_exiting` 제거 → `release_corridor_without_trigger` 호출로 교체
-- 순서: 포워딩 경로 계획(`_plan_and_publish_move`) → 소스 회랑 해제 (A*가 포워딩 경로 예약 참조해 게이트웨이 충돌 방지)
-- 해제된 AGV가 이미 스테이징 노드에 도착해 있으면 즉시 이동 명령 / 아직 이동 중이면 `_staged_to_ws`에 등록
-
-`request_handler.py` — `_handle_robot_arrived` Point B-1 추가:
-- `_staged_to_ws`에 등록된 로봇이 스테이징 노드에 도착하면 즉시 목표 WS로 이동 명령 발행
-
-**안전성**:
-- 포워딩 경로가 먼저 `_robot_planned_paths`에 등록되므로, 해제된 AGV의 A*가 포워딩 로봇의 게이트웨이 통과 시간을 예약으로 참조 → 게이트웨이 동시 점유 방지
-
----
-
-### 수정 3: 피드백 3가지 다이어그램 반영
-
-#### 피드백 1 — STG 점유 판단 기준 명확화
-- `F` 분기: `작업대 아님` → `작업대 아님 (이동 중 포함)` / `작업대에 있음` → `작업대에 정지 중`
-- STG 노드: "점유중?" → "점유 또는 점유 계획 중?"
-- STG 엣지: `비어있음` → `비어있음 (계획 포함)` / `점유 중` → `점유/계획 중`
-
-#### 피드백 2 — 이동 중인 선반 분류 명시
-- F 노드 분기 라벨에 "(이동 중 포함)" / "정지 중" 추가로 CARRIED 상태가 "작업대 아님"임을 명시
-
-#### 피드백 3 — 서버 인터셉트 트리거 흐름 추가
-- `C -- No` 경로에 `INT` 노드 추가: "복귀 중 로봇 인터셉트 가능?"
-  - Yes → `SVR["서버: MQTT 재경로 발행"]` → 점선으로 U에 연결
-  - No → IDLE
-- `U` 노드를 결정 다이아몬드(로봇 자기 판단)에서 프로세스 노드(서버 인터셉트 수신)로 변경
-- `T → U` 연결 제거, `T → V` 직행 (정상 복귀 경로)
-- 서버가 주도적으로 MQTT 재경로를 발행하고 로봇이 수신하는 흐름 명시
-
----
 
 ### 수정 1: Node U 구현 — 복귀 중 인터셉트 (`request_handler.py`)
 
@@ -357,46 +169,27 @@ if not robot:
 **답변 (코드 주석으로 명시)**:
 `_plan_and_publish_move()` 가 새 경로를 MQTT로 재발행 → 로봇은 자신의 MQTT topic을 구독 중이므로 새 plan 메시지를 즉시 수신 → 현재 이동을 중단하고 새 목적지로 향함
 
----
-
-### 수정된 파일
-
-| 파일 | 변경 내용 |
-|---|---|
-| `server/request_handler.py` | `_try_assign_pending_tasks` 인터셉트 분기 추가, `_try_intercept_returning_shelf` 신규 메서드, `_handle_pick_complete` 선반 상태 갱신, `CorridorState` import 추가 |
+**수정 파일**: `server/request_handler.py` (`_try_assign_pending_tasks` 인터셉트 분기 추가, `_try_intercept_returning_shelf` 신규 메서드, `_handle_pick_complete` 선반 상태 갱신, `CorridorState` import 추가)
 
 ---
 
-### 수정 8: F 노드 2가지 누락 케이스 추가 (동일 선반 동시 배정 버그)
+### 수정 3: 피드백 3가지 다이어그램 반영
 
-**버그 재현**: `시작 1` + `시작 2`를 연달아 실행하면 T1_1, T2_1 모두 같은 선반(예: 선반11)을
-`GO_TO_SHELF` 타겟으로 배정받아 두 AGV가 동시에 같은 선반으로 이동 → 충돌
+#### 피드백 1 — STG 점유 판단 기준 명확화
+- `F` 분기: `작업대 아님` → `작업대 아님 (이동 중 포함)` / `작업대에 있음` → `작업대에 정지 중`
+- STG 노드: "점유중?" → "점유 또는 점유 계획 중?"
+- STG 엣지: `비어있음` → `비어있음 (계획 포함)` / `점유 중` → `점유/계획 중`
 
-**원인**: F 노드가 3분기(`IN_PLACE`/`CARRIED`/`AT_WORKSTATION`)만 처리하고 아래 2 케이스 누락:
-1. `IN_PLACE`이지만 **다른 AGV가 이미 GO_TO_SHELF로 이동 중** → PENDING 처리 필요
-2. `AT_WORKSTATION`이지만 **carrier 로봇이 WAITING_FOR_PICK 중** → PENDING 처리 필요
-   (포워딩 전에 다른 태스크가 같은 선반의 WS 방문을 요청할 때 발생)
+#### 피드백 2 — 이동 중인 선반 분류 명시
+- F 노드 분기 라벨에 "(이동 중 포함)" / "정지 중" 추가로 CARRIED 상태가 "작업대 아님"임을 명시
 
-**수정 내용** (`server/request_handler.py`):
-
-추가 1 — `_is_shelf_targeted_by_moving_robot(shelf_id, exclude_rid)` 신규 헬퍼:
-- 다른 로봇이 MOVING_TO_SHELF 상태이고 현재 서브태스크가 `GO_TO_SHELF(shelf_id)` 이면 True
-
-추가 2 — `_get_shelf_availability(shelf_id, exclude_rid)` 신규 헬퍼 (F노드 중복 제거):
-- `'direct'` : AT_WORKSTATION + carrier NOT WAITING_FOR_PICK → WS 직행
-- `'pending'` : CARRIED / AT_WORKSTATION+WAITING_FOR_PICK / IN_PLACE+reserved
-- `'go'`     : IN_PLACE + 예약 없음
-
-수정 위치 1 — `_try_assign_pending_tasks()` F노드:
-- 기존 `if AT_WORKSTATION` / `elif CARRIED` 를 `_get_shelf_availability()` 로 통합
-
-수정 위치 2 — `_handle_putdown_ack()` RETURN_SHELF next_subtask F노드:
-- 동일 통합
-
-수정 위치 3 — `_handle_putdown_ack()` FORWARD_SHELF next_subtask F노드:
-- 동일 통합
-
-**수정 파일**: `server/request_handler.py`, `FLOWCHART.md`
+#### 피드백 3 — 서버 인터셉트 트리거 흐름 추가
+- `C -- No` 경로에 `INT` 노드 추가: "복귀 중 로봇 인터셉트 가능?"
+  - Yes → `SVR["서버: MQTT 재경로 발행"]` → 점선으로 U에 연결
+  - No → IDLE
+- `U` 노드를 결정 다이아몬드(로봇 자기 판단)에서 프로세스 노드(서버 인터셉트 수신)로 변경
+- `T → U` 연결 제거, `T → V` 직행 (정상 복귀 경로)
+- 서버가 주도적으로 MQTT 재경로를 발행하고 로봇이 수신하는 흐름 명시
 
 ---
 
@@ -486,6 +279,39 @@ if not robot:
 
 ---
 
+### 수정 8: F 노드 2가지 누락 케이스 추가 (동일 선반 동시 배정 버그)
+
+**버그 재현**: `시작 1` + `시작 2`를 연달아 실행하면 T1_1, T2_1 모두 같은 선반(예: 선반11)을
+`GO_TO_SHELF` 타겟으로 배정받아 두 AGV가 동시에 같은 선반으로 이동 → 충돌
+
+**원인**: F 노드가 3분기(`IN_PLACE`/`CARRIED`/`AT_WORKSTATION`)만 처리하고 아래 2 케이스 누락:
+1. `IN_PLACE`이지만 **다른 AGV가 이미 GO_TO_SHELF로 이동 중** → PENDING 처리 필요
+2. `AT_WORKSTATION`이지만 **carrier 로봇이 WAITING_FOR_PICK 중** → PENDING 처리 필요
+   (포워딩 전에 다른 태스크가 같은 선반의 WS 방문을 요청할 때 발생)
+
+**수정 내용** (`server/request_handler.py`):
+
+추가 1 — `_is_shelf_targeted_by_moving_robot(shelf_id, exclude_rid)` 신규 헬퍼:
+- 다른 로봇이 MOVING_TO_SHELF 상태이고 현재 서브태스크가 `GO_TO_SHELF(shelf_id)` 이면 True
+
+추가 2 — `_get_shelf_availability(shelf_id, exclude_rid)` 신규 헬퍼 (F노드 중복 제거):
+- `'direct'` : AT_WORKSTATION + carrier NOT WAITING_FOR_PICK → WS 직행
+- `'pending'` : CARRIED / AT_WORKSTATION+WAITING_FOR_PICK / IN_PLACE+reserved
+- `'go'`     : IN_PLACE + 예약 없음
+
+수정 위치 1 — `_try_assign_pending_tasks()` F노드:
+- 기존 `if AT_WORKSTATION` / `elif CARRIED` 를 `_get_shelf_availability()` 로 통합
+
+수정 위치 2 — `_handle_putdown_ack()` RETURN_SHELF next_subtask F노드:
+- 동일 통합
+
+수정 위치 3 — `_handle_putdown_ack()` FORWARD_SHELF next_subtask F노드:
+- 동일 통합
+
+**수정 파일**: `server/request_handler.py`, `FLOWCHART.md`
+
+---
+
 ### 수정 9: Bug A (AGV 교착) + Bug B (STG 우회) 수정
 
 #### Bug A — 첫 선반 블록 시 AGV 교착 (선반 순서 회전)
@@ -548,7 +374,7 @@ Robot B(PENDING 상태)가 같은 shelf X를 동시에 배정받아 두 로봇�
 - shelf X가 "go" 또는 "direct"로 판정 → Robot B에게도 shelf X 배정됨
 - 이후 Robot A도 MOVING_TO_SHELF로 전환 + shelf X로 이동 → 두 로봇 충돌
 
-**수정 내용** (`server/request_handler.py` line 644~652):
+**수정 내용** (`server/request_handler.py`):
 
 순서 변경:
 ```
@@ -623,7 +449,67 @@ if task_obj:
 
 ---
 
-## 수정 14: F-노드 stale shelf_sequence 버그 수정
+### 수정 12: 포워딩 시 소스 회랑 무한 스테이징 버그 수정
+
+**문제**: 포워딩 로봇이 소스 WS 트리거 노드를 통과하지 못해 대기 AGV가 무한 스테이징
+
+**원인**:
+- RETURN_SHELF는 퇴출 경로(WS→gateway→trigger)가 고정되어 ArUco 트리거 확실히 통과
+- FORWARD_SHELF는 퇴출 후 다른 WS로 직행 → 소스 WS 트리거 노드가 경로에 없을 수 있음
+- 교착상태: AGV-1 WS1→WS2 포워딩 + AGV-2 WS2→WS1 포워딩 동시 시 `mark_exiting`이 서로의 회랑을 점유 → 둘 다 스테이징 → 트리거 통과 불가 → 영구 대기
+
+**수정 내용**:
+
+`staging_manager.py` — `release_corridor_without_trigger(ws_node, rid)` 추가:
+- 포워딩 전용 소스 회랑 즉시 해제
+- 대기 AGV 있으면 corridor 소유권 이전 후 반환 / 없으면 FREE
+
+`request_handler.py` — `_handle_pick_complete` forward 분기:
+- `mark_exiting` 제거 → `release_corridor_without_trigger` 호출로 교체
+- 순서: 포워딩 경로 계획(`_plan_and_publish_move`) → 소스 회랑 해제 (A*가 포워딩 경로 예약 참조해 게이트웨이 충돌 방지)
+- 해제된 AGV가 이미 스테이징 노드에 도착해 있으면 즉시 이동 명령 / 아직 이동 중이면 `_staged_to_ws`에 등록
+
+`request_handler.py` — `_handle_robot_arrived` Point B-1 추가:
+- `_staged_to_ws`에 등록된 로봇이 스테이징 노드에 도착하면 즉시 목표 WS로 이동 명령 발행
+
+**안전성**:
+- 포워딩 경로가 먼저 `_robot_planned_paths`에 등록되므로, 해제된 AGV의 A*가 포워딩 로봇의 게이트웨이 통과 시간을 예약으로 참조 → 게이트웨이 동시 점유 방지
+
+---
+
+### 수정 13: 동시 포워딩 시 횡방향 이동 중 충돌 방지
+
+**문제**: 두 AGV가 동시에 포워딩 중 한 AGV가 횡방향으로 비키는 도중 다른 AGV가 기다리지 않아 충돌
+
+**원인 1 — 방향 기반 감지 한계**:
+- 기존 충돌 회피: `is_ahead`(전방 180° 이내) 기준, 전방이 아니면 감속 없음
+- AGV-1이 동쪽으로 이동 중, AGV-2가 북쪽으로 진행 → `is_ahead=False` → 풀속도 → 충돌
+
+**원인 2 — A* 타이밍 오차**:
+- A*는 이산 타임스텝 기준 계획, 실제 실행은 회전 지연 등으로 타이밍 어긋남
+- 계획 충돌 없어도 실행 시 같은 노드에 동시 도착 가능
+
+**수정 내용**:
+
+`base.py`: `CollisionSensorInterface`에 `get_other_robot_position() → Optional[Tuple]` 기본 메서드 추가
+
+`webots_hw.py`: `WebotsCollisionSensor.get_other_robot_position()` 구현 (Supervisor API 활용)
+
+`navigation.py`:
+- `world_to_node(x, y)` 정적 메서드 추가 (월드 좌표 → 노드 ID, SNAP_DIST=0.45 이내)
+- `get_collision_speed_factor()` 노드 기반 체크 추가:
+  - 다른 로봇의 위치를 노드로 변환 → 내 `_moving_to_node`와 같으면 방향 무관 감속/정지
+  - 기존 방향 기반 체크는 fallback으로 유지
+
+`request_handler.py` `_get_other_robot_reservations()`:
+- 이동 로봇 예약에 **+1 타임스텝 버퍼** 추가 (회전 지연 보정)
+- 목표 도착 후 대기 예약: 3스텝 → 5스텝으로 확대
+
+**수정 파일**: `server/request_handler.py`, `controllers/agv_mqtt_controller/navigation.py`, `hardware/webots_hw.py`, `hardware/base.py`
+
+---
+
+### 수정 14: F-노드 stale shelf_sequence 버그 수정
 
 **파일**: `server/request_handler.py`, `_try_assign_pending_tasks()`
 
@@ -665,27 +551,117 @@ if shelf_obj:
 
 ---
 
-## 수정 17: UI MQTT 연동 + shelf_complete 선반 단위 간소화
+### 수정 15: FORWARD_SHELF 후 포워딩 로봇이 목적지 WS 전체 사이클 담당
 
-**파일**: `server/main.py`, `server/request_handler.py`, `server/task_manager.py`, `webots_simulation/mqtt_test.py`
+**문제**: FORWARD_SHELF putdown 후 T1이 즉시 다음 선반으로 이동해 버림
+→ 선반이 목적지 WS(WS2)에 방치됨
+→ T2 로봇이 나중에 같은 WS2 노드에 도착 시 선반 2개 동시 존재 → 충돌/텔레포팅
 
-**변경 내용**:
-- GUI → 서버 MQTT 토픽: `agv/algorithm` 구독 추가 (`server/main.py`)
-- `_handle_mqtt_gui()` 추가: `start_order` / `shelf_complete` / `order_complete` 라우팅
-- `pick_complete` (아이템 단위) → `shelf_complete` (선반 단위)로 통합:
-  - `task_manager.handle_shelf_complete(shelf_id)` 추가
-  - `find_task_waiting_for_shelf(shelf_id)` 추가 (포워딩 시 소스 WS 탐색)
-  - `pick_complete`, `handle_item_picked`, `find_task_with_item_at_ws` 제거
-- `shelf_complete` 수신 시 `사용자ID`로 WS 탐색 → `get_shelf_at_ws()` → shelf_id 자동 감지
-- `mqtt_test.py`: `선반완료` 명령 제거, `완료 1/2` → `shelf_complete` 전송으로 통합
+**원인**:
+- `_decide_shelf_action`이 RETURN_SHELF → FORWARD_SHELF 변환만 하고 목적지 WS 처리 서브태스크를 삽입하지 않음
+- `_handle_putdown_ack` FORWARD_SHELF 브랜치에서 putdown 후 바로 다음 선반(GO_TO_SHELF)으로 이동
+- T2의 선반 서브태스크 취소 로직 없음 → T2 로봇도 WS2로 진입 시도 → 충돌
 
-**효과**:
-- CLI 명령 간소화: `완료 1` 하나로 선반 갖다놓기 + 다음 선반 이동 명령까지 처리
-- 포워딩 케이스: `shelf_id` 기반 탐색으로 다른 WS의 task도 정확히 찾음
+**수정 내용**:
+
+`task_manager.py` — `advance_subtask()` 수정:
+- 포워딩 스킵으로 미리 COMPLETED된 서브태스크를 자동으로 건너뜀
+
+`task_manager.py` — `handle_shelf_complete()` (수정 16에서 `handle_item_picked`에서 개명):
+- 이 선반의 다음 서브태스크가 PICKUP_SHELF(같은 선반)이면 `_decide_shelf_action` 대신
+  `{"action": "shelf_done_pickup_for_return"}` 반환 (포워딩 재픽업 사이클 감지)
+
+`task_manager.py` — 신규 메서드 5개 추가:
+- `insert_forward_return_subtasks(task_id, shelf_id, dest_ws, items)`:
+  FORWARD_SHELF 다음에 WAIT_PICKING(dest_ws, T2_items) + PICKUP_SHELF(dest_ws) + RETURN_SHELF(home) 삽입
+- `skip_shelf_subtasks_for_forwarding(task_id, shelf_id)`:
+  T2의 해당 선반 서브태스크 전체를 COMPLETED 표시 + current_idx 이동 → next subtask 반환
+- `get_demand_items_for_ws(shelf_id, ws_id)`: 목적지 WS의 아직 미픽업 아이템 조회
+- `find_task_with_item_at_ws(item, ws_node)`: 교차-태스크 라우팅용 — 해당 WS의 WAIT_PICKING 중인 태스크 탐색
+- `remove_shelf_demand_for_shelf(task_id, shelf_id)`: 특정 작업의 특정 선반 수요만 제거
+
+`request_handler.py` — `_handle_putdown_ack` FORWARD_SHELF 브랜치 재작성:
+```
+1. mark_shelf_at_workstation + set_carrying_shelf(None)
+2. get_demand_items_for_ws(shelf_id, dest_ws) → T2 아이템 목록
+3. insert_forward_return_subtasks() → T1에 WAIT+PICKUP+RETURN 삽입
+4. skip_shelf_subtasks_for_forwarding(T2) → T2 선반 서브태스크 스킵
+5. remove_shelf_demand_for_shelf(T2, shelf_id) → T2 수요 제거
+6. _reroute_robot_after_skip() → T2 로봇 재라우팅
+7. handle_subtask_complete() → T1: FORWARD_SHELF → WAIT_PICKING
+8. robot → WAITING_FOR_PICK
+```
+
+`request_handler.py` — `_handle_pickup_ack()` 수정:
+- `next_st.subtask_type == RETURN_SHELF` 케이스 추가:
+  포워딩된 선반 재픽업 완료 → `mark_exiting` + 홈으로 이동 계획
+
+`request_handler.py` — `_handle_shelf_complete()` (수정 16에서 `_handle_pick_complete`에서 개명):
+- `shelf_done_pickup_for_return` 액션 처리: T1 로봇에 pickup 명령 발행
+- (아이템 단위 교차-태스크 라우팅 제거 → `find_task_waiting_for_shelf(shelf_id)` 선반 단위 탐색으로 대체)
+
+`request_handler.py` — `_reroute_robot_after_skip()` 신규 추가:
+- T2의 선반 서브태스크 스킵 후 T2 로봇의 경로를 새 목적지(다음 선반 or 홈)로 재계획
+
+**수정 후 포워딩 전체 플로우**:
+```
+T1: WS1 pick_complete → FORWARD_SHELF(WS2로 이동)
+  → FORWARD_SHELF putdown at WS2
+  → T2 선반 서브태스크 스킵 (T1이 대신 처리)
+  → T1: WAIT_PICKING(WS2, T2_items) ← WAITING_FOR_PICK
+  → pick_complete(T2 task_id) → 교차-라우팅 → T1.handle_item_picked
+  → 모든 아이템 완료 → shelf_done_pickup_for_return
+  → T1: pickup 명령(re-pickup) → PICKING_UP_SHELF
+  → pickup ack → RETURN_SHELF to home → RETURNING_SHELF
+  → putdown at home → IN_PLACE → 다음 선반 or task_complete
+T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
+```
 
 ---
 
-## 수정 18: AGV 중간 노드 위치 전송
+### 수정 16: UI MQTT 연동 + 아이템 단위 → 선반 단위 간소화
+
+**배경**:
+- 실제 작업대 UI(GUI_backend.py)가 MQTT(`agv/algorithm` 토픽)로 서버와 통신
+- GUI가 작업 그리드에서 물품 클릭을 내부 처리하고 선반 단위로만 완료 신호를 서버에 전송
+- 기존 아이템 단위 `pick_complete` 방식은 불필요
+
+**다이어그램 변경**:
+- `PICK → O["피킹 완료"] → P{"남은 물품?"} → 루프` 제거
+- `PICK(("피킹 대기 (GUI: 작업 그리드 표시)")) → O["GUI: shelf_complete 수신 (선반 단위 완료 신호)"]` 로 교체
+
+**수정 내용**:
+
+`server/main.py` — `_setup_mqtt_subscriptions()`:
+- `agv/algorithm` 구독 추가
+- `_handle_mqtt_gui(data)` 핸들러 추가 → `request_handler.handle_message()` 라우팅
+
+`server/task_manager.py`:
+- `handle_item_picked(task_id, item)` 제거 (아이템 단위)
+- `find_task_with_item_at_ws(item, ws_node)` 제거
+- `handle_shelf_complete(task_id)` 추가: WAIT_PICKING의 모든 items 일괄 picked 처리 → `_decide_shelf_action` 호출
+- `find_task_waiting_for_shelf(shelf_id)` 추가: `shelf_id` 기준 WAIT_PICKING 탐색 (포워딩 재픽업 케이스 포함)
+
+`server/request_handler.py`:
+- `pick_complete` 핸들러 제거 → `shelf_complete`, `order_complete` 핸들러 추가
+- `_handle_shelf_complete(data)`: `{사용자ID, 선반번호}` 수신 → `find_task_waiting_for_shelf(선반번호)` → return/forward/pickup_for_return 처리
+- `_handle_order_complete(data)`: `{사용자ID, 주문번호}` 수신 → 완료 기록
+
+**라우팅 주의사항 (포워딩 재픽업)**:
+- `shelf_complete`가 `사용자ID=2`로 오더라도, 선반을 실제로 WAIT_PICKING 중인 task는 T1(포워딩 로봇)일 수 있음
+- `find_task_waiting_for_shelf(shelf_id)` — user_id 무관, 해당 선반의 WAIT_PICKING task 탐색으로 해결
+
+`webots_simulation/mqtt_test.py` — 신규 MQTT CLI 테스트 도구:
+- `시작 1/2` → `start_order` 발행
+- `선반완료 1 [노드번호]` → `shelf_complete` 발행
+- `완료 1/2` → `order_complete` 발행
+- `websocket_test.py`는 `archive/`로 이동
+
+**수정 파일**: `server/main.py`, `server/task_manager.py`, `server/request_handler.py`, `mqtt_test.py`(신규)
+
+---
+
+### 수정 17: AGV 중간 노드 위치 전송
 
 **파일**: `controllers/agv_mqtt_controller/mqtt_handler.py`, `controllers/agv_mqtt_controller/agv_controller.py`, `server/main.py`, `server/request_handler.py`
 
@@ -706,7 +682,7 @@ if shelf_obj:
 
 ---
 
-## 수정 19: 서버 기반 노드 단위 교착 방지 (NODE_WAIT + resume)
+### 수정 18: 서버 기반 노드 단위 교착 방지 (NODE_WAIT + resume)
 
 **파일**: `controllers/agv_mqtt_controller/navigation.py`, `controllers/agv_mqtt_controller/agv_controller.py`, `server/request_handler.py`, `server/config.py`, `server/mqtt_publisher.py`
 
@@ -745,7 +721,7 @@ if shelf_obj:
 
 ---
 
-## 수정 20: 위치 기반 회랑 자동 해제 (position-based corridor release)
+### 수정 19: 위치 기반 회랑 자동 해제 (position-based corridor release)
 
 **파일**: `server/staging_manager.py`, `server/request_handler.py`
 
@@ -757,7 +733,7 @@ if shelf_obj:
 **근본 원인**:
 - 기존 트리거 방식은 퇴출 로봇이 반드시 트리거 노드(WS 게이트웨이 옆)를 지날 때만 동작
 - 다른 WS 방향으로 이동하거나 포워딩 경로가 트리거 노드를 우회하면 회랑이 영구 점유됨
-- NODE_WAIT + 중간 위치 전송(수정 18)으로 서버가 정확한 위치를 이미 알고 있음 → 위치 기반 해제 가능
+- NODE_WAIT + 중간 위치 전송(수정 17)으로 서버가 정확한 위치를 이미 알고 있음 → 위치 기반 해제 가능
 
 **수정 내용**:
 
@@ -782,7 +758,7 @@ if shelf_obj:
 
 ---
 
-## 수정 21: 다중 로봇 협업 배정 + 공정성 알고리즘
+### 수정 20: 다중 로봇 협업 배정 + 공정성 알고리즘
 
 **파일**: `server/request_handler.py`, `server/task_manager.py`
 
@@ -826,6 +802,218 @@ R1 → T1_1_0, R2 → T1_1_1 동시 출발 (T1_1_2 대기)
 
 ---
 
+### 수정 21: 충돌 버그 수정 — `_is_safe_to_resume` 보수적 정책 적용
+
+**문제**: 다른 AGV가 next_node에 있어도 `_claimed_nodes`(이동 예약)가 있으면 "떠나는 중"으로 판단해 진입 허용 → 물리적으로 아직 그 노드에 있는 동안 다른 AGV가 진입 → 충돌
+
+**원인 시나리오**:
+1. AGV1이 노드 6에서 claim[7]=1 등록 → resume 발행 (아직 물리적으로 6에 있음)
+2. AGV2가 next=6, AGV1 current=6, claim=7 → "떠나는 중" 판단 → resume 발행
+3. AGV1이 6을 떠나기 전에 AGV2가 6 진입 → 충돌
+
+**수정 내용** (`server/request_handler.py`, `_is_safe_to_resume`):
+
+```python
+# 수정 전: claim 있으면 "떠나는 중"으로 간주 → 진입 허용
+if other_current == next_node:
+    other_claimed = next(...)
+    if other_claimed is None:
+        return False  # claim 있으면 여기서 통과
+
+# 수정 후: 물리적으로 있으면 무조건 대기
+if other_current == next_node:
+    return False  # claim 여부 관계없이 대기
+```
+
+**효과**: 다른 AGV가 실제로 노드를 떠나 position 메시지를 보낼 때까지 대기 → 충돌 방지 (속도 소폭 감소는 허용)
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
+### 수정 22: 이동 중 plan 즉시 적용 버그 수정 (대각선 이동 + Node U 타이밍)
+
+**문제 1 — Webots 대각선 이동**:
+- `agv_controller._handle_plan()`이 MQTT 스레드에서 직접 `nav.set_plan()` 호출
+- AGV가 노드 사이를 이동 중일 때 새 plan 수신 시 현재 물리 위치 기준으로 방향 재계산 → 대각선
+
+**문제 2 — Node U 인터셉트 타이밍**:
+- `_try_intercept_returning_shelf()`가 로봇 NODE_WAIT 여부를 확인하지 않음
+- `_handle_start_order` → `_try_assign_pending_tasks` 호출 시 이동 중에도 인터셉트 실행
+- `_waiting_robots.add(rid)`가 `_try_assign_pending_tasks()` 이후에 위치해 체크 불가
+
+**수정 내용**:
+
+`controllers/agv_mqtt_controller/agv_controller.py`:
+- `_pending_plan`, `_pending_resume` 추가 (MQTT 스레드 → 메인 루프 핸드오프)
+- `_handle_plan()`: `set_plan()` 즉시 호출 → `_pending_plan` 큐잉
+- `_handle_control()`: `nav.resume()` 즉시 호출 → `_pending_resume` 큐잉
+- `run()` 루프에서 pending plan 3분기 처리:
+  - `IDLE` → `set_plan()` 정상 출발
+  - `NODE_WAIT @ start_node` → path 교체 + `publish_arrived` 재발행
+  - `MOVING` 또는 다른 노드 `NODE_WAIT` → path_queue만 교체, 스냅 금지
+
+`server/request_handler.py`:
+- `_handle_robot_position()`: `_waiting_robots.add(rid)`를 `_try_assign_pending_tasks()` 앞으로 이동
+- `_try_intercept_returning_shelf()`: `rid not in _waiting_robots` 시 `return False` (이동 중 인터셉트 차단)
+
+**수정 파일**: `controllers/agv_mqtt_controller/agv_controller.py`, `server/request_handler.py`
+
+---
+
+### 수정 23: 스테이징 해제 후 교착 버그 수정
+
+**현상**: Robot 1이 staging node 9에서 영구 교착 — corridor 해제 후 새 plan을 받았지만 resume이 오지 않아 출발 불가.
+
+**root cause 3가지**:
+
+1. **`_waiting_robots` 누락** (핵심):
+   - staged robot이 staging node에 final goal로 도착 → `publish_arrived()` 발행 → `_handle_robot_arrived()` 호출
+   - `is_staged_agv()` = True → "staging_wait" 조기 반환 → `_waiting_robots`에 추가 안 됨
+   - 나중에 corridor 해제 후 `_plan_and_publish_move(released.rid, ...)` 호출 → plan은 전달됨
+   - 그러나 `_try_resume_waiting_robots()`가 `released.rid`를 set에서 찾지 못해 resume 미발행 → **영구 교착**
+
+2. **`_handle_robot_arrived`에 `_waiting_robots.add()` 없음**:
+   - `_handle_robot_position()`은 `_waiting_robots.add(rid)` 호출 → 중간 노드 경유 로봇은 정상 처리
+   - `_handle_robot_arrived()`는 추가 없음 → staging에서 해제된 robot은 재개 불가
+
+3. **`DELIVER_TO_WS` 노드 가드 누락**:
+   - staging node에서 새 plan을 받은 robot이 `publish_arrived(staging_node)` 재발행
+   - `is_staged_agv()` = False (queue에서 popleft됨) → `_process_arrival(DELIVER_TO_WS)` 실행
+   - 목표 WS가 아닌 staging node에서 `mark_shelf_at_workstation()` 잘못 호출 → 태스크 오동작
+
+**수정 내용** (`server/request_handler.py`):
+
+1. `_handle_robot_position()`: `check_position_release()` 후 released.rid를 `_waiting_robots`에 추가
+```python
+if released is not None:
+    self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
+    self._plan_and_publish_move(...)
+```
+
+2. `handle_marker_trigger()`: 동일 패턴 — marker trigger로 released 시에도 `_waiting_robots.add()`
+```python
+if released:
+    self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
+    self._plan_and_publish_move(...)
+```
+
+3. `_process_arrival()` `DELIVER_TO_WS` 분기: arrived_node ≠ target_node 시 en_route 반환
+```python
+elif st_type == SubTaskType.DELIVER_TO_WS:
+    if robot.current_node != current_st.target_node:
+        return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
+```
+
+**왜 Webots·Isaac Sim 증상이 동일한가**: 버그가 서버(request_handler.py)에만 존재하므로 시뮬레이터 무관.
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
+### 수정 24: 스테이징 해제 시 실제 위치 기준 경로 계획
+
+**파일**: `server/request_handler.py`
+
+**문제**: 대기 AGV가 staging_node로 이동 중(아직 미도달)일 때 trigger/position 해제가 발생하면,
+서버가 `staging_node`를 출발점으로 경로를 계획 → `_robot_planned_paths`에 현재 위치(예: node 5)가 없음
+→ AGV가 node 5 도착 후 `robot_position` 발행 → `_get_next_planned_node` 탐색 실패 → resume 미발행 → **교착**
+
+**원인**: 해제 시 항상 `released.staging_node`를 start로 사용하는데, 로봇이 아직 그 노드에 없을 수 있음
+
+**수정 내용**: 아래 4곳에서 `staging_node` → `robot.current_node` 변경
+
+| 위치 | 상황 |
+|------|------|
+| `handle_marker_trigger()` | 마커 트리거로 대기 AGV 해제 |
+| `_handle_robot_position()` | 위치 기반 corridor 해제 |
+| intercept 내 staged 해제 | 인터셉트로 corridor 소유권 이전 |
+| timeout release | 타임아웃으로 staged AGV 해제 |
+
+```python
+# 수정 전
+self._plan_and_publish_move(released.rid, released.staging_node, released.target_ws)
+
+# 수정 후
+released_robot = self.robot_manager.get_robot(released.rid)
+start = released_robot.current_node if released_robot else released.staging_node
+self._plan_and_publish_move(released.rid, start, released.target_ws)
+```
+
+**효과**: 경로가 실제 위치 → staging → WS 전체를 포함 → `_get_next_planned_node`가 현재 위치를 찾아 resume 정상 발행
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
+### 수정 25: idle 로봇 귀환 목적지 WS → staging 노드 대기
+
+**파일**: `server/request_handler.py`
+
+**문제**: 작업 완료 후 idle 로봇이 홈 WS(작업대)로 복귀 → WS는 선반 처리 공간이지 주차 공간이 아님
+→ 회랑 진입 → 다른 로봇과 충돌/trigger 해제 꼬임 → "No shelf at workstation" 에러 발생
+
+**수정 내용**:
+
+`_get_idle_wait_node(rid)` 헬퍼 추가:
+```python
+def _get_idle_wait_node(self, rid: int) -> int:
+    robot = self.robot_manager.get_robot(rid)
+    corridor = self.staging_manager.corridors.get(robot.home_node)
+    if corridor:
+        return corridor.staging_node  # staging 노드 반환
+    return robot.home_node            # staging 없으면 기존 home
+```
+
+홈 복귀 호출 5곳 모두 `robot.home_node` → `_get_idle_wait_node(robot.rid)` 로 교체
+
+**동작**:
+- Robot 1 (home=33) → idle 시 node **9** 대기
+- Robot 2 (home=34) → idle 시 node **17** 대기
+- 새 작업 배정 시 `get_available_robot()`이 IDLE 상태만 체크 → staging 위치 무관 정상 배정
+
+**효과**: 회랑 외부 대기 → 다른 로봇 간섭 없음 / 다음 작업 시 staging에서 바로 출발
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
+### 수정 26: `_handle_shelf_complete` 포워딩 시 "No active task" 오류 수정
+
+**파일**: `server/request_handler.py`
+
+**문제**: 포워딩 시나리오에서 user 2의 `shelf_complete` 신호가 거부됨
+
+**원인 흐름**:
+1. Robot 1이 shelf 11을 WS33 → WS34로 포워딩
+2. `skip_shelf_subtasks_for_forwarding` 호출 → T2_1_0 (user 2 태스크) **COMPLETED 처리**
+3. Robot 1이 WS34에서 shelf 11 들고 WAIT_PICKING (T1_1_0 관리)
+4. user 2가 `shelf_complete` → `_handle_shelf_complete(user_id=2)` 실행
+5. `T2_*` 중 `in_progress` 탐색 → **없음** (T2_1_0 이미 완료)
+6. → `No active task for user 2` 에러 → WS34 회랑 영구 잠김
+
+**핵심**: ws_node를 구하기 위해 active task를 조회했는데, 포워딩 후에는 그 task가 없음
+(아이러니하게 이미 line 893에 "포워딩 케이스: 선반 기준 탐색" 주석이 있었으나, ws_node 탐색 단계에서 막힘)
+
+**수정 내용**: ws_node를 active task 대신 robot home에서 직접 조회
+```python
+# 수정 전: active task에서 ws_node 탐색 → task 없으면 에러
+user_task = next((t for t in ... if t.task_id.startswith(f"T{user_id}_") and in_progress), None)
+if not user_task:
+    return self._error_response(f"No active task for user {user_id}")
+ws_node = user_task.workstation_id
+
+# 수정 후: robot home에서 직접 ws_node 조회 (task 불필요)
+robot = self.robot_manager.get_robot(user_id)
+ws_node = robot.home_node
+```
+
+이후 흐름은 기존과 동일: WS의 AT_WORKSTATION 선반 탐색 → WAIT_PICKING task 탐색 → 처리
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
@@ -862,35 +1050,6 @@ IDLE → MOVING (선형 보간) → 노드 도착
 
 ---
 
-### 수정 22: 충돌 버그 수정 — `_is_safe_to_resume` 보수적 정책 적용
-
-**문제**: 다른 AGV가 next_node에 있어도 `_claimed_nodes`(이동 예약)가 있으면 "떠나는 중"으로 판단해 진입 허용 → 물리적으로 아직 그 노드에 있는 동안 다른 AGV가 진입 → 충돌
-
-**원인 시나리오**:
-1. AGV1이 노드 6에서 claim[7]=1 등록 → resume 발행 (아직 물리적으로 6에 있음)
-2. AGV2가 next=6, AGV1 current=6, claim=7 → "떠나는 중" 판단 → resume 발행
-3. AGV1이 6을 떠나기 전에 AGV2가 6 진입 → 충돌
-
-**수정 내용** (`server/request_handler.py`, `_is_safe_to_resume`):
-
-```python
-# 수정 전: claim 있으면 "떠나는 중"으로 간주 → 진입 허용
-if other_current == next_node:
-    other_claimed = next(...)
-    if other_claimed is None:
-        return False  # claim 있으면 여기서 통과
-
-# 수정 후: 물리적으로 있으면 무조건 대기
-if other_current == next_node:
-    return False  # claim 여부 관계없이 대기
-```
-
-**효과**: 다른 AGV가 실제로 노드를 떠나 position 메시지를 보낼 때까지 대기 → 충돌 방지 (속도 소폭 감소는 허용)
-
-**수정 파일**: `server/request_handler.py`
-
----
-
 ### Isaac Step 4 현황: 리프트 + 선반 이동 (`step4_lift_shelf.py`)
 
 **구현 완료 (코드 작성)**:
@@ -898,7 +1057,53 @@ if other_current == next_node:
 - MQTT shelf_cmd/shelf_ack 연동
 - AGV 이동 시 부착된 선반 prim 함께 이동
 
-**발견된 버그 (미수정)**:
-- `build_shelf`에서 자식 prim 생성 시 절대 좌표 사용 + 루트 translate에 AGV 절대좌표 더함
-- → 선반 이동 시 `원래위치 + AGV위치`로 위치가 두 배가 됨
-- **수정 방법**: `build_shelf` 루트에 원래 위치를 설정하고 자식 prim들을 상대 좌표(0-centered)로 변경
+**버그 수정 완료**: delta 방식으로 구현됨 (루트 translate 없음 + shelf_origins 저장 + 이동 시 변위만 적용)
+- 코드 검토 완료 ✅ / 실행 검증 필요 🔶
+
+---
+
+### Isaac Step 5: ArUco 카메라 인식 하이브리드 (`step5_camera_aruco.py`)
+
+**방식**: 이동은 GPS(node_xy), 마커 인식은 실제 카메라 방식
+
+**변경 내용 (Step 4 대비)**:
+- `IsaacCamera` 추가: AGV당 아래 방향 카메라 1개 (`/World/AGV_{rid}_cam`)
+  - resolution: (320, 240) / identity 회전 = 바닥 방향 (-Z)
+  - `world.reset()` 전 prim 생성 → 이후 `cam.initialize()`
+- 메인 루프: 매 5프레임마다 `cam.get_rgba()` → OpenCV ArUco 감지
+  - `DICT_4X4_50` / 마커 ID = 노드 ID (검증 완료 ✅)
+  - `agv._last_marker` 로 중복 발행 방지 (resume/set_plan 시 리셋)
+- `_on_intermediate` 에서 마커 발행 제거 (카메라가 대신)
+- 카메라 위치 매 프레임 `cam.set_world_pose()` 업데이트
+
+**수정 파일**: `isaac_simulation/step5_camera_aruco.py` (신규)
+**상태**: 코드 작성 완료 🔶 / 실행 검증 필요
+
+---
+
+## 향후 계획: AGV 내부 ROS2 적용
+
+**방침**: 서버(Laptop)는 MQTT 그대로 유지. AGV 로봇(RPi) 내부 구조만 ROS2로 전환.
+
+```
+서버 (Laptop)
+    ↕ MQTT — 변경 없음
+RPi (AGV 내부, ROS2)
+    ├─ MQTT Bridge 노드   ← 서버 MQTT ↔ ROS2 내부 토픽 변환
+    ├─ Camera 노드         ← sensor_msgs/Image → ArUco 감지 → /agv/marker 발행
+    └─ STM32 노드          ← micro-ROS (UART) — 모터 제어
+```
+
+**변경 범위**:
+- 서버 코드: 수정 없음
+- Isaac Sim 코드: 수정 없음
+- 변경 대상: `controllers/agv_mqtt_controller/` → RPi ROS2 패키지로 재작성
+
+**단계별 계획**:
+| 단계 | 내용 | 난이도 |
+|------|------|--------|
+| 1 | RPi ROS2 설치 + MQTT Bridge 노드 | 낮음 |
+| 2 | Camera 노드 (sensor_msgs/Image + ArUco) | 낮음 |
+| 3 | STM32 micro-ROS (UART transport) | 높음 |
+
+**STM32 주의**: micro-ROS 적용 전까지 기존 UART 시리얼 통신 유지 가능

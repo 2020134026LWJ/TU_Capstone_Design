@@ -33,6 +33,10 @@ class AGVMainController:
         # ─── 선반 상태 ───
         self.carrying_shelf = None
 
+        # ─── MQTT 스레드 → 메인 루프 핸드오프 (race condition 방지) ───
+        self._pending_plan = None    # (node_path, goal) | None
+        self._pending_resume = False
+
         # ─── 콜백 연결 ───
         self.nav.set_on_arrived(self._on_goal_arrived)
         self.nav.set_on_node(self._on_intermediate_node)
@@ -44,20 +48,16 @@ class AGVMainController:
     # ─── MQTT 콜백 ───
 
     def _handle_plan(self, data):
-        """경로 계획 수신 → 경로 추종 시작"""
+        """경로 계획 수신 → 메인 루프에서 처리 (race condition 방지)"""
         for r in data.get("robots", []):
             if int(r.get("rid", -1)) != self.hw.rid:
                 continue
-
             node_path = r.get("node_path", [])
             goal = r.get("goal")
-
             if node_path and len(node_path) > 1:
-                self.nav.set_plan(list(node_path[1:]), goal)
-                print(f"[AGV {self.hw.rid}] Plan received: {node_path} → goal {goal}")
+                self._pending_plan = (node_path, goal)
             elif goal is not None:
                 self.nav.set_at_goal(goal)
-                print(f"[AGV {self.hw.rid}] Already at goal {goal}")
                 self.mqtt.publish_arrived(goal)
             break
 
@@ -96,10 +96,8 @@ class AGVMainController:
         """서버 제어 명령 수신 (resume)"""
         if int(data.get("rid", -1)) != self.hw.rid:
             return
-        cmd = data.get("cmd")
-        if cmd == "resume":
-            print(f"[AGV {self.hw.rid}] ← resume from server")
-            self.nav.resume()
+        if data.get("cmd") == "resume":
+            self._pending_resume = True
 
     # ─── 상태 발행 ───
 
@@ -131,6 +129,34 @@ class AGVMainController:
         marker_counter = 0
 
         while self.hw.timestep.step():
+            # ─── pending plan 처리 ───
+            if self._pending_plan is not None:
+                node_path, goal = self._pending_plan
+                self._pending_plan = None
+                start_node = node_path[0]
+
+                if self.nav.state == "IDLE":
+                    # IDLE: 정상 출발
+                    self.nav.set_plan(list(node_path[1:]), goal)
+                    print(f"[AGV {rid}] Plan applied (IDLE): {node_path} → goal {goal}")
+                elif self.nav.state == "NODE_WAIT" and self.nav.current_node == start_node:
+                    # start_node에서 대기 중: path 갱신 후 arrived 재발행 → 서버 resume 트리거
+                    self.nav.path_queue = list(node_path[1:])
+                    self.nav.goal_node = goal
+                    self.mqtt.publish_arrived(start_node)
+                    print(f"[AGV {rid}] Plan applied (NODE_WAIT@{start_node}): re-arrived → {goal}")
+                else:
+                    # MOVING 또는 다른 노드 NODE_WAIT: path만 교체, 스냅 금지
+                    self.nav.path_queue = list(node_path[1:])
+                    self.nav.goal_node = goal
+                    print(f"[AGV {rid}] Plan applied (MOVING): path replaced → {goal}")
+
+            # ─── pending resume 처리 ───
+            if self._pending_resume:
+                self._pending_resume = False
+                self.nav.resume()
+                print(f"[AGV {rid}] ← resume")
+
             self.nav.update()
 
             # 선반 운반 중이면 위치 동기화
