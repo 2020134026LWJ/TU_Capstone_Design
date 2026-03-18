@@ -1062,22 +1062,38 @@ IDLE → MOVING (선형 보간) → 노드 도착
 
 ---
 
-### Isaac Step 5: ArUco 카메라 인식 하이브리드 (`step5_camera_aruco.py`)
+### Isaac Step 5: 가상 ArUco 감지 + 전체 MQTT 연동 (`step5_camera_aruco.py`)
 
-**방식**: 이동은 GPS(node_xy), 마커 인식은 실제 카메라 방식
+**방식**: 이동은 GPS(node_xy), 마커 인식은 proximity 기반 가상 감지 (카메라 렌더 제거)
 
 **변경 내용 (Step 4 대비)**:
-- `IsaacCamera` 추가: AGV당 아래 방향 카메라 1개 (`/World/AGV_{rid}_cam`)
-  - resolution: (320, 240) / identity 회전 = 바닥 방향 (-Z)
-  - `world.reset()` 전 prim 생성 → 이후 `cam.initialize()`
-- 메인 루프: 매 5프레임마다 `cam.get_rgba()` → OpenCV ArUco 감지
-  - `DICT_4X4_50` / 마커 ID = 노드 ID (검증 완료 ✅)
-  - `agv._last_marker` 로 중복 발행 방지 (resume/set_plan 시 리셋)
-- `_on_intermediate` 에서 마커 발행 제거 (카메라가 대신)
-- 카메라 위치 매 프레임 `cam.set_world_pose()` 업데이트
+- IsaacCamera render product 제거 (omni.syntheticdata.plugin segfault, Isaac Sim 5.1.0 버그)
+- proximity 기반 가상 ArUco 감지로 대체 (CAM_DETECT_RADIUS=0.087m, DETECT_INTERVAL=5)
+- `agv._last_marker` 로 중복 발행 방지 (resume/set_plan 시 리셋)
+- `_on_intermediate` 에서 마커 발행 제거 (가상 카메라가 대신)
+- MQTT race condition: `_pending_plan` / `_pending_resume` 패턴 (main loop에서만 상태 변경)
+- 텔레포트 버그 수정: IDLE 상태일 때만 snap, MOVING/NODE_WAIT 시 path_queue만 교체
+- NODE_WAIT 교착 수정: 새 plan 수신 시 current_node==start_node이면 arrived 재발행
 
 **수정 파일**: `isaac_simulation/step5_camera_aruco.py` (신규)
-**상태**: 코드 작성 완료 🔶 / 실행 검증 필요
+**상태**: 완료 ✅
+
+---
+
+### Isaac Step 6: 시각적 현실감 개선 (`step6_visual.py`, 예정)
+
+**방식**: step5 기반 — 이동 로직/MQTT/서버 변경 없이 시각 레이어만 추가
+
+**구현 목표**:
+- **바퀴 회전**: 이동 속도 기반 RPM → 바퀴 prim `xformOp:rotateX` 매 프레임 갱신
+- **차체 방향 전환**: heading 즉시 전환 → 스무스 보간 (회전 애니메이션)
+- **시각 현실감**: AGV/선반/작업대 디테일 개선 (색상, 비율, 구조)
+
+**목적**: 2주 후 발표용 시각적 완성도 확보
+**물리 엔진 전환**: 발표 이후 별도 단계로 진행 (ArticulationRoot + Joint + PID)
+
+**수정 파일**: `isaac_simulation/step6_visual.py` (신규 예정)
+**상태**: 🔲 예정
 
 ---
 

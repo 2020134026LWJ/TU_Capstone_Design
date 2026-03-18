@@ -157,27 +157,7 @@ class StagingManager:
         # 트리거 인식 = 퇴출 AGV가 게이트웨이를 벗어남
         print(f"[StagingManager] W{ws_node}: AGV-{rid} passed trigger node {marker_id}")
 
-        if corridor.occupying_rid != rid:
-            # 이미 처리된 트리거 or 다른 로봇이 점유 중 → 무시
-            return None
-
-        if corridor.queue:
-            # 대기 AGV 해제 (FIFO)
-            released = corridor.queue.popleft()
-            corridor.state = CorridorState.OCCUPIED
-            corridor.occupying_rid = released.rid
-            corridor.occupied_at = time.time()
-            corridor.is_exiting = False
-            print(f"[StagingManager] W{ws_node}: releasing AGV-{released.rid} "
-                  f"from staging (queue remaining: {len(corridor.queue)})")
-            return released
-        else:
-            # 대기 AGV 없음 → 회랑 해제
-            corridor.state = CorridorState.FREE
-            corridor.occupying_rid = None
-            corridor.is_exiting = False
-            print(f"[StagingManager] W{ws_node}: corridor FREE")
-            return None
+        return self.release_corridor_without_trigger(ws_node, rid)
 
     def release_corridor_without_trigger(self, ws_node: int, rid: int) -> Optional["StagedAGV"]:
         """포워딩 시 소스 회랑 즉시 해제 (트리거 노드 없이)

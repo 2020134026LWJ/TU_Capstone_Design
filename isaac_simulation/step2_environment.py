@@ -31,10 +31,10 @@ from isaacsim.core.utils.viewports import set_camera_view
 
 # ─── 설정 파일 ────────────────────────────────────────────────────────────────
 _HERE      = os.path.dirname(os.path.abspath(__file__))
-_PROJ      = os.path.join(_HERE, "..", "webots_simulation")
-MAP_PATH   = os.path.join(_PROJ, "config", "map.json")
-SHELF_PATH = os.path.join(_PROJ, "config", "shelf_config.json")
-ARUCO_DIR  = os.path.join(_PROJ, "textures", "aruco_markers")
+_ROOT      = os.path.join(_HERE, "..")
+MAP_PATH   = os.path.join(_ROOT, "server", "map.json")
+SHELF_PATH = os.path.join(_ROOT, "server", "shelf_config.json")
+ARUCO_DIR  = os.path.join(_ROOT, "webots_simulation", "textures", "aruco_markers")
 
 with open(MAP_PATH)   as f: map_cfg   = json.load(f)
 with open(SHELF_PATH) as f: shelf_cfg = json.load(f)

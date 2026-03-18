@@ -7,7 +7,7 @@ AGV 기반 물류 피킹 시스템 — KIVA 선반 운반 + 다단계 작업 관
 ### 1. 의존성 설치
 ```bash
 git clone git@github.com:2020134026LWJ/TU_Capstone_Design.git
-cd TU_Capstone_Design/webots_simulation
+cd TU_Capstone_Design
 pip install -r server/requirements.txt
 ```
 
@@ -24,7 +24,7 @@ sudo systemctl start mosquitto
 python3 -m server.main
 
 # 터미널 2: Webots 시뮬레이션
-webots worlds/warehouse_4x8.wbt
+webots webots_simulation/worlds/warehouse_4x8.wbt
 
 # 터미널 3: CLI 테스트
 python3 mqtt_test.py
@@ -49,23 +49,10 @@ python3 mqtt_test.py
 
 ## 디렉토리 구조
 
+> 서버/설정/DB는 최상위 `server/`로 이동. 이 폴더는 Webots 전용 파일만 포함.
+
 ```
 webots_simulation/
-│
-├── server/                         # 서버 (Python)
-│   ├── main.py                     # 서버 진입점 (WebSocket + MQTT 서버)
-│   ├── config.py                   # 설정 관리
-│   ├── request_handler.py          # ★ 핵심: 요청 처리 + 로봇 배정 알고리즘
-│   ├── task_manager.py             # 작업 분해/스케줄링 (서브태스크 시퀀스)
-│   ├── task_scheduler.py           # Nearest Neighbor 선반 방문 순서 최적화
-│   ├── robot_manager.py            # 로봇 6단계 상태 머신
-│   ├── shelf_manager.py            # 선반 상태 관리 (IN_PLACE/CARRIED/AT_WORKSTATION)
-│   ├── staging_manager.py          # 작업대 회랑 게이팅 (STG/TRG/위치 기반 해제)
-│   ├── path_planner.py             # A* 시간 기반 경로 계획 (예약 기반 충돌 회피)
-│   ├── mqtt_publisher.py           # MQTT 발행 (/agv/plan, /agv/shelf_cmd, /agv/control)
-│   ├── websocket_handler.py        # WebSocket 서버 (Admin UI용)
-│   ├── db_loader.py                # 엑셀 DB 로더
-│   └── requirements.txt            # 의존성
 │
 ├── controllers/                    # Webots 컨트롤러
 │   ├── agv_controller/             # 기본 테스트용 (MQTT 없이 단독 실행)
@@ -77,24 +64,22 @@ webots_simulation/
 │       ├── navigation.py           # 경로추종 + NODE_WAIT 상태 관리
 │       └── hardware/               # 실물/시뮬 하드웨어 추상화 레이어
 │
-├── config/                         # 설정 파일
-│   ├── map.json                    # 8×4 그리드 맵 (34노드)
-│   ├── robot_config.json           # 로봇 설정 (AGV-1 home=33, AGV-2 home=34)
-│   └── shelf_config.json           # 선반/물품/작업대 설정
-│
 ├── worlds/                         # Webots 월드 파일
 │   └── warehouse_4x8.wbt           # 현재 월드 (KIVA 선반 8개 + AGV 2대 + ArUco 마커)
 │
-├── Database/                       # 주문 엑셀 데이터
-│   ├── 데이터 베이스.xlsx
-│   ├── 사용자1주문.xlsx
-│   └── 사용자2주문.xlsx
-│
-├── rpi/                            # RPi 브릿지 (실제 하드웨어용)
-├── mqtt_test.py                    # CLI 테스트 도구 (MQTT 기반)
-├── FLOWCHART.md                    # 알고리즘 플로우차트 + 수정 이력
-└── archive/                        # 이전 버전 (참조용, 수정 불필요)
+└── textures/aruco_markers/         # ArUco 마커 이미지 (Webots + Isaac Sim 공용)
 ```
+
+공유 파일 위치 (최상위):
+
+| 항목 | 경로 |
+|------|------|
+| AGV 서버 | `../server/` |
+| 맵/선반/로봇 설정 JSON | `../server/map.json` 등 |
+| 주문 엑셀 DB | `../server/Database/` |
+| RPi 브릿지 | `../hardware/rpi/` |
+| 알고리즘 플로우차트 | `../FLOWCHART.md` |
+| CLI 테스트 도구 | `../mqtt_test.py` |
 
 ---
 
@@ -171,12 +156,11 @@ IDLE → MOVING_TO_SHELF → PICKING_UP_SHELF → DELIVERING_TO_WS → WAITING_F
 
 | 폴더 | README |
 |------|--------|
-| `server/` | 서버 모듈 설명, API, 통신 프로토콜, 핵심 알고리즘 |
+| `../server/` | 서버 모듈 설명, API, 통신 프로토콜, 핵심 알고리즘 |
 | `controllers/` | AGV 컨트롤러, NODE_WAIT, 리프트, 마커 |
 | `worlds/` | 월드 파일, KIVA 선반, AGV 구조, ArUco |
-| `config/` | 맵/선반/로봇 설정 |
 
-알고리즘 플로우차트 및 수정 이력: `FLOWCHART.md`
+알고리즘 플로우차트 및 수정 이력: `../FLOWCHART.md`
 
 ---
 

@@ -41,14 +41,13 @@ class Config:
 
     def __post_init__(self):
         if not self.base_dir:
-            self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_dir = os.path.join(self.base_dir, "config")
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
         if not self.map_file:
-            self.map_file = os.path.join(config_dir, "map.json")
+            self.map_file = os.path.join(self.base_dir, "map.json")
         if not self.robot_config_file:
-            self.robot_config_file = os.path.join(config_dir, "robot_config.json")
+            self.robot_config_file = os.path.join(self.base_dir, "robot_config.json")
         if not self.shelf_config_file:
-            self.shelf_config_file = os.path.join(config_dir, "shelf_config.json")
+            self.shelf_config_file = os.path.join(self.base_dir, "shelf_config.json")
 
     @classmethod
     def from_env(cls) -> "Config":

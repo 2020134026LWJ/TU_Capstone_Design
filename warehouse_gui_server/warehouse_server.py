@@ -167,7 +167,7 @@ class WarehouseServer:
         ]
         """
         # order_file = f'사용자{user_id}주문.xlsx'
-        order_file = f'../webots_simulation/Database/사용자{user_id}주문.xlsx'
+        order_file = f'../server/Database/사용자{user_id}주문.xlsx'
 
         try:
             wb = load_workbook(order_file)
@@ -241,7 +241,7 @@ class WarehouseServer:
         - 사용자2가 드롭스 5개 주문 시작 → 남은 재고만 사용 가능
         """
         # order_file = f'사용자{user_id}주문.xlsx'
-        order_file = f'../webots_simulation/Database/사용자{user_id}주문.xlsx'
+        order_file = f'../server/Database/사용자{user_id}주문.xlsx'
 
         with self.db_lock:
             conn = sqlite3.connect(self.db_path)

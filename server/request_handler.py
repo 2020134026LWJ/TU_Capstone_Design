@@ -43,7 +43,7 @@ class RequestHandler:
 
         # DB 로더 + 작업 스케줄러
         import os
-        db_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Database")
+        db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Database")
         self.db_loader = DBLoader(db_dir)
         self.task_scheduler = TaskScheduler(self.db_loader)
 
@@ -418,7 +418,12 @@ class RequestHandler:
         return {}
 
     def _get_next_planned_node(self, rid: int) -> Optional[int]:
-        """planned_path에서 current_node 이후 다음 노드 반환"""
+        """planned_path에서 current_node 이후 다음 노드 반환 (대기 step 스킵)
+
+        A*가 충돌 회피를 위해 같은 노드를 반복하는 대기 step을 삽입할 수 있음.
+        Isaac Sim은 node_path(중복 제거)만 사용하므로 대기 step을 스킵하고
+        실제 이동할 다음 노드를 반환해야 _is_safe_to_resume이 올바르게 동작함.
+        """
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return None
@@ -428,7 +433,11 @@ class RequestHandler:
         cur = robot.current_node
         for i, (node, _) in enumerate(planned_path):
             if node == cur and i + 1 < len(planned_path):
-                return planned_path[i + 1][0]
+                # cur와 다른 다음 노드 찾기 (대기 step 스킵)
+                for j in range(i + 1, len(planned_path)):
+                    if planned_path[j][0] != cur:
+                        return planned_path[j][0]
+                return None
         return None
 
     def _is_safe_to_resume(self, rid: int) -> bool:
@@ -528,6 +537,10 @@ class RequestHandler:
         st_type = current_st.subtask_type
 
         if st_type == SubTaskType.GO_TO_SHELF:
+            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표 선반이 아니면 무시
+            if robot.current_node != current_st.target_node:
+                self._waiting_robots.add(robot.rid)
+                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
             # 선반에 도착 → shelf_cmd "pickup" 발행 (shelf_ack 대기)
             result = self.task_manager.handle_subtask_complete(task.task_id)
             next_st = task.get_current_subtask()
@@ -549,8 +562,9 @@ class RequestHandler:
                 }
 
         elif st_type == SubTaskType.DELIVER_TO_WS:
-            # 스테이징 노드 재도착(arrived re-pub) 시 목표 WS가 아니면 무시
+            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표 WS가 아니면 무시
             if robot.current_node != current_st.target_node:
+                self._waiting_robots.add(robot.rid)
                 return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
             # 작업대에 도착 → 픽업 대기
             self.shelf_manager.mark_shelf_at_workstation(
@@ -579,6 +593,10 @@ class RequestHandler:
                 }
 
         elif st_type in (SubTaskType.RETURN_SHELF, SubTaskType.FORWARD_SHELF):
+            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표가 아니면 무시
+            if robot.current_node != current_st.target_node:
+                self._waiting_robots.add(robot.rid)
+                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
             # 선반 복귀/포워딩 목적지 도착 → shelf_cmd "putdown" 발행 (shelf_ack 대기)
             shelf_id = current_st.shelf_id
             self.mqtt_publisher.publish_shelf_command(
@@ -707,35 +725,10 @@ class RequestHandler:
             elif result.get("action") == "next_subtask":
                 next_st = task.get_current_subtask()
                 if next_st:
-                    # F 노드: 다음 선반 현재 위치 체크 (5분기)
-                    next_shelf_obj = self.shelf_manager.get_shelf(next_st.shelf_id) if next_st.shelf_id else None
-                    if next_shelf_obj:
-                        avail = self._get_shelf_availability(next_st.shelf_id, robot.rid)
-                        if avail == "direct":
-                            next_st.target_node = next_shelf_obj.current_node
-                            print(f"[RequestHandler] F-node(return): shelf {next_st.shelf_id} at WS "
-                                  f"{next_shelf_obj.current_node}, task {task.task_id} → direct to WS")
-                        elif avail == "pending":
-                            task.status = TaskStatus.PENDING
-                            task.assigned_robot = None
-                            next_st.status = TaskStatus.PENDING
-                            self.robot_manager.set_robot_status(robot.rid, RobotStatus.IDLE)
-                            robot.current_task_id = None
-                            self._robot_planned_paths.pop(robot.rid, None)
-                            print(f"[RequestHandler] F-node(return): shelf {next_st.shelf_id} unavailable "
-                                  f"(status={next_shelf_obj.status.value}), "
-                                  f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
-                            self._try_assign_pending_tasks()
-                            idle_wait = self._get_idle_wait_node(robot.rid)
-                            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
-                                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
-                            return {
-                                "type": "shelf_ack_response",
-                                "success": True,
-                                "action": "waiting_shelf_available",
-                                "shelf_id": next_st.shelf_id,
-                            }
-                        # else "go": IN_PLACE + 예약 없음 → 그대로 진행
+                    # F 노드: 다음 선반 현재 위치 체크
+                    pending_resp = self._handle_fnode_next_shelf(task, robot, next_st, "return")
+                    if pending_resp:
+                        return pending_resp
                     self.robot_manager.set_robot_status(robot.rid, RobotStatus.MOVING_TO_SHELF)
                     self._plan_and_publish_move(
                         robot.rid, robot.current_node, next_st.target_node
@@ -815,34 +808,9 @@ class RequestHandler:
                     }
                 elif next_st and next_st.subtask_type == SubTaskType.GO_TO_SHELF:
                     # F 노드: 다음 선반 현재 위치 체크
-                    next_shelf_obj = self.shelf_manager.get_shelf(next_st.shelf_id) if next_st.shelf_id else None
-                    if next_shelf_obj:
-                        avail = self._get_shelf_availability(next_st.shelf_id, robot.rid)
-                        if avail == "direct":
-                            next_st.target_node = next_shelf_obj.current_node
-                            print(f"[RequestHandler] F-node(forward): shelf {next_st.shelf_id} at WS "
-                                  f"{next_shelf_obj.current_node}, task {task.task_id} → direct to WS")
-                        elif avail == "pending":
-                            task.status = TaskStatus.PENDING
-                            task.assigned_robot = None
-                            next_st.status = TaskStatus.PENDING
-                            self.robot_manager.set_robot_status(robot.rid, RobotStatus.IDLE)
-                            robot.current_task_id = None
-                            self._robot_planned_paths.pop(robot.rid, None)
-                            print(f"[RequestHandler] F-node(forward): shelf {next_st.shelf_id} unavailable "
-                                  f"(status={next_shelf_obj.status.value}), "
-                                  f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
-                            self._try_assign_pending_tasks()
-                            idle_wait = self._get_idle_wait_node(robot.rid)
-                            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
-                                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
-                            return {
-                                "type": "shelf_ack_response",
-                                "success": True,
-                                "action": "waiting_shelf_available",
-                                "shelf_id": next_st.shelf_id,
-                            }
-                        # else "go": 그대로 진행
+                    pending_resp = self._handle_fnode_next_shelf(task, robot, next_st, "forward")
+                    if pending_resp:
+                        return pending_resp
                     self.robot_manager.set_robot_status(robot.rid, RobotStatus.MOVING_TO_SHELF)
                     self._plan_and_publish_move(robot.rid, robot.current_node, next_st.target_node)
                     self._try_assign_pending_tasks()
@@ -1133,6 +1101,45 @@ class RequestHandler:
                 return True
         return False
 
+    def _handle_fnode_next_shelf(self, task, robot, next_st, context: str) -> Optional[Dict[str, Any]]:
+        """F 노드: 다음 선반 위치 체크 (RETURN/FORWARD 공용)
+
+        Returns:
+            dict: pending 상태 → 즉시 반환할 응답
+            None: go/direct → 호출자가 MOVING_TO_SHELF 처리
+        """
+        next_shelf_obj = self.shelf_manager.get_shelf(next_st.shelf_id) if next_st.shelf_id else None
+        if not next_shelf_obj:
+            return None
+
+        avail = self._get_shelf_availability(next_st.shelf_id, robot.rid)
+        if avail == "direct":
+            next_st.target_node = next_shelf_obj.current_node
+            print(f"[RequestHandler] F-node({context}): shelf {next_st.shelf_id} at WS "
+                  f"{next_shelf_obj.current_node}, task {task.task_id} → direct to WS")
+        elif avail == "pending":
+            task.status = TaskStatus.PENDING
+            task.assigned_robot = None
+            next_st.status = TaskStatus.PENDING
+            self.robot_manager.set_robot_status(robot.rid, RobotStatus.IDLE)
+            robot.current_task_id = None
+            self._robot_planned_paths.pop(robot.rid, None)
+            print(f"[RequestHandler] F-node({context}): shelf {next_st.shelf_id} unavailable "
+                  f"(status={next_shelf_obj.status.value}), "
+                  f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
+            self._try_assign_pending_tasks()
+            idle_wait = self._get_idle_wait_node(robot.rid)
+            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
+                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
+            return {
+                "type": "shelf_ack_response",
+                "success": True,
+                "action": "waiting_shelf_available",
+                "shelf_id": next_st.shelf_id,
+            }
+        # else "go": IN_PLACE + 예약 없음 → 그대로 진행
+        return None
+
     def _get_shelf_availability(self, shelf_id: int, exclude_rid: int) -> str:
         """F 노드: 선반 배정 가능 상태 반환
 
@@ -1266,6 +1273,15 @@ class RequestHandler:
 
         # 계획된 경로 저장 (다음 로봇 계획 시 참조)
         self._robot_planned_paths[rid] = timed_path
+
+        # 첫 번째 이동 노드 pre-claim: IDLE 로봇은 resume 없이 바로 이동 시작하므로
+        # _claimed_nodes에 등록해 다른 로봇이 같은 노드로 동시 진입하는 것을 방지
+        # 다른 로봇이 이미 claim한 노드는 덮어쓰지 않음
+        first_next = self._get_next_planned_node(rid)
+        if first_next is not None:
+            existing = self._claimed_nodes.get(first_next)
+            if existing is None or existing == rid:
+                self._claimed_nodes[first_next] = rid
 
         mqtt_success = self.mqtt_publisher.publish_single_robot_plan(
             rid=rid,

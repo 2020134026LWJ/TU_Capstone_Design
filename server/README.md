@@ -18,11 +18,11 @@ sudo systemctl enable mosquitto
 ### 3. 실행 (터미널 3개)
 ```bash
 # 터미널 1: 서버
-cd webots_simulation
+cd TU_Capstone_Design
 python3 -m server.main
 
 # 터미널 2: Webots 시뮬레이션
-webots worlds/warehouse_4x8.wbt
+webots webots_simulation/worlds/warehouse_4x8.wbt
 
 # 터미널 3: CLI 테스트
 python3 mqtt_test.py
@@ -91,9 +91,9 @@ server/
 ```
 - MQTT 호스트/포트: localhost:1883
 - WebSocket 포트: 8765
-- 맵 파일: config/map.json (8×4 그리드 + 작업대 2개)
-- 선반 설정: config/shelf_config.json
-- 로봇 설정: config/robot_config.json
+- 맵 파일: server/map.json (8×4 그리드 + 작업대 2개)
+- 선반 설정: server/shelf_config.json
+- 로봇 설정: server/robot_config.json
 - MQTT 토픽: /agv/plan, /agv/shelf_cmd, /agv/arrived, /agv/shelf_ack,
              /agv/marker, agv/algorithm, /agv/control
 ```
@@ -363,7 +363,9 @@ pip install -r requirements.txt
 
 ## 8. 설정 파일
 
-### `config/robot_config.json`
+> 설정 JSON 파일은 `server/` 폴더에 위치 (Python 모듈과 동급)
+
+### `robot_config.json`
 ```json
 {
   "robots": {
@@ -373,7 +375,7 @@ pip install -r requirements.txt
 }
 ```
 
-### `config/shelf_config.json`
+### `shelf_config.json`
 ```json
 {
   "shelves": {
@@ -388,7 +390,7 @@ pip install -r requirements.txt
 }
 ```
 
-### `config/map.json`
+### `map.json`
 - 34개 노드 (8×4 그리드 + 작업대 2개)
 - 노드 타입: M (통로), S (선반), W (작업대)
 - 양방향 엣지, cost = 1

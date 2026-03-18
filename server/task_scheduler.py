@@ -270,7 +270,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    db_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Database")
+    db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Database")
     db_loader = DBLoader(db_dir)
     scheduler = TaskScheduler(db_loader)
 

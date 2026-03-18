@@ -40,7 +40,7 @@ KIVA 스타일 이동식 선반을 AGV가 자동으로 운반하여 작업 효�
 ### 1. 프로젝트 클론
 ```bash
 git clone git@github.com:2020134026LWJ/TU_Capstone_Design.git
-cd TU_Capstone_Design/webots_simulation
+cd TU_Capstone_Design
 ```
 
 ### 2. 의존성 설치
@@ -61,7 +61,7 @@ python3 -m server.main
 
 ### 5. Webots 시뮬레이션 실행 (터미널 2)
 ```bash
-webots worlds/warehouse_4x8.wbt
+webots webots_simulation/worlds/warehouse_4x8.wbt
 ```
 
 ### 6. CLI 테스트 도구 실행 (터미널 3)
@@ -89,55 +89,54 @@ python3 mqtt_test.py
 ```
 TU_Capstone_Design/
 │
-├── webots_simulation/              # [메인] Webots 시뮬레이션 프로젝트 (v4)
-│   ├── server/                     # 모듈화된 AGV 서버
-│   │   ├── main.py                 # 서버 진입점
-│   │   ├── config.py               # 설정 관리
-│   │   ├── request_handler.py      # ★ 핵심: 요청 처리 + 로봇 배정 알고리즘
-│   │   ├── task_manager.py         # 작업 분해/스케줄링
-│   │   ├── task_scheduler.py       # Nearest Neighbor 선반 방문 순서 최적화
-│   │   ├── robot_manager.py        # 로봇 6단계 상태 머신
-│   │   ├── shelf_manager.py        # 선반 상태 관리 (IN_PLACE/CARRIED/AT_WORKSTATION)
-│   │   ├── staging_manager.py      # 작업대 회랑 게이팅 (STG/TRG/위치 기반 해제)
-│   │   ├── path_planner.py         # A* 시간 기반 경로 계획 (예약 기반 충돌 회피)
-│   │   ├── mqtt_publisher.py       # MQTT 발행
-│   │   ├── websocket_handler.py    # WebSocket 서버 (Admin UI용)
-│   │   └── db_loader.py            # 엑셀 DB 로더
-│   │
+├── server/                         # AGV 서버 (시뮬레이터 무관, MQTT 기반)
+│   ├── main.py                     # 서버 진입점
+│   ├── config.py                   # 설정 관리
+│   ├── request_handler.py          # ★ 핵심: 요청 처리 + 로봇 배정 알고리즘
+│   ├── task_manager.py             # 작업 분해/스케줄링
+│   ├── task_scheduler.py           # Nearest Neighbor 선반 방문 순서 최적화
+│   ├── robot_manager.py            # 로봇 6단계 상태 머신
+│   ├── shelf_manager.py            # 선반 상태 관리 (IN_PLACE/CARRIED/AT_WORKSTATION)
+│   ├── staging_manager.py          # 작업대 회랑 게이팅 (STG/TRG/위치 기반 해제)
+│   ├── path_planner.py             # A* 시간 기반 경로 계획 (예약 기반 충돌 회피)
+│   ├── mqtt_publisher.py           # MQTT 발행
+│   ├── websocket_handler.py        # WebSocket 서버 (Admin UI용)
+│   ├── db_loader.py                # 엑셀 DB 로더
+│   ├── map.json                    # 8×4 그리드 맵 (34노드)
+│   ├── shelf_config.json           # 선반/물품/작업대 설정 (8개 선반)
+│   ├── robot_config.json           # 로봇 설정 (AGV-1 home=33, AGV-2 home=34)
+│   └── Database/                   # 주문 엑셀 데이터
+│       ├── 데이터 베이스.xlsx
+│       ├── 사용자1주문.xlsx
+│       └── 사용자2주문.xlsx
+│
+├── hardware/                       # 실물 AGV 하드웨어 코드
+│   ├── stm32/                      # STM32 펌웨어 (C)
+│   └── rpi/                        # Raspberry Pi 브릿지 (Python)
+│
+├── webots_simulation/              # Webots 시뮬레이션 전용
 │   ├── controllers/                # Webots 컨트롤러
 │   │   ├── agv_controller/         # 기본 테스트용 (MQTT 없이 단독 실행)
 │   │   └── agv_mqtt_controller/    # MQTT + Supervisor + 리프트 (현재 사용)
-│   │       ├── main.py             # 진입점
+│   │       ├── main.py
 │   │       ├── agv_controller.py   # 메인 AGV 로직 (마커감지, 리프트, NODE_WAIT)
-│   │       ├── aruco_detector.py   # ArUco 마커 감지
-│   │       ├── mqtt_handler.py     # MQTT 발행/수신
-│   │       ├── navigation.py       # 경로추종 + NODE_WAIT 상태 관리
-│   │       └── hardware/           # 실물/시뮬 하드웨어 추상화 레이어
-│   │
-│   ├── config/                     # 설정 파일
-│   │   ├── map.json                # 8×4 그리드 맵 (34노드)
-│   │   ├── shelf_config.json       # 선반/물품/작업대 설정 (8개 선반)
-│   │   └── robot_config.json       # 로봇 설정 (AGV-1 home=33, AGV-2 home=34)
-│   │
-│   ├── worlds/                     # Webots 월드 파일
+│   │       ├── aruco_detector.py
+│   │       ├── mqtt_handler.py
+│   │       ├── navigation.py
+│   │       └── hardware/
+│   ├── worlds/
 │   │   └── warehouse_4x8.wbt       # 현재 월드 (8×4, KIVA 선반 8개, ArUco 마커)
-│   │
-│   ├── Database/                   # 주문 엑셀 데이터
-│   │   ├── 데이터 베이스.xlsx
-│   │   ├── 사용자1주문.xlsx
-│   │   └── 사용자2주문.xlsx
-│   │
-│   ├── rpi/                        # RPi 브릿지 (실제 하드웨어용)
-│   ├── mqtt_test.py                # CLI 테스트 도구 (MQTT 기반)
-│   └── FLOWCHART.md                # 알고리즘 플로우차트 + 수정 이력
+│   └── textures/aruco_markers/     # ArUco 마커 이미지
 │
+├── isaac_simulation/               # Isaac Sim 5.1.0 시뮬레이션 전용
+├── warehouse_gui_server/           # 작업자 터치스크린 GUI + 재고 서버
+├── FLOWCHART.md                    # 알고리즘 플로우차트 + 수정 이력
+├── mqtt_test.py                    # CLI 테스트 도구 (MQTT 기반)
 ├── archive/                        # 이전 버전 아카이브 (참조용, 수정 불필요)
 │   ├── v1_prototype/               # 초기 프로토타입 (01.13~14, 3×3 맵)
 │   ├── v2_single_file/             # 단일 파일 서버 (01.20, 9×5 맵)
 │   └── v3_modular_server/          # 모듈화 서버 (01.26, 9×5 맵)
-│
-├── docs/                           # 문서
-└── README.md
+└── docs/
 ```
 
 ## 버전 히스토리
