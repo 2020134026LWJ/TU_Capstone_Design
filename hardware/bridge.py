@@ -64,10 +64,8 @@ class UartCmd:
 
 class UartEvent:
     """STM32 → RPi 이벤트"""
-    MOVE_DONE   = 0x81  # forward 완료 (ArUco로 감지하므로 현재 미사용)
-    ROTATE_DONE = 0x82  # 회전 완료
-    LIFT_DONE   = 0x83  # 리프트 완료 (payload[0]: 1=up, 0=down)
-    ACK         = 0xFF  # 명령 수신 확인
+    DONE = 0x81  # 동작 완료 (forward 제외 — ArUco로 감지)
+    ACK  = 0xFF  # 명령 수신 확인
 
 
 # ─── UART 유틸리티 ───
@@ -126,8 +124,8 @@ class Bridge:
         self._uart_thread: Optional[threading.Thread] = None
         self._running = False
 
-        # 마지막으로 전송한 회전 명령 추적 (ROTATE_DONE 수신 시 ack 타입 결정)
-        self._last_turn_cmd: Optional[str] = None
+        # 마지막으로 전송한 명령 추적 (DONE 수신 시 ack 타입 결정)
+        self._last_cmd: Optional[str] = None
 
     # ─── MQTT ─────────────────────────────────────────────────────────────────
 
@@ -159,8 +157,8 @@ class Bridge:
 
     def _dispatch_cmd(self, cmd: str):
         print(f"[Bridge-{self.rid}] <- cmd: {cmd}")
-        if cmd in ("turn_left", "turn_right", "turn_180"):
-            self._last_turn_cmd = cmd  # ROTATE_DONE 수신 시 ack 타입 결정용
+        if cmd != "forward":
+            self._last_cmd = cmd  # DONE 수신 시 ack 타입 결정용
         if self._cmd_handler:
             # Isaac Sim 모드: 콜백 호출
             self._cmd_handler(self.rid, cmd)
@@ -251,14 +249,10 @@ class Bridge:
 
     def _handle_uart_event(self, event: int, payload: bytes):
         """STM32 이벤트 → cmd_ack 발행"""
-        if event == UartEvent.ROTATE_DONE:
-            cmd = self._last_turn_cmd or "turn_left"
-            self._last_turn_cmd = None
+        if event == UartEvent.DONE:
+            cmd = self._last_cmd or "turn_left"
+            self._last_cmd = None
             self.publish_cmd_ack(cmd)
-
-        elif event == UartEvent.LIFT_DONE:
-            is_up = (len(payload) > 0 and payload[0] == 1)
-            self.publish_cmd_ack("lift_up" if is_up else "lift_down")
 
         elif event == UartEvent.ACK:
             pass  # 명령 수신 확인 (로깅 불필요)
