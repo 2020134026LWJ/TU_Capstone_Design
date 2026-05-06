@@ -23,6 +23,14 @@ from .task_scheduler import TaskScheduler
 class RequestHandler:
     """요청 처리기"""
 
+    # =========================================================================
+    # [DEMO MODE] 발표용 단순화 모드
+    #   True  → AGV1은 W1(node 33) 전담, AGV2는 W2(node 9) 전담, 스테이징 비활성화
+    #   False → 정상 동작 (공정 배정 + 스테이징 활성화)
+    # 발표가 끝난 후에는 반드시 False로 되돌릴 것!
+    # =========================================================================
+    DEMO_MODE = False
+
     def __init__(
         self,
         config: Config,
@@ -47,20 +55,20 @@ class RequestHandler:
         self.db_loader = DBLoader(db_dir)
         self.task_scheduler = TaskScheduler(self.db_loader)
 
-        # 로봇별 계획된 경로 [rid → timed_path [(node, time), ...]]
-        self._robot_planned_paths: Dict[int, List[Tuple[int, int]]] = {}
-
         # 포워딩으로 소스 회랑이 미리 해제됐으나 아직 스테이징 노드에 미도착한 로봇
         # rid → target_ws (스테이징 노드 도착 시 이 WS로 이동 명령 발행)
         self._staged_to_ws: Dict[int, int] = {}
 
-        # 서버 기반 충돌 회피: NODE_WAIT 중인 로봇 + 다음 노드 점유 추적
-        self._waiting_robots: Set[int] = set()   # resume 대기 중인 로봇
-        self._claimed_nodes: Dict[int, int] = {} # node → rid (이동 예약된 노드)
-
         # 포워딩된 선반의 재픽업+반납을 담당하는 로봇
         # shelf_id → rid (pick_complete 후 re-pickup 시 사용)
         self._forwarded_shelf_handlers: Dict[int, int] = {}
+
+        # 명령 전송 대기 중인 로봇 (충돌 예상으로 다음 명령 보류)
+        self._blocked_robots: Set[int] = set()
+
+        # 이동 중인 로봇의 목적지 노드 예약
+        # {node_id: rid} — forward 명령 전송 시 등록, 도착 시 해제
+        self._reserved_nodes: Dict[int, int] = {}
 
         # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
         self._broadcast_callback = None
@@ -90,9 +98,8 @@ class RequestHandler:
             "batch_task_request": self._handle_batch_task,
             "shelf_complete": self._handle_shelf_complete,
             "order_complete": self._handle_order_complete,
-            "robot_arrived": self._handle_robot_arrived,
-            "robot_position": self._handle_robot_position,
-            "shelf_ack": self._handle_shelf_ack,
+            "marker_report": self._handle_marker_report,
+            "cmd_ack": self._handle_cmd_ack,
             "status_request": self._handle_status_request,
             "task_status_request": self._handle_task_status,
             "shelf_status_request": self._handle_shelf_status,
@@ -245,10 +252,19 @@ class RequestHandler:
                 break
 
             # 첫 번째 선반의 위치를 기준으로 가장 가까운 로봇 배정
+            # [DEMO MODE] home_node가 작업대와 일치하는 로봇만 허용
             first_shelf = task.shelf_sequence[0] if task.shelf_sequence else None
+            demo_dedicated_rid = None
+            if self.DEMO_MODE:
+                # AGV의 home_node가 task의 workstation_id와 같은 로봇만 배정
+                for r in self.robot_manager.get_all_robots():
+                    if r.home_node == task.workstation_id:
+                        demo_dedicated_rid = r.rid
+                        break
             robot = self.robot_manager.get_available_robot(
                 target_node=first_shelf,
                 path_planner=self.path_planner,
+                dedicated_rid=demo_dedicated_rid,  # [DEMO MODE] None이면 무시
             )
             if not robot:
                 if self._try_intercept_returning_shelf(task):
@@ -339,8 +355,6 @@ class RequestHandler:
         if carrying_robot.status != RobotStatus.RETURNING_SHELF:
             return False
 
-        if carrying_robot.rid not in self._waiting_robots:
-            return False  # 이동 중 → 다음 NODE_WAIT에서 재시도
 
         task_id = carrying_robot.current_task_id
         if not task_id:
@@ -361,27 +375,19 @@ class RequestHandler:
 
         self.robot_manager.set_robot_status(carrying_robot.rid, RobotStatus.DELIVERING_TO_WS)
 
-        # 피드백 1: 로봇이 이전 WS 퇴출 중이었다면 해당 회랑을 해제
-        # (인터셉트로 트리거 노드를 통과하지 못하므로 직접 해제)
+        # 인터셉트는 트리거 노드를 통과하지 못하므로 회랑을 직접 해제
+        # (release_corridor_without_trigger가 is_exiting=False 리셋과 큐 승계를 일관 처리)
         for ws_node, corridor in self.staging_manager.corridors.items():
-            if (corridor.occupying_rid == carrying_robot.rid and
-                    corridor.state == CorridorState.OCCUPIED):
-                if corridor.queue:
-                    released = corridor.queue.popleft()
-                    corridor.occupying_rid = released.rid
-                    corridor.occupied_at = time.time()
+            if corridor.occupying_rid == carrying_robot.rid:
+                released = self.staging_manager.release_corridor_without_trigger(
+                    ws_node, carrying_robot.rid
+                )
+                if released:
                     released_robot = self.robot_manager.get_robot(released.rid)
                     if released_robot:
                         self._plan_and_publish_move(
                             released_robot.rid, released_robot.current_node, ws_node
                         )
-                    print(f"[RequestHandler] W{ws_node}: staged AGV-{released.rid} released "
-                          f"(AGV-{carrying_robot.rid} intercepted)")
-                else:
-                    corridor.state = CorridorState.FREE
-                    corridor.occupying_rid = None
-                    print(f"[RequestHandler] W{ws_node}: corridor freed "
-                          f"(AGV-{carrying_robot.rid} intercepted and redirected)")
                 break
 
         # 피드백 3: MQTT 재발행으로 복귀 중인 로봇에게 새 경로 전달
@@ -392,144 +398,306 @@ class RequestHandler:
               f"shelf {first_shelf} → redirecting to WS {target_ws} for task {task.task_id}")
         return True
 
-    # ─── 로봇 도착 처리 ───
+    # ─── 마커 인식 처리 (위치 보고 + 다음 명령 결정) ───
 
-    def _handle_robot_position(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """중간 노드 위치 업데이트 → current_node 갱신 + 충돌 감지 후 resume 발행"""
+    def _handle_marker_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """AGV 마커 인식 → 위치 갱신 + 스테이징 체크 + 다음 명령 결정"""
         rid = data.get("rid")
-        node = data.get("node")
-        if rid is None or node is None:
-            return {}
-
-        self.robot_manager.update_robot_position(rid, node)
-        self._claimed_nodes = {k: v for k, v in self._claimed_nodes.items() if v != rid}
-        self._waiting_robots.add(rid)  # 인터셉트/resume 체크 전에 등록
-
-        released = self.staging_manager.check_position_release(rid, node)
-        if released is not None:
-            self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
-            released_robot = self.robot_manager.get_robot(released.rid)
-            start = released_robot.current_node if released_robot else released.staging_node
-            self._plan_and_publish_move(released.rid, start, released.target_ws)
-        else:
-            self._try_assign_pending_tasks()
-
-        self._try_resume_waiting_robots()
-        return {}
-
-    def _get_next_planned_node(self, rid: int) -> Optional[int]:
-        """planned_path에서 current_node 이후 다음 노드 반환 (대기 step 스킵)
-
-        A*가 충돌 회피를 위해 같은 노드를 반복하는 대기 step을 삽입할 수 있음.
-        Isaac Sim은 node_path(중복 제거)만 사용하므로 대기 step을 스킵하고
-        실제 이동할 다음 노드를 반환해야 _is_safe_to_resume이 올바르게 동작함.
-        """
-        robot = self.robot_manager.get_robot(rid)
-        if not robot:
-            return None
-        planned_path = self._robot_planned_paths.get(rid)
-        if not planned_path:
-            return None
-        cur = robot.current_node
-        for i, (node, _) in enumerate(planned_path):
-            if node == cur and i + 1 < len(planned_path):
-                # cur와 다른 다음 노드 찾기 (대기 step 스킵)
-                for j in range(i + 1, len(planned_path)):
-                    if planned_path[j][0] != cur:
-                        return planned_path[j][0]
-                return None
-        return None
-
-    def _is_safe_to_resume(self, rid: int) -> bool:
-        """rid 로봇이 다음 노드로 이동해도 충돌이 없는지 확인"""
-        next_node = self._get_next_planned_node(rid)
-        if next_node is None:
-            return False  # 다음 노드 없음 (goal이면 arrived로 처리됨)
-
-        # 다른 로봇이 next_node를 예약(claim)했는지
-        claimer = self._claimed_nodes.get(next_node)
-        if claimer is not None and claimer != rid:
-            return False
-
-        for other_rid, other_robot in self.robot_manager.robots.items():
-            if other_rid == rid:
-                continue
-            if other_robot.status == RobotStatus.IDLE:
-                continue
-
-            other_current = other_robot.current_node
-
-            # 다른 로봇이 next_node에 있는 경우 → 무조건 대기
-            # (claim이 있어도 물리적으로 떠나기 전까지는 진입 불가)
-            if other_current == next_node:
-                return False
-
-        return True
-
-    def _try_resume_waiting_robots(self):
-        """대기 중인 로봇들에게 안전한 경우 resume 발행 (rid 오름차순 = 높은 우선순위 먼저)"""
-        for rid in sorted(self._waiting_robots):
-            if self._is_safe_to_resume(rid):
-                next_node = self._get_next_planned_node(rid)
-                if next_node is not None:
-                    self._claimed_nodes[next_node] = rid
-                self._waiting_robots.discard(rid)
-                self.mqtt_publisher.publish_resume(rid)
-                print(f"[RequestHandler] Robot {rid}: resume → node {next_node}")
-
-    def _handle_robot_arrived(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        로봇이 목적지에 도착했을 때 처리 (bridge에서 수신)
-
-        요청:
-        {"type": "robot_arrived", "rid": 1, "node": 9}
-        """
-        rid = data.get("rid")
-        arrived_node = data.get("node")
-
-        if rid is None or arrived_node is None:
-            return self._error_response("Missing 'rid' or 'node'")
+        marker_id = data.get("marker_id")
+        if rid is None or marker_id is None:
+            return self._error_response("Missing 'rid' or 'marker_id'")
 
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return self._error_response(f"Robot {rid} not found")
 
-        self.robot_manager.update_robot_position(rid, arrived_node)
+        node = int(marker_id)
+        # 도착 노드 예약 해제 (이제 current_node로 갱신되므로 예약 불필요)
+        if self._reserved_nodes.get(node) == rid:
+            del self._reserved_nodes[node]
+        self.robot_manager.update_robot_position(rid, node)
 
-        # Point B-1: 포워딩으로 소스 회랑이 미리 해제된 로봇
-        # 스테이징 노드에 도착하면 즉시 목표 WS로 이동 명령 발행 (deferred release)
+        # heading 업데이트: 마커 메시지에 포함된 경우 우선 사용 (ArUco 포즈 기반)
+        # 없으면 경로 기반 계산 (이전 방식 폴백)
+        reported_heading = data.get("heading")
+        if reported_heading is not None:
+            robot.heading = int(reported_heading)
+            if not robot.heading_initialized:
+                robot.heading_initialized = True
+                print(f"[RequestHandler] Robot {rid}: heading initialized to {robot.heading}° (first marker)")
+                self._try_assign_pending_tasks()
+        else:
+            robot.heading = self._calc_heading(robot.planned_path, node) or robot.heading
+
+        # 위치 기반 회랑 자동 해제
+        released = self.staging_manager.check_position_release(rid, node)
+        if released is not None:
+            released_robot = self.robot_manager.get_robot(released.rid)
+            # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
+            if released_robot and released_robot.current_node != released.staging_node:
+                self._staged_to_ws[released.rid] = released.target_ws
+                print(f"[RequestHandler] Robot {released.rid}: released early (at {released_robot.current_node}), "
+                      f"waiting for staging_node {released.staging_node}")
+            else:
+                start = released_robot.current_node if released_robot else released.staging_node
+                self._plan_and_publish_move(released.rid, start, released.target_ws)
+
+        # 포워딩으로 미리 해제된 로봇이 스테이징 노드 도착
         if rid in self._staged_to_ws:
             target_ws = self._staged_to_ws[rid]
-            staging_ws = self.staging_manager.get_ws_for_staging_node(arrived_node)
+            staging_ws = self.staging_manager.get_ws_for_staging_node(node)
             if staging_ws == target_ws:
                 del self._staged_to_ws[rid]
-                print(f"[RequestHandler] Robot {rid}: pre-released, arrived at staging "
-                      f"{arrived_node} → proceeding to W{target_ws}")
-                self._plan_and_publish_move(rid, arrived_node, target_ws)
-                return {"type": "robot_arrived_ack", "success": True, "action": "staging_released_proceed"}
+                self._plan_and_publish_move(rid, node, target_ws)
+                return {"type": "marker_ack", "success": True, "action": "staging_released_proceed"}
 
-        # Point B: 스테이징 대기 확인 (staging 노드 도착 시 작업 처리 없이 대기)
-        if self.staging_manager.is_staged_agv(arrived_node, rid):
-            print(f"[RequestHandler] Robot {rid}: staging at node {arrived_node}, waiting for corridor")
-            return {"type": "robot_arrived_ack", "success": True, "action": "staging_wait"}
+        # 스테이징 대기 중인 로봇은 명령 전송 보류
+        if self.staging_manager.is_staged_agv(node, rid):
+            print(f"[RequestHandler] Robot {rid}: staging at node {node}, holding commands")
+            return {"type": "marker_ack", "success": True, "action": "staging_wait"}
 
+        # 스테이징 트리거 마커 체크 (퇴출 중인 로봇만 — RETURNING_SHELF 상태)
+        # DELIVERING_TO_WS 상태(입장 경로)에서 trigger 노드를 지날 때는 무시
+        released_by_trigger = None
+        if robot.status == RobotStatus.RETURNING_SHELF:
+            released_by_trigger = self.staging_manager.handle_marker_trigger(rid, node)
+        if released_by_trigger:
+            released_robot = self.robot_manager.get_robot(released_by_trigger.rid)
+            # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
+            if released_robot and released_robot.current_node != released_by_trigger.staging_node:
+                self._staged_to_ws[released_by_trigger.rid] = released_by_trigger.target_ws
+                print(f"[RequestHandler] Robot {released_by_trigger.rid}: trigger-released early "
+                      f"(at {released_robot.current_node}), waiting for staging_node {released_by_trigger.staging_node}")
+            else:
+                start = released_robot.current_node if released_robot else released_by_trigger.staging_node
+                self._plan_and_publish_move(released_by_trigger.rid, start, released_by_trigger.target_ws)
+
+        # 태스크 목표 노드 도착 여부 확인
         task_id = robot.current_task_id
-        if not task_id:
-            return {"type": "robot_arrived_ack", "success": True, "action": "no_task"}
+        if task_id:
+            task = self.task_manager.get_task(task_id)
+            if task:
+                current_st = task.get_current_subtask()
+                if current_st and node == current_st.target_node:
+                    # 목표 노드 도착 → 서브태스크 처리
+                    result = self._process_arrival(robot, task, current_st)
+                    # 블록된 다른 로봇 재시도
+                    self._retry_blocked_robots()
+                    self._try_assign_pending_tasks()
+                    return result
 
-        task = self.task_manager.get_task(task_id)
-        if not task:
-            return {"type": "robot_arrived_ack", "success": True, "action": "task_not_found"}
+        # 목표 노드가 아닌 중간 노드 → 다음 명령 전송
+        self._send_next_command(rid)
 
-        current_st = task.get_current_subtask()
-        if not current_st:
-            return {"type": "robot_arrived_ack", "success": True, "action": "no_subtask"}
+        # 블록된 다른 로봇 재시도
+        self._retry_blocked_robots()
+        self._try_assign_pending_tasks()
 
-        result = self._process_arrival(robot, task, current_st)
-        # 로봇이 goal에 도착해 노드를 비웠으므로 대기 로봇 resume 재시도
-        self._claimed_nodes = {k: v for k, v in self._claimed_nodes.items() if v != rid}
-        self._try_resume_waiting_robots()
-        return result
+        return {"type": "marker_ack", "success": True, "action": "en_route"}
+
+    def _calc_heading(self, planned_path: List[int], current_node: int) -> Optional[int]:
+        """경로에서 현재 노드 기준 heading 계산"""
+        if not planned_path or current_node not in planned_path:
+            return None
+        idx = planned_path.index(current_node)
+        if idx == 0:
+            return None
+        prev_node = planned_path[idx - 1]
+        px, py = self.path_planner.nodes.get(prev_node, (None, None))
+        cx, cy = self.path_planner.nodes.get(current_node, (None, None))
+        if px is None or cx is None:
+            return None
+        dx, dy = cx - px, cy - py
+        if abs(dx) < abs(dy):
+            return 0 if dy > 0 else 180
+        else:
+            return 90 if dx > 0 else 270
+
+    def _clear_robot_reservation(self, rid: int):
+        """특정 로봇의 노드 예약 모두 해제"""
+        to_clear = [n for n, r in self._reserved_nodes.items() if r == rid]
+        for n in to_clear:
+            del self._reserved_nodes[n]
+
+    def _retry_blocked_robots(self):
+        """블록 해제된 로봇들 명령 재시도 + 교착 감지/해제"""
+        for rid in sorted(self._blocked_robots.copy()):
+            if rid not in self._blocked_robots:
+                continue  # 앞 iteration에서 이미 해제됨
+            success = self._send_next_command(rid)
+            if not success:
+                # 교착 감지: 나를 막는 로봇도 나 때문에 blocked 상태이면 우회 경로 계획
+                blocker_rid = self._get_blocker_of(rid)
+                if blocker_rid is not None and blocker_rid in self._blocked_robots:
+                    self._resolve_deadlock(rid, blocker_rid)
+
+    def _get_blocker_of(self, rid: int) -> Optional[int]:
+        """rid가 blocked된 원인 로봇 ID 반환 (없으면 None)"""
+        robot = self.robot_manager.get_robot(rid)
+        if not robot or not robot.command_queue:
+            return None
+        if robot.command_queue[0] != "forward":
+            return None
+        next_node = self._get_next_node_by_heading(rid)
+        if next_node is None:
+            return None
+        for other_rid, other in self.robot_manager.robots.items():
+            if other_rid == rid:
+                continue
+            if other.current_node == next_node or self._reserved_nodes.get(next_node) == other_rid:
+                return other_rid
+        return None
+
+    def _find_yield_node(self, rid: int, contested_node: int) -> Optional[int]:
+        """비켜주기용 옆 노드 탐색
+
+        현재 노드의 인접 노드 중:
+          - contested_node가 아닐 것
+          - 선반 노드가 아닐 것 (물리적 충돌 방지)
+          - 다른 로봇이 없을 것
+        """
+        robot = self.robot_manager.get_robot(rid)
+        if not robot:
+            return None
+
+        # shelf_manager.all_shelf_nodes 사용 (path_planner.shelf_nodes보다 확실)
+        shelf_nodes = self.shelf_manager.all_shelf_nodes
+
+        for neighbor_id, _ in self.path_planner.graph.get(robot.current_node, []):
+            if neighbor_id == contested_node:
+                continue
+            # 선반 노드는 항상 제외 (비켜주기 중간 정차용으로 부적합)
+            if neighbor_id in shelf_nodes:
+                continue
+            # 다른 로봇이 점유/예약 중인 노드 제외
+            occupied = any(
+                r.current_node == neighbor_id
+                for r_id, r in self.robot_manager.robots.items()
+                if r_id != rid
+            )
+            reserved = any(
+                self._reserved_nodes.get(neighbor_id) == r_id
+                for r_id in self.robot_manager.robots
+                if r_id != rid
+            )
+            if not occupied and not reserved:
+                return neighbor_id
+
+        return None
+
+    def _replan_for_placed_shelf(self, placed_node: int):
+        """선반이 placed_node에 배치된 후, 해당 노드를 중간 경유하는 운반 로봇 재계획
+
+        선반 배치 전에 계획된 경로가 placed_node를 통과하면
+        excluded_transit에 포함되므로 우회 경로로 재계획.
+        """
+        for rid, robot in self.robot_manager.robots.items():
+            if robot.carrying_shelf is None:
+                continue
+            path = robot.planned_path
+            if len(path) < 3:
+                continue
+            # 중간 경유 노드(start/goal 제외)에 placed_node가 있는지 확인
+            if placed_node in path[1:-1]:
+                goal = path[-1]
+                print(f"[RequestHandler] Shelf placed at {placed_node}: "
+                      f"replanning Robot {rid} (was routing through that node)")
+                self._plan_and_publish_move(rid, robot.current_node, goal)
+
+    def _resolve_deadlock(self, rid_a: int, rid_b: int):
+        """교착 해제: 우선순위 낮은 로봇이 비켜줌
+
+        전략 1: 상대 노드를 제외한 우회 경로 계획
+        전략 2 (단일 통로): 옆 노드로 한 칸 비켜줌 → 상대방 통과 후 재계획
+
+        우선순위: 선반 운반 중 > 미운반 ; 같으면 낮은 rid 우선
+        """
+        robot_a = self.robot_manager.get_robot(rid_a)
+        robot_b = self.robot_manager.get_robot(rid_b)
+        if not robot_a or not robot_b:
+            return
+
+        a_prio = 1 if robot_a.carrying_shelf else 0
+        b_prio = 1 if robot_b.carrying_shelf else 0
+        if a_prio > b_prio:
+            yield_rid, block_rid = rid_b, rid_a
+        elif b_prio > a_prio:
+            yield_rid, block_rid = rid_a, rid_b
+        else:
+            yield_rid = max(rid_a, rid_b)
+            block_rid = min(rid_a, rid_b)
+
+        yield_robot = self.robot_manager.get_robot(yield_rid)
+        block_robot = self.robot_manager.get_robot(block_rid)
+        if not yield_robot or not yield_robot.planned_path:
+            return
+
+        goal = yield_robot.planned_path[-1]
+
+        # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가 (두 전략 모두 적용)
+        shelf_excluded: Optional[Set[int]] = None
+        if yield_robot.carrying_shelf is not None:
+            shelf_excluded = self._get_occupied_shelf_nodes()
+
+        # ─── 전략 1: 우회 경로 ─────────────────────────────────────────────
+        excluded1: Set[int] = {block_robot.current_node}
+        if shelf_excluded:
+            excluded1 |= shelf_excluded
+        timed_path = self.path_planner.astar_with_time(
+            start=yield_robot.current_node,
+            goal=goal,
+            reserved_nodes=set(),
+            reserved_edges=set(),
+            max_time=self.config.max_time,
+            excluded_transit=excluded1,
+            start_heading=yield_robot.heading,
+        )
+        if timed_path is not None:
+            node_path = PathPlanner.compress_to_node_path(timed_path)
+            yield_robot.planned_path = node_path
+            yield_robot.command_queue = self._path_to_commands(node_path, yield_robot.heading)
+            self._blocked_robots.discard(yield_rid)
+            print(f"[RequestHandler] Deadlock (alt-path): Robot {yield_rid} → {node_path}")
+            if self._send_next_command(yield_rid):
+                return
+            # alt-path 첫 이동이 여전히 block_robot 위치(= goal)라 즉시 재차단됨
+            # → Strategy 2(옆 노드 비켜주기)로 fall-through
+            print(f"[RequestHandler] Deadlock (alt-path blocked immediately): "
+                  f"Robot {yield_rid} → falling back to yield-node strategy")
+
+        # ─── 전략 2: 옆 노드로 비켜주기 ───────────────────────────────────
+        yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
+        if yield_node is None:
+            print(f"[RequestHandler] Deadlock: Robot {yield_rid} vs Robot {block_rid}, "
+                  f"no yield node available — stuck")
+            return
+
+        # 비켜준 후 목표까지 전체 경로 재계획
+        # yield_node 도착 후 방향은 현재 노드→yield_node 방향
+        yield_dir = self.path_planner._node_direction(yield_robot.current_node, yield_node)
+        yield_heading = {0: 0, 1: 90, 2: 180, 3: 270}.get(yield_dir)
+        timed_path2 = self.path_planner.astar_with_time(
+            start=yield_node,
+            goal=goal,
+            reserved_nodes=set(),
+            reserved_edges=set(),
+            max_time=self.config.max_time,
+            excluded_transit=shelf_excluded,
+            start_heading=yield_heading,
+        )
+        if timed_path2 is None:
+            print(f"[RequestHandler] Deadlock: no path from yield_node {yield_node} to goal {goal}")
+            return
+
+        path_from_yield = PathPlanner.compress_to_node_path(timed_path2)
+        # 전체 경로: 현재 → yield_node → goal
+        full_path = [yield_robot.current_node, yield_node] + path_from_yield[1:]
+        yield_robot.planned_path = full_path
+        yield_robot.command_queue = self._path_to_commands(full_path, yield_robot.heading)
+        self._blocked_robots.discard(yield_rid)
+        print(f"[RequestHandler] Deadlock (yield): Robot {yield_rid} → side {yield_node} "
+              f"→ then {path_from_yield}")
+        self._send_next_command(yield_rid)
 
     def _process_arrival(self, robot, task, current_st) -> Dict[str, Any]:
         """로봇 도착 후 서브태스크 유형에 따라 처리"""
@@ -537,11 +705,7 @@ class RequestHandler:
         st_type = current_st.subtask_type
 
         if st_type == SubTaskType.GO_TO_SHELF:
-            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표 선반이 아니면 무시
-            if robot.current_node != current_st.target_node:
-                self._waiting_robots.add(robot.rid)
-                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
-            # 선반에 도착 → shelf_cmd "pickup" 발행 (shelf_ack 대기)
+            # 선반에 도착 → lift_up 명령 발행 (cmd_ack 대기)
             result = self.task_manager.handle_subtask_complete(task.task_id)
             next_st = task.get_current_subtask()
 
@@ -550,10 +714,8 @@ class RequestHandler:
                 self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)
 
-                # shelf_cmd "pickup" 발행 → AGV 리프트 올림 → shelf_ack 대기
-                self.mqtt_publisher.publish_shelf_command(
-                    rid=robot.rid, command="pickup", shelf_id=next_st.shelf_id
-                )
+                # lift_up 명령 발행 → AGV 리프트 올림 → cmd_ack 대기
+                self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
                 return {
                     "type": "robot_arrived_ack",
                     "success": True,
@@ -562,10 +724,6 @@ class RequestHandler:
                 }
 
         elif st_type == SubTaskType.DELIVER_TO_WS:
-            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표 WS가 아니면 무시
-            if robot.current_node != current_st.target_node:
-                self._waiting_robots.add(robot.rid)
-                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
             # 작업대에 도착 → 픽업 대기
             self.shelf_manager.mark_shelf_at_workstation(
                 current_st.shelf_id, current_st.target_node
@@ -593,15 +751,9 @@ class RequestHandler:
                 }
 
         elif st_type in (SubTaskType.RETURN_SHELF, SubTaskType.FORWARD_SHELF):
-            # 중간 노드 재도착(IDLE→NODE_WAIT republish) 시 목표가 아니면 무시
-            if robot.current_node != current_st.target_node:
-                self._waiting_robots.add(robot.rid)
-                return {"type": "robot_arrived_ack", "success": True, "action": "en_route"}
-            # 선반 복귀/포워딩 목적지 도착 → shelf_cmd "putdown" 발행 (shelf_ack 대기)
+            # 선반 복귀/포워딩 목적지 도착 → lift_down 명령 발행 (cmd_ack 대기)
             shelf_id = current_st.shelf_id
-            self.mqtt_publisher.publish_shelf_command(
-                rid=robot.rid, command="putdown", shelf_id=shelf_id
-            )
+            self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_down")
             action = "waiting_shelf_putdown" if st_type == SubTaskType.RETURN_SHELF else "waiting_shelf_putdown_forward"
             return {
                 "type": "robot_arrived_ack",
@@ -612,47 +764,60 @@ class RequestHandler:
 
         return {"type": "robot_arrived_ack", "success": True, "action": "unknown_state"}
 
-    # ─── 선반 리프트 완료 (shelf_ack) ───
+    # ─── 리프트 명령 완료 (cmd_ack) ───
 
-    def _handle_shelf_ack(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_cmd_ack(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        AGV 선반 리프트 동작 완료 (pickup/putdown)
+        AGV 명령 완료 보고 (lift_up / lift_down)
 
         요청:
-        {"type": "shelf_ack", "rid": 1, "command": "pickup", "shelf_id": 11, "status": "done"}
+        {"type": "cmd_ack", "rid": 1, "cmd": "lift_up", "status": "done"}
         """
         rid = data.get("rid")
-        command = data.get("command")
-        shelf_id = data.get("shelf_id")
+        cmd = data.get("cmd")
 
-        if rid is None or command is None:
-            return self._error_response("Missing 'rid' or 'command' in shelf_ack")
+        if rid is None or cmd is None:
+            return self._error_response("Missing 'rid' or 'cmd' in cmd_ack")
 
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return self._error_response(f"Robot {rid} not found")
 
+        # 회전 완료는 태스크 유무와 무관하게 heading 갱신 + 다음 명령 전송
+        # (return-home 등 태스크 없는 이동 중에도 heading을 정확히 유지해야 함)
+        if cmd in ("turn_left", "turn_right", "turn_180"):
+            if cmd == "turn_right":
+                robot.heading = (robot.heading + 90) % 360
+            elif cmd == "turn_left":
+                robot.heading = (robot.heading + 270) % 360
+            elif cmd == "turn_180":
+                robot.heading = (robot.heading + 180) % 360
+            print(f"[RequestHandler] Robot {robot.rid}: heading updated to {robot.heading}° after {cmd}")
+            self._send_next_command(robot.rid)
+            self._retry_blocked_robots()
+            return {"type": "cmd_ack_response", "success": True, "action": f"turned_{cmd}"}
+
         task_id = robot.current_task_id
         task = self.task_manager.get_task(task_id) if task_id else None
         if not task:
-            return {"type": "shelf_ack_response", "success": True, "action": "no_task"}
+            return {"type": "cmd_ack_response", "success": True, "action": "no_task"}
 
         current_st = task.get_current_subtask()
         if not current_st:
-            return {"type": "shelf_ack_response", "success": True, "action": "no_subtask"}
+            return {"type": "cmd_ack_response", "success": True, "action": "no_subtask"}
 
-        if command == "pickup":
+        if cmd == "lift_up":
             return self._handle_pickup_ack(robot, task, current_st)
-        elif command == "putdown":
+        elif cmd == "lift_down":
             return self._handle_putdown_ack(robot, task, current_st)
 
-        return {"type": "shelf_ack_response", "success": True, "action": "unknown_command"}
+        return {"type": "cmd_ack_response", "success": True, "action": "unknown_cmd"}
 
     def _handle_pickup_ack(self, robot, task, current_st) -> Dict[str, Any]:
         """pickup ack → PICKUP_SHELF 완료 → DELIVER_TO_WS 시작"""
         if current_st.subtask_type != SubTaskType.PICKUP_SHELF:
             print(f"[RequestHandler] Warning: pickup ack but current subtask is {current_st.subtask_type}")
-            return {"type": "shelf_ack_response", "success": False, "error": "not_picking_up"}
+            return {"type": "cmd_ack_response", "success": False, "error": "not_picking_up"}
 
         # PICKUP_SHELF 완료 → DELIVER_TO_WS
         result = self.task_manager.handle_subtask_complete(task.task_id)
@@ -664,7 +829,7 @@ class RequestHandler:
                 robot.rid, robot.current_node, next_st.target_node
             )
             return {
-                "type": "shelf_ack_response",
+                "type": "cmd_ack_response",
                 "success": True,
                 "action": "delivering_to_ws",
                 "shelf_id": current_st.shelf_id,
@@ -687,14 +852,14 @@ class RequestHandler:
             self.staging_manager.mark_exiting(robot.current_node, robot.rid)
             self._plan_and_publish_move(robot.rid, robot.current_node, return_node)
             return {
-                "type": "shelf_ack_response",
+                "type": "cmd_ack_response",
                 "success": True,
                 "action": "returning_forwarded_shelf",
                 "shelf_id": shelf_id,
                 "return_to": return_node,
             }
 
-        return {"type": "shelf_ack_response", "success": True, "action": "pickup_done"}
+        return {"type": "cmd_ack_response", "success": True, "action": "pickup_done"}
 
     def _handle_putdown_ack(self, robot, task, current_st) -> Dict[str, Any]:
         """putdown ack → RETURN_SHELF 또는 FORWARD_SHELF 완료 처리"""
@@ -703,21 +868,24 @@ class RequestHandler:
 
         if st_type == SubTaskType.RETURN_SHELF:
             # 선반 반납 완료
-            self.shelf_manager.mark_shelf_returned(shelf_id, current_st.target_node)
+            placed_node = current_st.target_node
+            self.shelf_manager.mark_shelf_returned(shelf_id, placed_node)
             self.robot_manager.set_carrying_shelf(robot.rid, None)
+            # 방금 배치된 노드를 경유 예정인 운반 로봇 재계획
+            self._replan_for_placed_shelf(placed_node)
 
             result = self.task_manager.handle_subtask_complete(task.task_id)
 
             if result.get("action") == "task_complete":
+                self._clear_robot_reservation(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
-                self._robot_planned_paths.pop(robot.rid, None)
                 self._try_assign_pending_tasks()
                 # 새 작업이 없으면 홈 staging 노드에서 대기
                 idle_wait = self._get_idle_wait_node(robot.rid)
                 if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
                     self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
-                    "type": "shelf_ack_response",
+                    "type": "cmd_ack_response",
                     "success": True,
                     "action": "task_complete",
                     "task_id": task.task_id,
@@ -734,7 +902,7 @@ class RequestHandler:
                         robot.rid, robot.current_node, next_st.target_node
                     )
                     return {
-                        "type": "shelf_ack_response",
+                        "type": "cmd_ack_response",
                         "success": True,
                         "action": "moving_to_next_shelf",
                         "target_node": next_st.target_node,
@@ -780,14 +948,14 @@ class RequestHandler:
             result = self.task_manager.handle_subtask_complete(task.task_id)
 
             if result.get("action") == "task_complete":
+                self._clear_robot_reservation(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
-                self._robot_planned_paths.pop(robot.rid, None)
                 self._try_assign_pending_tasks()
                 idle_wait = self._get_idle_wait_node(robot.rid)
                 if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
                     self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
-                    "type": "shelf_ack_response",
+                    "type": "cmd_ack_response",
                     "success": True,
                     "action": "task_complete",
                     "task_id": task.task_id,
@@ -800,7 +968,7 @@ class RequestHandler:
                     # AT_WORKSTATION 전환 후 PENDING 태스크 재배정 시도
                     self._try_assign_pending_tasks()
                     return {
-                        "type": "shelf_ack_response",
+                        "type": "cmd_ack_response",
                         "success": True,
                         "action": "wait_picking_at_forward_ws",
                         "shelf_id": shelf_id,
@@ -815,16 +983,16 @@ class RequestHandler:
                     self._plan_and_publish_move(robot.rid, robot.current_node, next_st.target_node)
                     self._try_assign_pending_tasks()
                     return {
-                        "type": "shelf_ack_response",
+                        "type": "cmd_ack_response",
                         "success": True,
                         "action": "moving_to_next_shelf",
                         "target_node": next_st.target_node,
                     }
         else:
             print(f"[RequestHandler] Warning: putdown ack but current subtask is {st_type}")
-            return {"type": "shelf_ack_response", "success": False, "error": "not_returning"}
+            return {"type": "cmd_ack_response", "success": False, "error": "not_returning"}
 
-        return {"type": "shelf_ack_response", "success": True, "action": "putdown_done"}
+        return {"type": "cmd_ack_response", "success": True, "action": "putdown_done"}
 
     # ─── 물품 픽업 완료 ───
 
@@ -879,24 +1047,11 @@ class RequestHandler:
                 self.shelf_manager.mark_shelf_picked_up(shelf_id_r, robot.rid)
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.DELIVERING_TO_WS)
 
-                # Point C (포워딩): 경로 먼저 계획 후 소스 회랑 즉시 해제
+                # Point C (포워딩): RETURN_SHELF와 동일하게 mark_exiting → 위치 기반 해제
+                # 즉시 release_corridor_without_trigger 하면 gateway를 아직 못 빠져나간
+                # 포워딩 로봇과 스테이징 해제 로봇이 gateway에서 충돌함
+                self.staging_manager.mark_exiting(source_ws, robot.rid)
                 self._plan_and_publish_move(robot.rid, source_ws, forward_ws)
-
-                released = self.staging_manager.release_corridor_without_trigger(
-                    source_ws, robot.rid
-                )
-                if released:
-                    released_robot = self.robot_manager.get_robot(released.rid)
-                    if released_robot and released_robot.current_node == released.staging_node:
-                        self._plan_and_publish_move(
-                            released_robot.rid, released.staging_node, source_ws
-                        )
-                        print(f"[RequestHandler] W{source_ws}: AGV-{released.rid} already at "
-                              f"staging {released.staging_node} → proceeding to WS immediately")
-                    else:
-                        self._staged_to_ws[released.rid] = source_ws
-                        print(f"[RequestHandler] W{source_ws}: AGV-{released.rid} pre-released, "
-                              f"will proceed when arriving at staging {released.staging_node}")
                 return {"success": True, "action": "forwarding_shelf", "forward_to_ws": forward_ws}
 
         elif result.get("action") == "shelf_done_pickup_for_return":
@@ -908,9 +1063,7 @@ class RequestHandler:
                 self.shelf_manager.mark_shelf_picked_up(shelf_id_r, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, shelf_id_r)
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
-                self.mqtt_publisher.publish_shelf_command(
-                    rid=robot.rid, command="pickup", shelf_id=shelf_id_r
-                )
+                self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
                 self._forwarded_shelf_handlers.pop(shelf_id_r, None)
                 print(f"[RequestHandler] robot {robot.rid}: re-pickup shelf {shelf_id_r} for return")
                 return {"success": True, "action": "pickup_for_return", "shelf_id": shelf_id_r}
@@ -1000,88 +1153,6 @@ class RequestHandler:
 
     # ─── 유틸리티 ───
 
-    def _get_other_robot_reservations(
-        self, exclude_rid: int, goal_node: int = None
-    ) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int, int]]]:
-        """다른 로봇의 남은 경로를 예약 노드/엣지로 변환
-
-        이동 중인 로봇: planned_path 기반 예약
-        정지 중인 로봇 (WAITING_FOR_PICK 등): 현재 위치를 제한된 시간 예약
-        goal_node: 이 노드는 예약에서 제외 (도착 허용)
-        """
-        reserved_nodes: Set[Tuple[int, int]] = set()
-        reserved_edges: Set[Tuple[int, int, int]] = set()
-        max_time = self.config.max_time
-
-        handled_rids = set()
-
-        for other_rid, planned_path in self._robot_planned_paths.items():
-            if other_rid == exclude_rid or not planned_path:
-                continue
-
-            robot = self.robot_manager.get_robot(other_rid)
-            if not robot or robot.status == RobotStatus.IDLE:
-                continue
-
-            handled_rids.add(other_rid)
-
-            # 다른 로봇의 현재 위치부터 남은 경로 추출
-            remaining = self._estimate_remaining_timed_path(
-                planned_path, robot.current_node
-            )
-
-            # 예약 등록 (+1 타임스텝 버퍼 — 회전 지연 등 실행 타이밍 오차 보정)
-            for i in range(len(remaining)):
-                node_i, _ = remaining[i]
-                for dt in [0, 1]:
-                    t_buf = i + dt
-                    if t_buf < max_time:
-                        reserved_nodes.add((node_i, t_buf))
-
-                if i + 1 < len(remaining):
-                    node_j, _ = remaining[i + 1]
-                    if node_j != node_i:
-                        reserved_edges.add((node_i, node_j, i))
-
-            # 목표 도착 후 대기 예약
-            if remaining:
-                goal_node, _ = remaining[-1]
-                goal_t = len(remaining) - 1
-                for dt in range(1, 6):
-                    reserved_nodes.add((goal_node, goal_t + dt))
-
-        # 정지 중인 로봇 (planned path 없지만 점유 중)
-        for other_rid, robot in self.robot_manager.robots.items():
-            if other_rid == exclude_rid:
-                continue
-            if other_rid in handled_rids:
-                continue
-            if robot.status == RobotStatus.IDLE:
-                continue
-            # 목표 노드에 있는 로봇은 예약 스킵 (도착 허용)
-            if goal_node is not None and robot.current_node == goal_node:
-                continue
-            # 정지 로봇의 현재 위치를 제한된 시간 예약 (과도한 차단 방지)
-            reserve_window = min(12, max_time)
-            for t in range(reserve_window):
-                reserved_nodes.add((robot.current_node, t))
-
-        return reserved_nodes, reserved_edges
-
-    def _estimate_remaining_timed_path(
-        self, timed_path: List[Tuple[int, int]], current_node: int
-    ) -> List[Tuple[int, int]]:
-        """로봇의 현재 위치부터 남은 경로를 t=0부터 재인덱싱"""
-        # 현재 노드를 경로에서 찾기
-        for i, (node, _t) in enumerate(timed_path):
-            if node == current_node:
-                remaining = timed_path[i:]
-                # t=0부터 재인덱싱
-                return [(n, j) for j, (n, _) in enumerate(remaining)]
-
-        # 못 찾으면 전체 경로 반환 (로봇이 노드 사이에 있을 수 있음)
-        return [(n, j) for j, (n, _) in enumerate(timed_path)]
-
     def _is_shelf_targeted_by_moving_robot(self, shelf_id: int, exclude_rid: int) -> bool:
         """다른 로봇이 이미 이 선반(GO_TO_SHELF)으로 이동 중인지 확인"""
         for robot in self.robot_manager.robots.values():
@@ -1123,7 +1194,6 @@ class RequestHandler:
             next_st.status = TaskStatus.PENDING
             self.robot_manager.set_robot_status(robot.rid, RobotStatus.IDLE)
             robot.current_task_id = None
-            self._robot_planned_paths.pop(robot.rid, None)
             print(f"[RequestHandler] F-node({context}): shelf {next_st.shelf_id} unavailable "
                   f"(status={next_shelf_obj.status.value}), "
                   f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
@@ -1132,7 +1202,7 @@ class RequestHandler:
             if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
                 self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
             return {
-                "type": "shelf_ack_response",
+                "type": "cmd_ack_response",
                 "success": True,
                 "action": "waiting_shelf_available",
                 "shelf_id": next_st.shelf_id,
@@ -1190,119 +1260,217 @@ class RequestHandler:
             return corridor.staging_node
         return robot.home_node
 
+    def _path_to_commands(self, node_path: List[int], start_heading: int) -> List[str]:
+        """노드 경로를 이동 명령 리스트로 변환
+
+        Args:
+            node_path: 노드 ID 리스트 [현재노드, 다음노드, ...]
+            start_heading: 출발 시 heading (0=북, 90=동, 180=남, 270=서)
+
+        Returns:
+            명령 리스트 ["turn_left", "forward", "forward", ...]
+        """
+        # 방향 계산: 노드 좌표 기반
+        DIR_NORTH = 0
+        DIR_EAST  = 90
+        DIR_SOUTH = 180
+        DIR_WEST  = 270
+
+        def node_direction(from_node: int, to_node: int) -> Optional[int]:
+            fx, fy = self.path_planner.nodes.get(from_node, (0, 0))
+            tx, ty = self.path_planner.nodes.get(to_node, (0, 0))
+            dx, dy = tx - fx, ty - fy
+            if abs(dx) < abs(dy):
+                return DIR_NORTH if dy > 0 else DIR_SOUTH
+            else:
+                return DIR_EAST if dx > 0 else DIR_WEST
+
+        def turn_commands(current_h: int, target_h: int) -> List[str]:
+            diff = (target_h - current_h) % 360
+            if diff == 0:
+                return []
+            elif diff == 90:
+                return ["turn_right"]
+            elif diff == 180:
+                return ["turn_180"]
+            else:  # diff == 270
+                return ["turn_left"]
+
+        commands = []
+        heading = start_heading
+
+        for i in range(1, len(node_path)):
+            target_dir = node_direction(node_path[i - 1], node_path[i])
+            if target_dir is None:
+                continue
+            commands.extend(turn_commands(heading, target_dir))
+            commands.append("forward")
+            heading = target_dir
+
+        return commands
+
+    def _send_next_command(self, rid: int) -> bool:
+        """로봇 명령 큐에서 다음 명령 전송
+
+        충돌이 예상되면 명령을 보류하고 False 반환.
+        """
+        robot = self.robot_manager.get_robot(rid)
+        if not robot or not robot.command_queue:
+            return False
+
+        next_cmd = robot.command_queue[0]
+
+        # forward 명령일 때만 충돌 체크
+        if next_cmd == "forward":
+            # 현재 노드에서 heading 방향의 다음 노드 계산
+            next_node = self._get_next_node_by_heading(rid)
+            if next_node is None:
+                # heading 방향 노드 없음 → 안전하게 차단 (체크 없이 보내면 충돌 위험)
+                self._blocked_robots.add(rid)
+                print(f"[RequestHandler] Robot {rid}: blocked → no forward target "
+                      f"(heading={robot.heading}°, node={robot.current_node})")
+                return False
+            # 다른 로봇이 next_node에 있거나 이동 중(예약)인 경우 보류
+            for other_rid, other in self.robot_manager.robots.items():
+                if other_rid == rid:
+                    continue
+                occupied = other.current_node == next_node
+                reserved = self._reserved_nodes.get(next_node) == other_rid
+                if occupied or reserved:
+                    self._blocked_robots.add(rid)
+                    reason = "있음" if occupied else "이동중"
+                    print(f"[RequestHandler] Robot {rid}: blocked → node {next_node} "
+                          f"(AGV-{other_rid} {reason})")
+                    return False
+            # 충돌 없음 → 목적지 노드 예약
+            self._reserved_nodes[next_node] = rid
+
+        # 명령 전송
+        robot.command_queue.pop(0)
+        self._blocked_robots.discard(rid)
+        self.mqtt_publisher.publish_cmd(rid, next_cmd)
+        return True
+
+    def _get_next_node_by_heading(self, rid: int) -> Optional[int]:
+        """현재 heading 방향으로 한 칸 이동 시 도착할 노드"""
+        robot = self.robot_manager.get_robot(rid)
+        if not robot:
+            return None
+
+        cx, cy = self.path_planner.nodes.get(robot.current_node, (None, None))
+        if cx is None:
+            return None
+
+        # heading 방향의 이웃 노드 탐색
+        heading = robot.heading
+        for neighbor_id, _ in self.path_planner.graph.get(robot.current_node, []):
+            nx, ny = self.path_planner.nodes.get(neighbor_id, (None, None))
+            if nx is None:
+                continue
+            dx, dy = nx - cx, ny - cy
+            if heading == 0   and abs(dx) < abs(dy) and dy > 0:
+                return neighbor_id
+            if heading == 180 and abs(dx) < abs(dy) and dy < 0:
+                return neighbor_id
+            if heading == 90  and abs(dy) < abs(dx) and dx > 0:
+                return neighbor_id
+            if heading == 270 and abs(dy) < abs(dx) and dx < 0:
+                return neighbor_id
+        return None
+
     def _plan_and_publish_move(
         self, rid: int, start: int, goal: int
     ) -> Optional[Dict]:
-        """로봇 이동 경로 계획 및 MQTT 발행 (다른 로봇 경로 회피)"""
-        # Point A: 작업대 스테이징 체크 (Bug B fix: start==goal보다 먼저 실행)
-        # home=WS인 로봇이 같은 WS로 이동할 때 start==goal로 staging을 우회하는 버그 수정
+        """로봇 이동 경로 계획 → 명령 큐 생성 → 첫 명령 전송"""
+        # Point A: 작업대 스테이징 체크
+        # [DEMO MODE] DEMO_MODE=True이면 스테이징 완전 비활성화 → 바로 작업대 진입
         actual_goal = goal
-        if goal in self.staging_manager.corridors:
+        if not self.DEMO_MODE and goal in self.staging_manager.corridors:
             staging_node = self.staging_manager.should_stage(goal, rid)
             if staging_node is not None:
-                # 회랑 점유 중 → 스테이징 노드로 우회
                 actual_goal = staging_node
                 self.staging_manager.add_staged_agv(goal, rid, staging_node)
                 print(f"[RequestHandler] Robot {rid}: redirected to staging node {staging_node} "
                       f"(target WS {goal})")
 
-        # start==actual_goal: 이미 목적지에 있으면 즉시 도착 처리
+        # 이미 목적지에 있으면 즉시 도착 처리
         if start == actual_goal:
             print(f"[RequestHandler] Robot {rid}: already at goal {actual_goal}, immediate arrival")
-            self._robot_planned_paths.pop(rid, None)
-            self._handle_robot_arrived({
-                "type": "robot_arrived", "rid": rid, "node": actual_goal,
+            self._handle_marker_report({
+                "type": "marker_report", "rid": rid, "marker_id": actual_goal,
             })
-            return {
-                "rid": rid, "start": start, "goal": actual_goal,
-                "path_length": 0, "mqtt_published": False,
-            }
+            return {"rid": rid, "start": start, "goal": actual_goal, "path_length": 0}
 
-        # 타임아웃으로 해제된 대기 AGV 이동 명령 처리 (_check_timeout 에서 적재)
+        # 타임아웃 해제 대기 AGV 처리
         if self.staging_manager.pending_timeout_releases:
             timeout_releases = list(self.staging_manager.pending_timeout_releases)
             self.staging_manager.pending_timeout_releases.clear()
             for t_released in timeout_releases:
                 t_robot = self.robot_manager.get_robot(t_released.rid)
                 if t_robot:
-                    print(f"[RequestHandler] Timeout-release: sending AGV-{t_released.rid} "
-                          f"from staging {t_released.staging_node} → WS {t_released.target_ws}")
                     self._plan_and_publish_move(
                         t_released.rid, t_robot.current_node, t_released.target_ws
                     )
 
-        # 선반 운반 중이면 다른 선반이 놓인 노드 통과 불가
+        # 경로 계획 시 통과 불가 노드 수집
         robot = self.robot_manager.get_robot(rid)
-        excluded_transit = None
+        excluded_transit: Set[int] = set()
+        # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가
         if robot and robot.carrying_shelf is not None:
-            excluded_transit = self._get_occupied_shelf_nodes()
+            excluded_transit |= self._get_occupied_shelf_nodes()
+        # 다른 로봇의 planned_path 기반 시간 예약 (Cooperative A*)
+        reserved_nodes: Set[Tuple[int, int]] = set()
+        for other_rid, other in self.robot_manager.robots.items():
+            if other_rid == rid:
+                continue
+            # 다른 로봇의 planned_path 각 노드를 도착 예상 시각으로 예약
+            for t, node in enumerate(other.planned_path):
+                reserved_nodes.add((node, t))
+                reserved_nodes.add((node, t + 1))  # 1스텝 버퍼 (회전 지연 보정)
+            # planned_path 없으면 현재 위치를 t=0~2로 예약
+            if not other.planned_path:
+                for t in range(3):
+                    reserved_nodes.add((other.current_node, t))
+            # 다른 로봇이 선반 반납 중이면 그 선반의 원위치 노드도 영구 제외
+            if other.status == RobotStatus.RETURNING_SHELF and other.carrying_shelf is not None:
+                shelf_obj = self.shelf_manager.shelves.get(other.carrying_shelf)
+                if shelf_obj:
+                    excluded_transit.add(shelf_obj.home_node)
+        if not excluded_transit:
+            excluded_transit = None
 
-        # 다른 로봇의 경로 예약 수집 (actual_goal 노드는 예약 제외)
-        reserved_nodes, reserved_edges = self._get_other_robot_reservations(rid, goal_node=actual_goal)
-
+        # A* 경로 계획 (시간 기반 예약으로 상대 경로와 충돌 없는 최적 경로 계획)
         timed_path = self.path_planner.astar_with_time(
             start=start,
             goal=actual_goal,
             reserved_nodes=reserved_nodes,
-            reserved_edges=reserved_edges,
+            reserved_edges=set(),
             max_time=self.config.max_time,
             excluded_transit=excluded_transit,
+            start_heading=robot.heading if robot else None,
         )
-
-        # 예약 회피 실패 시 최소 예약으로 재시도 (fallback)
-        if timed_path is None:
-            print(f"[RequestHandler] Robot {rid}: no path with reservations, trying with minimal")
-            # 다른 로봇의 현재 위치만 t=0에서 회피 (즉시 충돌 방지)
-            minimal_reserved = set()
-            for other_rid, other_robot in self.robot_manager.robots.items():
-                if other_rid == rid:
-                    continue
-                if other_robot.status != RobotStatus.IDLE and other_robot.current_node != actual_goal:
-                    minimal_reserved.add((other_robot.current_node, 0))
-            timed_path = self.path_planner.astar_with_time(
-                start=start, goal=actual_goal,
-                reserved_nodes=minimal_reserved, reserved_edges=set(),
-                max_time=self.config.max_time,
-                excluded_transit=excluded_transit,
-            )
 
         if timed_path is None:
             print(f"[RequestHandler] No path found for Robot {rid}: {start} -> {actual_goal}")
-            self._robot_planned_paths.pop(rid, None)
             return None
 
-        # 계획된 경로 저장 (다음 로봇 계획 시 참조)
-        self._robot_planned_paths[rid] = timed_path
-
-        # 첫 번째 이동 노드 pre-claim: IDLE 로봇은 resume 없이 바로 이동 시작하므로
-        # _claimed_nodes에 등록해 다른 로봇이 같은 노드로 동시 진입하는 것을 방지
-        # 다른 로봇이 이미 claim한 노드는 덮어쓰지 않음
-        first_next = self._get_next_planned_node(rid)
-        if first_next is not None:
-            existing = self._claimed_nodes.get(first_next)
-            if existing is None or existing == rid:
-                self._claimed_nodes[first_next] = rid
-
-        mqtt_success = self.mqtt_publisher.publish_single_robot_plan(
-            rid=rid,
-            start=start,
-            goal=actual_goal,
-            timed_path=timed_path,
-            speed=self.config.default_speed,
-        )
-
         node_path = PathPlanner.compress_to_node_path(timed_path)
-        goal_desc = f"{actual_goal}" if actual_goal == goal else f"{actual_goal}(staging for {goal})"
-        print(f"[RequestHandler] Robot {rid}: planned {start} -> {goal_desc}, "
-              f"path={node_path}, MQTT={'ok' if mqtt_success else 'fail'}")
+
+        # 명령 큐 생성 및 저장
+        if robot:
+            robot.planned_path = node_path
+            robot.command_queue = self._path_to_commands(node_path, robot.heading)
+            print(f"[RequestHandler] Robot {rid}: path={node_path}, "
+                  f"commands={robot.command_queue}")
+            # 첫 명령 전송
+            self._send_next_command(rid)
 
         return {
             "rid": rid,
             "start": start,
             "goal": actual_goal,
             "original_goal": goal,
-            "path_length": len(timed_path),
-            "mqtt_published": mqtt_success,
+            "path_length": len(node_path),
         }
 
     # ─── 스테이징 마커 트리거 ───
@@ -1315,7 +1483,6 @@ class RequestHandler:
         released = self.staging_manager.handle_marker_trigger(rid, marker_id)
         if released:
             # 대기 AGV를 작업대로 진입시킴
-            self._waiting_robots.add(released.rid)  # Fix: 해제된 AGV도 resume 대상에 추가
             released_robot = self.robot_manager.get_robot(released.rid)
             start = released_robot.current_node if released_robot else released.staging_node
             self._plan_and_publish_move(released.rid, start, released.target_ws)
@@ -1345,8 +1512,8 @@ class RequestHandler:
 
         if new_current_st is None:
             # 작업 완료: 로봇 → IDLE → 홈 staging 노드 대기
+            self._clear_robot_reservation(robot.rid)
             self.robot_manager.complete_task(robot.rid)
-            self._robot_planned_paths.pop(robot.rid, None)
             idle_wait = self._get_idle_wait_node(robot.rid)
             if robot.current_node != idle_wait:
                 self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)

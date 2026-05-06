@@ -64,6 +64,16 @@ class PathPlanner:
         """노드 타입 반환"""
         return self.node_types.get(node_id, "M")
 
+    def _node_direction(self, from_node: int, to_node: int) -> int:
+        """두 노드 간 이동 방향 (0=N, 1=E, 2=S, 3=W)"""
+        fx, fy = self.nodes.get(from_node, (0.0, 0.0))
+        tx, ty = self.nodes.get(to_node, (0.0, 0.0))
+        dx, dy = tx - fx, ty - fy
+        if abs(dx) < abs(dy):
+            return 0 if dy > 0 else 2
+        else:
+            return 1 if dx > 0 else 3
+
     def astar_with_time(
         self,
         start: int,
@@ -71,10 +81,12 @@ class PathPlanner:
         reserved_nodes: Set[Tuple[int, int]],
         reserved_edges: Set[Tuple[int, int, int]],
         max_time: int = 50,
-        excluded_transit: Optional[Set[int]] = None
+        excluded_transit: Optional[Set[int]] = None,
+        turn_penalty: float = 0.3,
+        start_heading: Optional[int] = None,  # 서버 기준 degree (0=N,90=E,180=S,270=W)
     ) -> Optional[List[Tuple[int, int]]]:
         """
-        시간 포함 A* 알고리즘
+        시간 포함 A* 알고리즘 (회전 페널티 포함)
 
         Args:
             start: 시작 노드
@@ -83,27 +95,34 @@ class PathPlanner:
             reserved_edges: 예약된 엣지 집합 {(from_node, to_node, time), ...}
             max_time: 최대 시간
             excluded_transit: 통과 불가 노드 집합 (start/goal 제외)
+            turn_penalty: 방향 전환 시 추가 비용 (0=페널티 없음, 기본 0.3)
+            start_heading: 출발 방향 (degree) — None이면 방향 무관
 
         Returns:
             시간 포함 경로 [(node, time), ...] 또는 None
         """
-        start_state = (start, 0)
+        def heading_to_dir(h: int) -> int:
+            return {0: 0, 90: 1, 180: 2, 270: 3}.get(h, -1)
 
-        open_heap: List[Tuple[float, float, int, int]] = []
-        heapq.heappush(open_heap, (self._heuristic(start, goal), 0.0, start, 0))
+        start_dir = heading_to_dir(start_heading) if start_heading is not None else -1
+        # state: (node, time, dir)  dir=-1 = 방향 미정
+        start_state = (start, 0, start_dir)
 
-        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
-        g_score: Dict[Tuple[int, int], float] = {start_state: 0.0}
+        open_heap: List[Tuple[float, float, int, int, int]] = []
+        heapq.heappush(open_heap, (self._heuristic(start, goal), 0.0, start, 0, start_dir))
+
+        came_from: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
+        g_score: Dict[Tuple[int, int, int], float] = {start_state: 0.0}
 
         while open_heap:
-            f, g, cur_node, t = heapq.heappop(open_heap)
+            f, g, cur_node, t, cur_dir = heapq.heappop(open_heap)
 
             if cur_node == goal:
                 path: List[Tuple[int, int]] = [(cur_node, t)]
-                cur = (cur_node, t)
-                while cur in came_from:
-                    cur = came_from[cur]
-                    path.append(cur)
+                cur_s = (cur_node, t, cur_dir)
+                while cur_s in came_from:
+                    cur_s = came_from[cur_s]
+                    path.append((cur_s[0], cur_s[1]))
                 path.reverse()
                 return path
 
@@ -123,8 +142,6 @@ class PathPlanner:
                     if nxt_node != goal and nxt_node != start:
                         continue
 
-                next_state = (nxt_node, nt)
-
                 # 노드 충돌 검사
                 if (nxt_node, nt) in reserved_nodes:
                     continue
@@ -134,12 +151,22 @@ class PathPlanner:
                     if (nxt_node, cur_node, t) in reserved_edges:
                         continue
 
-                tentative_g = g + step_cost
+                # 방향 계산 및 회전 페널티
+                if nxt_node != cur_node:
+                    nxt_dir = self._node_direction(cur_node, nxt_node)
+                    extra = turn_penalty if (cur_dir != -1 and nxt_dir != cur_dir) else 0.0
+                else:
+                    nxt_dir = cur_dir  # 대기: 방향 유지
+                    extra = 0.0
+
+                tentative_g = g + step_cost + extra
+                next_state = (nxt_node, nt, nxt_dir)
+
                 if tentative_g < g_score.get(next_state, float("inf")):
                     g_score[next_state] = tentative_g
-                    came_from[next_state] = (cur_node, t)
+                    came_from[next_state] = (cur_node, t, cur_dir)
                     f_next = tentative_g + self._heuristic(nxt_node, goal)
-                    heapq.heappush(open_heap, (f_next, tentative_g, nxt_node, nt))
+                    heapq.heappush(open_heap, (f_next, tentative_g, nxt_node, nt, nxt_dir))
 
         return None
 

@@ -1,12 +1,12 @@
 """
 MQTT 발행 모듈
-- /agv/plan 토픽으로 경로 발행
+- /agv/cmd 토픽으로 개별 명령 발행
 - 연결 관리
 """
 
 import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -91,106 +91,28 @@ class MQTTPublisher:
             self.connected = False
             print("[MQTTPublisher] Disconnected")
 
-    def publish_plan(
-        self,
-        robots: List[Dict[str, Any]],
-        speed: float = 0.3
-    ) -> bool:
+    def publish_cmd(self, rid: int, cmd: str) -> bool:
         """
-        경로 계획 발행
+        AGV 개별 명령 발행
 
         Args:
-            robots: 로봇 정보 리스트
-                [{"rid": 0, "start": 1, "goal": 45, "node_path": [1,2,...], "timed_path": [{"node":1,"t":0},...]}, ...]
-            speed: 이동 속도
-
-        Returns:
-            발행 성공 여부
+            rid: 로봇 ID
+            cmd: "forward" | "backward" | "turn_left" | "turn_right" | "turn_180"
+                 | "lift_up" | "lift_down"
         """
         if not self.client or not self.connected:
             print("[MQTTPublisher] Not connected")
             return False
 
-        payload = {
-            "job_id": int(time.time()),
-            "planner": "prioritized_astar_with_time_on_graph",
-            "robots": robots,
-            "speed": speed
-        }
+        payload = {"rid": rid, "cmd": cmd, "timestamp": time.time()}
 
         try:
-            self.client.publish(
-                self.config.mqtt_topic_plan,
-                json.dumps(payload),
-                qos=0
-            )
-            print(f"[MQTTPublisher] Published plan to {self.config.mqtt_topic_plan}")
+            self.client.publish(self.config.mqtt_topic_cmd, json.dumps(payload), qos=0)
+            print(f"[MQTTPublisher] AGV {rid} <- {cmd}")
             return True
         except Exception as e:
             print(f"[MQTTPublisher] Publish failed: {e}")
             return False
-
-    def publish_single_robot_plan(
-        self,
-        rid: int,
-        start: int,
-        goal: int,
-        timed_path: List[Tuple[int, int]],
-        speed: float = 0.3
-    ) -> bool:
-        """단일 로봇 경로 발행"""
-        from .path_planner import PathPlanner
-
-        node_path = PathPlanner.compress_to_node_path(timed_path)
-
-        robots = [{
-            "rid": rid,
-            "start": start,
-            "goal": goal,
-            "node_path": node_path,
-            "timed_path": [{"node": n, "t": t} for (n, t) in timed_path]
-        }]
-
-        return self.publish_plan(robots, speed)
-
-    def publish_shelf_command(self, rid: int, command: str, shelf_id: int) -> bool:
-        """
-        선반 명령 발행 (pickup / putdown)
-
-        Args:
-            rid: 로봇 ID
-            command: "pickup" 또는 "putdown"
-            shelf_id: 선반 ID
-        """
-        if not self.client or not self.connected:
-            print("[MQTTPublisher] Not connected")
-            return False
-
-        payload = {
-            "rid": rid,
-            "command": command,
-            "shelf_id": shelf_id,
-            "timestamp": time.time(),
-        }
-
-        try:
-            self.client.publish(
-                self.config.mqtt_topic_shelf_cmd,
-                json.dumps(payload),
-                qos=0,
-            )
-            print(f"[MQTTPublisher] Published shelf_cmd: {command} shelf {shelf_id} by robot {rid}")
-            return True
-        except Exception as e:
-            print(f"[MQTTPublisher] Shelf command publish failed: {e}")
-            return False
-
-    def publish_resume(self, rid: int) -> None:
-        """노드 이동 허가 (resume) 발행"""
-        if not self.client or not self.connected:
-            return
-        payload = {"rid": rid, "cmd": "resume"}
-        self.client.publish(self.config.mqtt_topic_control, json.dumps(payload), qos=0)
 
     def is_connected(self) -> bool:
         """연결 상태 확인"""

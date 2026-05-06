@@ -33,22 +33,21 @@ python3 mqtt_test.py
 ## 1. 전체 시스템 구조
 
 ```
-┌─────────────┐    MQTT          ┌─────────────┐      MQTT       ┌─────────────┐
-│  mqtt_test   │ ──────────────>│   Server    │ ───────────────>│ AGV (Webots)│
-│  (CLI 테스트) │  agv/algorithm  │  (이 서버)   │   /agv/plan     │  Supervisor │
-└─────────────┘                 └─────────────┘   /agv/shelf_cmd └──────┬──────┘
-                                       │           /agv/control          │
-                                       │                                 │ /agv/arrived
-                                       │                                 │ /agv/shelf_ack
-                                       │                                 │ /agv/marker
-                                       │<────────────────────────────────┘
+┌─────────────┐    MQTT          ┌─────────────┐      MQTT       ┌──────────────────┐
+│  mqtt_test   │ ──────────────>│   Server    │ ───────────────>│ AGV (Isaac/RPi)  │
+│  (CLI 테스트) │  agv/algorithm  │  (이 서버)   │   /agv/cmd      │  Bridge + AGV    │
+└─────────────┘                 └─────────────┘                  └───────┬──────────┘
+                                       │                                  │
+                                       │                                  │ /agv/marker
+                                       │                                  │ /agv/cmd_ack
+                                       │<─────────────────────────────────┘
                                        │
-                                       ├─ request_handler : 주문/도착/리프트 처리 (핵심)
+                                       ├─ request_handler : 주문/명령/충돌 처리 (핵심)
                                        ├─ task_manager    : 작업 분해/스케줄링
                                        ├─ task_scheduler  : Nearest Neighbor 최적화
                                        ├─ shelf_manager   : 선반 상태 추적
                                        ├─ staging_manager : 작업대 회랑 게이팅 (STG)
-                                       ├─ path_planner    : A* (시간 기반 충돌 회피)
+                                       ├─ path_planner    : A* (회전 페널티 + 경로 계획)
                                        ├─ robot_manager   : 로봇 6단계 상태 머신
                                        └─ db_loader       : 엑셀 DB 로더
 ```
@@ -56,11 +55,11 @@ python3 mqtt_test.py
 **데이터 흐름:**
 1. CLI(mqtt_test.py)에서 `start_order` 발행 (`agv/algorithm` 토픽)
 2. DB에서 물품 목록 로드 → 물품→선반 매핑 → Nearest Neighbor 방문 순서 최적화
-3. 유휴 로봇에 작업 배정 → A* 경로 계획
-4. MQTT `/agv/plan`으로 경로 전송 → AGV 주행
-5. AGV 중간 노드 도착 → `robot_position` 보고 → 서버 `resume` 명령
-6. AGV 최종 도착 (`/agv/arrived`) → 선반 리프트 명령 (`/agv/shelf_cmd`)
-7. AGV 리프트 완료 (`/agv/shelf_ack`) → 작업대로 배달
+3. 유휴 로봇에 작업 배정 → A* 경로 계획 → 노드 경로 추출
+4. 노드 경로를 한 칸씩 분해: `forward` / `turn_left` / `turn_right` / `turn_180` 명령으로 발행 (`/agv/cmd`)
+5. AGV가 ArUco 마커 감지 → `/agv/marker` 발행 → 서버 위치 갱신 + 충돌 체크 후 다음 명령 전송
+6. AGV 선반 노드 도착 → 서버 `lift_up` 명령 → AGV 리프트 상승 → `/agv/cmd_ack` (lift_up done)
+7. 서버 작업대로 이동 명령 연속 발행 → AGV 배달
 8. CLI `완료 1` → `shelf_complete` 발행 → 선반 반납 또는 포워딩
 
 
@@ -79,7 +78,7 @@ server/
 ├── shelf_manager.py     # 선반 상태 관리 (IN_PLACE / CARRIED / AT_WORKSTATION)
 ├── staging_manager.py   # 작업대 회랑 게이팅 (STG / TRG / 위치 기반 해제)
 ├── path_planner.py      # A* 시간 기반 경로 계획 (예약 기반 충돌 회피)
-├── mqtt_publisher.py    # MQTT 발행 (/agv/plan, /agv/shelf_cmd, /agv/control)
+├── mqtt_publisher.py    # MQTT 발행 (/agv/cmd)
 ├── websocket_handler.py # WebSocket 서버 (Admin UI용, 선택적)
 ├── db_loader.py         # 엑셀 주문 DB 로더 (pandas)
 └── requirements.txt     # 의존성 (paho-mqtt, websockets, pandas, openpyxl)
@@ -94,8 +93,7 @@ server/
 - 맵 파일: server/map.json (8×4 그리드 + 작업대 2개)
 - 선반 설정: server/shelf_config.json
 - 로봇 설정: server/robot_config.json
-- MQTT 토픽: /agv/plan, /agv/shelf_cmd, /agv/arrived, /agv/shelf_ack,
-             /agv/marker, agv/algorithm, /agv/control
+- MQTT 토픽: /agv/cmd, /agv/marker, /agv/cmd_ack, agv/algorithm
 ```
 
 #### `shelf_manager.py` — 선반 관리
@@ -152,30 +150,36 @@ TRG 해제: handle_marker_trigger(marker_id) → 대기 AGV 해제
 ```
 - map.json 로드 (노드 타입 포함)
 - astar_with_time(): 시간 기반 A* (예약 기반 충돌 회피)
+  - turn_penalty=0.3: 방향 전환 시 추가 비용 (회전 최소화)
+  - start_heading: 현재 진행 방향 전달 → 직진 경로 우선 선택
+  - state: (node, time, dir) — dir=-1(미정) / 0=N / 1=E / 2=S / 3=W
 - 선반 노드 통과 제외 (출발/도착만 허용)
-- 이동 로봇 예약에 +1 타임스텝 버퍼 (회전 지연 보정)
-- 목표 대기 예약: 5스텝
 ```
 
 #### `request_handler.py` — 요청 처리 (핵심 알고리즘)
 ```
 주요 핸들러:
-  _handle_start_order()      : 주문 시작 (DB 로드 → 선반 배정 → 경로 발행)
+  _handle_start_order()      : 주문 시작 (DB 로드 → 선반 배정 → 명령 발행)
   _handle_shelf_complete()   : 선반 피킹 완료 → return/forward 결정
   _handle_order_complete()   : 주문 완료 기록
-  _handle_robot_arrived()    : 최종 도착 → 다음 서브태스크 실행
-  _handle_robot_position()   : 중간 노드 위치 갱신 → resume 판단 → 회랑 해제
-  _handle_pickup_ack()       : 리프트 완료 → 작업대로 이동 명령
-  _handle_putdown_ack()      : 내려놓기 완료 → 다음 선반 or IDLE
-  _handle_mqtt_marker()      : ArUco 마커 → 회랑 해제
+  _handle_marker_report()    : /agv/marker 수신 → 위치 갱신 → 다음 명령 발행
+  _handle_cmd_ack()          : /agv/cmd_ack 수신 → turn/lift 완료 처리
+  _handle_putdown_ack()      : lift_down 완료 → 다음 선반 or IDLE
 
 핵심 내부 메서드:
+  _send_next_command(rid)    : 다음 forward/turn/lift 명령 결정 + 발행
+                               - forward 시 next_node 충돌 체크 → _reserved_nodes 예약
+  _retry_blocked_robots()    : blocked 로봇 재시도 + 교착 감지
+  _get_blocker_of(rid)       : rid를 막는 다른 로봇 rid 반환
+  _resolve_deadlock(a, b)    : 교착 해제
+                               전략1: excluded_transit A*로 우회 경로
+                               전략2: yield 로봇이 옆 노드로 이동 후 재계획
+  _find_yield_node(rid, contested_node): 인접 비-선반 비-점유 노드 탐색
+  _replan_for_placed_shelf(node): 선반 반납 후 해당 노드 경유 운반 로봇 재계획
   _try_assign_pending_tasks(): PENDING 작업 재배정 루프 (F 노드 6분기 포함)
   _get_shelf_availability()  : 선반 가용성 판단 ('go'/'direct'/'pending')
   _try_intercept_returning_shelf(): Node U — 복귀 중 인터셉트
-  _plan_and_publish_move()   : STG 체크 포함 경로 계획 + MQTT 발행
-  _try_resume_waiting_robots(): NODE_WAIT 로봇에 resume 명령 발행
-  _is_safe_to_resume(rid)    : claimed_nodes + current_node 충돌 체크
+  _plan_and_publish_move()   : STG 체크 포함 경로 계획 (명령 발행은 _send_next_command)
 ```
 
 ---
@@ -206,13 +210,41 @@ W2(34)──25 ─26 ─27 ─28 ─29 ─30 ─31 ─32    (row 3, 통로)
 
 | 토픽 | 방향 | 설명 |
 |------|------|------|
-| `/agv/plan` | Server → AGV | 경로 계획 (노드 경로 + 타임스텝) |
-| `/agv/shelf_cmd` | Server → AGV | 선반 리프트 명령 (pickup/putdown) |
-| `/agv/control` | Server → AGV | resume 명령 (NODE_WAIT 해제) |
-| `/agv/arrived` | AGV → Server | 목표 노드 도착 / 중간 노드 위치 보고 |
-| `/agv/shelf_ack` | AGV → Server | 리프트 동작 완료 알림 |
-| `/agv/marker` | AGV → Server | ArUco 마커 인식 (트리거 노드 통과) |
-| `agv/algorithm` | GUI/CLI → Server | UI 명령 수신 |
+| `/agv/cmd` | Server → AGV | 이동/회전/리프트 명령 (cmd-based) |
+| `/agv/marker` | AGV → Server | ArUco 마커 감지 (위치 + heading) |
+| `/agv/cmd_ack` | AGV → Server | 회전/리프트 완료 알림 |
+| `agv/algorithm` | GUI/CLI → Server | UI 명령 수신 (주문/완료) |
+
+### 서버 → AGV 명령 (`/agv/cmd`)
+
+```json
+{"rid": 1, "cmd": "forward"}
+{"rid": 1, "cmd": "turn_left"}
+{"rid": 1, "cmd": "turn_right"}
+{"rid": 1, "cmd": "turn_180"}
+{"rid": 1, "cmd": "lift_up"}
+{"rid": 1, "cmd": "lift_down"}
+```
+
+- `forward`: 현재 heading 방향으로 한 칸 직진 (마커 감지 시 자동 종료)
+- `turn_*`: 제자리 회전 (완료 시 `cmd_ack` 발행)
+- `lift_up/down`: 선반 리프트 (완료 시 `cmd_ack` 발행)
+
+### AGV → 서버 위치 보고 (`/agv/marker`)
+
+```json
+{"rid": 1, "marker_id": 14, "heading": 90, "ts": 1700000000}
+```
+
+- `heading`: 서버 기준 (0=North, 90=East, 180=South, 270=West)
+- 마커 ID = 노드 ID (ArUco 마커 번호 = 그리드 노드 번호)
+
+### AGV → 서버 완료 알림 (`/agv/cmd_ack`)
+
+```json
+{"type": "cmd_ack", "rid": 1, "cmd": "turn_left", "status": "done"}
+{"type": "cmd_ack", "rid": 1, "cmd": "lift_up",   "status": "done"}
+```
 
 ### API (agv/algorithm 토픽)
 
@@ -230,53 +262,6 @@ W2(34)──25 ─26 ─27 ─28 ─29 ─30 ─31 ─32    (row 3, 통로)
 **주문 완료:**
 ```json
 {"type": "order_complete", "사용자ID": 1, "주문번호": 1}
-```
-
-### 경로 발행 (MQTT `/agv/plan`)
-```json
-{
-  "job_id": 1737886123,
-  "planner": "astar_with_time",
-  "robots": [
-    {
-      "rid": 1,
-      "start": 33,
-      "goal": 11,
-      "node_path": [33, 1, 9, 10, 11],
-      "timed_path": [{"node": 33, "t": 0}, ...]
-    }
-  ],
-  "speed": 0.3
-}
-```
-
-### 선반 리프트 명령 (MQTT `/agv/shelf_cmd`)
-```json
-{"rid": 1, "command": "pickup", "shelf_id": 11}
-```
-
-### resume 명령 (MQTT `/agv/control`)
-```json
-{"rid": 1, "cmd": "resume"}
-```
-
-### 로봇 도착/위치 보고 (MQTT `/agv/arrived`)
-```json
-// 최종 목표 도착
-{"rid": 1, "node": 11}
-
-// 중간 노드 위치 (수정 18)
-{"rid": 1, "node": 10, "type": "robot_position"}
-```
-
-### 리프트 완료 (MQTT `/agv/shelf_ack`)
-```json
-{"rid": 1, "command": "pickup", "shelf_id": 11, "status": "done"}
-```
-
-### ArUco 마커 (MQTT `/agv/marker`)
-```json
-{"rid": 1, "marker_id": 2}
 ```
 
 ---
@@ -299,23 +284,74 @@ IDLE → MOVING_TO_SHELF → PICKING_UP_SHELF → DELIVERING_TO_WS → WAITING_F
                                           └────────────────────────────┘
 ```
 
-### shelf_ack에 의한 상태 전이
+### cmd_ack에 의한 상태 전이
 
-1. **GO_TO_SHELF 도착** → `shelf_cmd: pickup` 전송 → AGV가 리프트 올림
-2. **`shelf_ack: pickup` 수신** → DELIVERING_TO_WS 상태, 작업대로 경로 계획 (STG 체크)
-3. **RETURN/FORWARD 도착** → `shelf_cmd: putdown` 전송 → AGV가 리프트 내림
-4. **`shelf_ack: putdown` 수신** → 다음 선반 or IDLE
+1. **GO_TO_SHELF 도착** (마커 감지) → `lift_up` 명령 → AGV 리프트 올림
+2. **`cmd_ack: lift_up` 수신** → DELIVERING_TO_WS 상태, 작업대로 명령 시퀀스 발행 (STG 체크)
+3. **RETURN/FORWARD 도착** (마커 감지) → `lift_down` 명령 → AGV 리프트 내림
+4. **`cmd_ack: lift_down` 수신** → 다음 선반 or IDLE
 
-### NODE_WAIT 흐름 (수정 19)
+### cmd-based 이동 흐름
 
 ```
-중간 노드 도착 → AGV 자동 정지 → robot_position 보고
-서버 충돌 체크 → 안전하면 resume 발행 → AGV 재출발
+서버: A* 경로 계획 → [node1, node2, node3, ...]
+  ↓
+서버: 현재 heading 확인 → 필요 시 turn 명령 발행
+  ↓ (cmd_ack: turn done)
+서버: forward 발행 + _reserved_nodes[next_node] = rid 예약
+  ↓ (AGV 이동 → marker 감지)
+AGV: /agv/marker 발행 (marker_id = 도착 노드)
+  ↓
+서버: 위치 갱신 + _reserved_nodes 해제 + 다음 명령 결정
 ```
 
 ---
 
 ## 6. 핵심 알고리즘 포인트
+
+### 충돌 회피 — 노드 예약 + Blocked/Deadlock
+
+```python
+_reserved_nodes: Dict[int, int]  # node_id → rid (forward 명령 시 목적지 예약)
+_blocked_robots: Set[int]        # 충돌 예상으로 명령 보류 중인 로봇
+```
+
+`_send_next_command(rid)` — forward 명령 전 충돌 체크:
+1. next_node is None → blocked 추가 (진행 방향에 노드 없음)
+2. other.current_node == next_node → blocked 추가 (점유)
+3. _reserved_nodes[next_node] == other_rid → blocked 추가 (예약됨)
+4. 안전 → `_reserved_nodes[next_node] = rid` 예약 후 forward 발행
+
+마커 도착 시: `_reserved_nodes` 해제 + `_retry_blocked_robots()` 호출
+turn cmd_ack 완료 시: `_send_next_command(rid)` + `_retry_blocked_robots()` 호출 ← **교착 해제 트리거**
+
+### 교착 감지 및 해제 (`_resolve_deadlock`)
+
+```
+_retry_blocked_robots():
+  for rid in blocked_robots:
+    success = _send_next_command(rid)
+    if not success:
+      blocker = _get_blocker_of(rid)
+      if blocker in blocked_robots:  ← 상호 교착
+        _resolve_deadlock(rid, blocker)
+
+_resolve_deadlock(rid_a, rid_b):
+  yield 로봇 결정: 선반 미운반(0) < 운반중(1) → 낮은 우선순위가 yield
+                   우선순위 같으면 높은 rid가 yield
+  전략 1: A*(excluded_transit={blocker_node} + 점유선반) 우회 경로
+  전략 2 (우회 불가): yield 로봇이 _find_yield_node()로 옆 칸 이동 후 재계획
+```
+
+`_find_yield_node(rid, contested_node)`:
+- contested_node 방향 이웃 제외
+- `shelf_manager.all_shelf_nodes` 기준 선반 노드 항상 제외
+- 타 로봇 점유/예약 노드 제외
+
+### 선반 반납 후 재계획 (`_replan_for_placed_shelf`)
+
+선반이 노드 X에 반납되면, 경로 중간에 X를 경유하는 운반 중 로봇이 있으면 재계획.
+이유: 경로 계획 시 empty였던 노드에 선반이 나중에 놓임 → 통과 불가.
 
 ### F 노드 — 선반 가용성 6분기 (`_get_shelf_availability`)
 
@@ -328,15 +364,25 @@ IDLE → MOVING_TO_SHELF → PICKING_UP_SHELF → DELIVERING_TO_WS → WAITING_F
 | AT_WORKSTATION | WS 회랑 점유 중 | `'pending'` |
 | AT_WORKSTATION | 진입 가능 | `'direct'` → WS로 직행 |
 
+### A* 회전 최소화 (turn_penalty)
+
+```python
+astar_with_time(turn_penalty=0.3, start_heading=robot.heading)
+# state: (node, time, dir)
+# 방향 전환 시 cost += 0.3
+# start_heading 전달 → 현재 진행 방향 연속 우선 → 불필요한 회전 줄임
+```
+
 ### STG — 작업대 회랑 게이팅
 
 - `_plan_and_publish_move()` 내에서 `should_stage()` 자동 호출
 - ⚠️ staging 체크는 `start==goal` 즉시도착 처리보다 **반드시 먼저** 실행 (Bug B 교훈)
+- 스테이징 중 회랑 해제 시 `_retry_blocked_robots()` → 대기 로봇 자동 재시도
 
-### TRG — 마커 트리거 + 위치 기반 해제 (수정 20)
+### TRG — 마커 트리거 + 위치 기반 해제
 
-- ArUco 마커 통과 시 `handle_marker_trigger()` → 대기 AGV 해제 (백업)
-- 위치 기반: `is_exiting=True` 로봇이 회랑 구역({ws, gateway}) 밖으로 나가면 자동 해제 (주)
+- ArUco 마커 통과 → `/agv/marker` 발행 → `handle_marker_trigger()` → 대기 AGV 해제
+- 위치 기반: `is_exiting=True` 로봇이 회랑 구역({ws, gateway}) 밖으로 나가면 자동 해제
 
 ### Node U — 복귀 중 인터셉트
 

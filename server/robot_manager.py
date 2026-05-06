@@ -37,6 +37,12 @@ class Robot:
     current_task: Optional[Dict[str, Any]] = None
     task_queue: List[Dict[str, Any]] = field(default_factory=list)
 
+    # 명령 기반 이동
+    heading: int = 0                                 # 현재 방향 (0=북, 90=동, 180=남, 270=서)
+    heading_initialized: bool = False                # 첫 마커 보고로 heading 확인됐는지 여부
+    command_queue: List[str] = field(default_factory=list)  # 전송 대기 명령 리스트
+    planned_path: List[int] = field(default_factory=list)   # 현재 계획된 노드 경로
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "rid": self.rid,
@@ -48,6 +54,7 @@ class Robot:
             "current_task_id": self.current_task_id,
             "current_task": self.current_task,
             "queue_length": len(self.task_queue),
+            "heading": self.heading,
         }
 
 
@@ -98,9 +105,22 @@ class RobotManager:
         """모든 로봇 조회"""
         return list(self.robots.values())
 
-    def get_available_robot(self, target_node: int = None, path_planner=None) -> Optional[Robot]:
+    def get_available_robot(
+        self,
+        target_node: int = None,
+        path_planner=None,
+        dedicated_rid: int = None,  # [DEMO MODE] 지정 시 해당 로봇만 반환 (idle이면)
+    ) -> Optional[Robot]:
         """유휴 로봇 조회 (target_node 지정 시 가장 가까운 로봇 우선)"""
-        idle_robots = [r for r in self.robots.values() if r.status == RobotStatus.IDLE]
+        # [DEMO MODE] 특정 로봇 전담 배정
+        if dedicated_rid is not None:
+            robot = self.robots.get(dedicated_rid)
+            if robot and robot.status == RobotStatus.IDLE and robot.heading_initialized:
+                return robot
+            return None  # 전담 로봇이 유휴가 아니면 대기
+
+        idle_robots = [r for r in self.robots.values()
+                       if r.status == RobotStatus.IDLE and r.heading_initialized]
         if not idle_robots:
             return None
 

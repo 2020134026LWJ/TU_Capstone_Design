@@ -29,17 +29,14 @@ class ScheduledTask:
 class TaskScheduler:
     """작업 스케줄러 - 물품 피킹 순서 최적화"""
 
-    # 노드 좌표 (맵 기준, 4x8 그리드)
+    # 노드 좌표 (맵 기준, 6×8 그리드)
     NODE_COORDS = {
-        # 그리드 노드 (1-32)
-        **{i: ((i-1) % 8, (i-1) // 8) for i in range(1, 33)},
-        # 작업대 노드
-        33: (-1, 0),   # W1
-        34: (-1, 3),   # W2
+        # 그리드 노드 (1-48): col = (id-1)%8, row = (id-1)//8
+        **{i: ((i-1) % 8, (i-1) // 8) for i in range(1, 49)},
     }
 
     # 선반 노드 목록
-    SHELF_NODES = {11, 12, 14, 15, 19, 20, 22, 23}
+    SHELF_NODES = {19, 20, 22, 23, 27, 28, 30, 31}
 
     def __init__(self, db_loader: DBLoader):
         self.db_loader = db_loader
@@ -251,7 +248,9 @@ class TaskScheduler:
         print("\n" + "=" * 60)
         print(f"  주문 스케줄: 사용자 {schedule['user_id']}, 주문 {schedule['order_id']}")
         print("=" * 60)
-        print(f"  작업대: {schedule['workstation']} (W{'1' if schedule['workstation'] == 33 else '2'})")
+        ws = schedule['workstation']
+        ws_label = {33: "W1", 9: "W2"}.get(ws, f"WS{ws}")  # W1=33, W2=9
+        print(f"  작업대: {ws} ({ws_label})")
         print(f"  총 물품: {schedule['total_items']}개")
         print(f"  방문 선반: {schedule['total_shelves']}개")
         print("-" * 60)

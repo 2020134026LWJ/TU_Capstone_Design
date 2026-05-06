@@ -13,10 +13,10 @@ from typing import Dict, List, Optional, Tuple
 class DBLoader:
     """엑셀 DB 로더"""
 
-    # 선반 번호 → 노드 ID 매핑
+    # 선반 번호 → 노드 ID 매핑 (6×8 그리드 기준)
     SHELF_NODE_MAP = {
-        "1-1": 11, "1-2": 12, "1-3": 14, "1-4": 15,
-        "2-1": 19, "2-2": 20, "2-3": 22, "2-4": 23,
+        "1-1": 19, "1-2": 20, "1-3": 22, "1-4": 23,
+        "2-1": 27, "2-2": 28, "2-3": 30, "2-4": 31,
     }
 
     def __init__(self, db_dir: str):
@@ -95,8 +95,8 @@ class DBLoader:
             quantity = int(row["개수"])
             items.append({"name": item_name, "quantity": quantity})
 
-        # 작업대: 사용자1 → W1(33), 사용자2 → W2(34)
-        workstation_id = 33 if user_id == 1 else 34
+        # 작업대: 사용자1 → W1(33), 사용자2 → W2(9)
+        workstation_id = 33 if user_id == 1 else 9
 
         return {
             "workstation_id": workstation_id,

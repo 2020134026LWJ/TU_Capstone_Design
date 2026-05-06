@@ -1,21 +1,15 @@
 """
-Step 6 — 바퀴 회전 + 차체 방향 전환 + 시각적 현실감 개선
+Step 7 — Kinematic Physics
 
-step5_camera_aruco.py 기반 변경사항:
-  1. 모터 추상화 (hardware/isaac_hw.py):
-       IsaacMotors.set_speeds(left, right) — RPi/STM32 와 동일 시그니처
-       실물 전환 시 IsaacMotors → RaspiMotors 교체만 하면 됨
-  2. Navigator 방식 이동 (Webots 와 동일):
-       TURNING (제자리 회전) → MOVING (직진+각도 보정)
-  3. 바퀴 회전: 실제 선속도 기반 wheel_angle 누적
-  4. 시각 개선: 색상 팔레트 · 센서 범프 · LED · 작업대 두께
-  5. CAD 경로 설정 (CAD_PATHS):
-       None = 기본 도형 사용
-       경로 지정 시 USD 파일 로드 (CAD 파일 교체 포인트)
+step6_visual.py 기반 변경사항:
+  1. VisualCuboid -> DynamicCuboid (AGV 바디): 물리 충돌 감지 등록
+  2. 선반 루트에 RigidBodyAPI(kinematic) + 보이지 않는 collision box 추가
+  3. 바닥에 CollisionAPI 추가 (정적 충돌체)
+  이동 로직(xformOp:translate Set)은 step6와 동일 유지
 
 실행:
     ~/isaacsim/_build/linux-x86_64/release/python.sh \\
-        /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step6_visual.py
+        /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step7_kinematic.py
 """
 
 from isaacsim import SimulationApp
@@ -39,12 +33,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.join(_HERE, "..")
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-from pxr import UsdGeom, UsdShade, UsdLux, Sdf, Vt, Gf
+from pxr import UsdGeom, UsdShade, UsdLux, Sdf, Vt, Gf, UsdPhysics
 import omni.usd
 import omni.appwindow
 
 from isaacsim.core.api import World
-from isaacsim.core.api.objects import VisualCuboid, VisualCylinder, VisualSphere
+from isaacsim.core.api.objects import VisualCuboid, VisualCylinder, VisualSphere, DynamicCuboid
 from isaacsim.core.utils.viewports import set_camera_view
 
 from hardware.isaac_hw import IsaacMotors
@@ -751,6 +745,14 @@ def build_shelf(stage, node_id: int, x: float, y: float):
                 scale=np.array([iw, id_, ih]), color=color,
             )
 
+    # 선반 전체를 감싸는 보이지 않는 collision box (물리 충돌 전용)
+    col_prim = UsdGeom.Cube.Define(stage, f"{root}/collision_box").GetPrim()
+    col_xform = UsdGeom.Xformable(col_prim)
+    col_xform.AddScaleOp().Set(Gf.Vec3f(0.78, 0.78, LEG_HEIGHT))
+    col_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, LEG_HEIGHT / 2.0))
+    UsdPhysics.CollisionAPI.Apply(col_prim)
+    col_prim.GetAttribute("visibility").Set("invisible")
+
 
 def build_workstation(stage, node_id: int, x: float, y: float):
     """작업대 빌드 — WS 노드 왼쪽에 나란히 배치 (같은 Y 레벨)
@@ -891,11 +893,12 @@ def build_agv(stage, rid: int, x: float, y: float) -> bool:
         _load_usd(stage, f"{root}/mesh", CAD_PATHS["agv"])
         return False  # CAD 모드
 
-    # 기본 도형
-    VisualCuboid(
+    # 기본 도형 — AGV 바디: DynamicCuboid (물리 충돌 감지)
+    DynamicCuboid(
         prim_path=f"/World/AGV_{rid}_body", name=f"agv_{rid}_body",
         position=np.array([x, y, IsaacAGV.BODY_Z]),
         scale=np.array([0.38, 0.38, 0.08]), color=c_agv,
+        mass=50.0,
     )
     for i, (dx, dy) in enumerate(IsaacAGV.WHEEL_OFFSETS):
         VisualCylinder(
@@ -1032,6 +1035,30 @@ for node_id in shelf_node_ids:
 for agv in agvs.values():
     agv._sync_prim(stage)
 
+# ─── 물리 레이어 초기화 ─────────────────────────────────────────────────────
+# AGV 바디 → kinematic (코드가 위치 직접 제어, 물리엔진은 충돌만 감지)
+for agv in agvs.values():
+    prim = stage.GetPrimAtPath(f"/World/AGV_{agv.rid}_body")
+    if prim.IsValid():
+        rb = UsdPhysics.RigidBodyAPI.Apply(prim)
+        rb.CreateKinematicEnabledAttr(True)
+
+# 선반 루트 → kinematic rigid body (자식 collision_box가 충돌 담당)
+for nid in shelf_node_ids:
+    prim = stage.GetPrimAtPath(f"/World/Shelf_{nid}")
+    if prim.IsValid():
+        rb = UsdPhysics.RigidBodyAPI.Apply(prim)
+        rb.CreateKinematicEnabledAttr(True)
+        UsdPhysics.MassAPI.Apply(prim).CreateMassAttr().Set(30.0)
+
+# 바닥 → 정적 충돌체 (RigidBody 없음 = 움직이지 않는 충돌면)
+floor_prim = stage.GetPrimAtPath("/World/Floor")
+if floor_prim.IsValid():
+    UsdPhysics.CollisionAPI.Apply(floor_prim)
+
+print("  물리 레이어 초기화 완료")
+# ────────────────────────────────────────────────────────────────────────────
+
 print("  선반/작업대/AGV 배치 완료")
 
 for node_id, node in nodes.items():
@@ -1071,10 +1098,11 @@ set_camera_view(
 
 print()
 print("=" * 60)
-print("  Isaac Sim 5.1.0 — Step 6: 커맨드 기반 제어 + 차동구동 + 시각")
+print("  Isaac Sim 5.1.0 — Step 7: Kinematic Physics + cmd-based 제어")
 print("=" * 60)
 print(f"  AGV-1 홈: {robot_homes[1]}  AGV-2 홈: {robot_homes[2]}")
 print(f"  이동 방식: TURNING({TURN_SPEED:.2f}m/s) -> MOVING({MOVE_SPEED}m/s)")
+print(f"  물리: AGV 바디(kinematic) + 선반(kinematic+collision) + 바닥(static)")
 print(f"  모터: IsaacMotors  카메라: IsaacCamera  브릿지: Bridge(callback)")
 print(f"  [실물 전환] 모터: RaspiMotors / 카메라: RpiCamera / Bridge(uart)")
 cad_active = [k for k, v in CAD_PATHS.items() if v]

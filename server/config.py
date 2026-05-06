@@ -17,12 +17,10 @@ class Config:
     # MQTT 설정
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
-    mqtt_topic_plan: str = "/agv/plan"
+    mqtt_topic_cmd: str = "/agv/cmd"          # 서버 → AGV 개별 명령
+    mqtt_topic_marker: str = "/agv/marker"    # AGV → 서버 마커 인식 보고
+    mqtt_topic_cmd_ack: str = "/agv/cmd_ack"  # AGV → 서버 명령 완료 보고
     mqtt_topic_state: str = "/agv/state"
-    mqtt_topic_shelf_cmd: str = "/agv/shelf_cmd"
-    mqtt_topic_shelf_ack: str = "/agv/shelf_ack"
-    mqtt_topic_task_status: str = "/agv/task_status"
-    mqtt_topic_control: str = "/agv/control"
 
     # WebSocket 설정
     websocket_host: str = "0.0.0.0"

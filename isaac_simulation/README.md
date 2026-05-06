@@ -27,15 +27,18 @@ Isaac Sim 5.1.0으로 시뮬레이션 환경 구성 중.
 ```
 +------------------+     MQTT      +----------------+     MQTT      +------------------+
 |  warehouse_gui   | ----------->  |  AGV 서버      | ----------->  |  AGV (Isaac Sim) |
-|  (Kivy, RPi)     |  주문/완료    |  (Python)      |  /agv/plan   |  Isaac Sim 5.1.0 |
-+------------------+               +----------------+  /agv/control +------------------+
-                                          |              /agv/shelf_cmd      |
-+------------------+     HTTP      +------+-------+                          |
-|  warehouse_server| <-----------> |   SQLite DB  |  /agv/arrived           |
-|  (Flask, 재고DB)  |              |   주문/재고   | <------------------------+
-+------------------+               +--------------+  /agv/shelf_ack
-                                                     /agv/marker
+|  (Kivy, RPi)     |  주문/완료    |  (Python)      |  /agv/cmd    |  Isaac Sim 5.1.0 |
++------------------+               +----------------+               +------------------+
+                                          |                                  |
++------------------+     HTTP      +------+-------+    /agv/marker           |
+|  warehouse_server| <-----------> |   SQLite DB  | <------------------------+
+|  (Flask, 재고DB)  |              |   주문/재고   |  /agv/cmd_ack
++------------------+               +--------------+
 ```
+
+**cmd-based 통신 개요:**
+- 서버 → AGV: `/agv/cmd` 에 단일 명령 (forward/turn_left/turn_right/turn_180/lift_up/lift_down)
+- AGV → 서버: `/agv/marker` (마커 감지 + heading), `/agv/cmd_ack` (회전/리프트 완료)
 
 ### 구성 요소
 
@@ -59,12 +62,18 @@ TU_Capstone_Design/
 |   +-- step2_environment.py    # Step 2: 선반, 작업대, ArUco 마커
 |   +-- step3_agv_mqtt.py       # Step 3: AGV 이동 + MQTT 연동
 |   +-- step4_lift_shelf.py     # Step 4: 리프트 + 선반 이동 (USD API)
-|   +-- step5_camera_aruco.py   # Step 5: 가상 카메라 ArUco 감지
-|   +-- step6_visual.py         # Step 6: 모터 추상화 + 차동구동 + 시각 개선 (현재)
-|   +-- hardware/
-|   |   +-- __init__.py
-|   |   +-- isaac_hw.py         # IsaacMotors — 실물 전환 시 RaspiMotors로 교체
+|   +-- step5_camera_aruco.py   # Step 5: 가상 카메라 ArUco 감지 (cmd-based)
+|   +-- step6_visual.py         # Step 6: 바퀴 회전 + 차체 방향 + 시각 개선 (현재)
 |   +-- README.md               # 이 파일
+|
++-- hardware/                   # AGV 하드웨어 추상화 (시뮬/실물 공용)
+|   +-- __init__.py
+|   +-- camera.py               # RpiCamera / IsaacCamera 공통 ABC
+|   +-- isaac_hw.py             # IsaacMotors (시뮬레이터용)
+|   +-- rpi/
+|   |   +-- __init__.py
+|   |   +-- bridge.py           # MQTT ↔ UART 브릿지
+|   |   +-- main.py             # RPi 진입점
 |
 +-- server/                     # AGV 서버 (시뮬레이터와 무관, MQTT 기반)
 |   +-- main.py                 # 서버 진입점
@@ -78,7 +87,7 @@ TU_Capstone_Design/
 |   +-- path_planner.py         # A* 시간 기반 경로 계획
 |   +-- mqtt_publisher.py       # MQTT 발행
 |   +-- db_loader.py            # 엑셀 주문 DB 로더
-|   +-- map.json                # 8x4 그리드 맵 (34노드)
+|   +-- map.json                # 8x6 그리드 맵 (48노드)
 |   +-- shelf_config.json       # 선반/물품/작업대 설정
 |   +-- robot_config.json       # AGV 홈 노드 등
 |   +-- Database/               # 주문 엑셀 데이터 (db_loader가 읽음)
@@ -104,22 +113,27 @@ TU_Capstone_Design/
 ## 3. 맵 구조
 
 ```
-W1(33)-- 1 - 2 - 3 - 4 - 5 - 6 - 7 - 8    (row 0, 통로)
+W2(9)--- 1 - 2 - 3 - 4 - 5 - 6 - 7 - 8    (row 0, 통로)
           |   |   |   |   |   |   |   |
-          9 -10 -[11]-[12]-13-[14]-[15]-16   (row 1, []=선반)
+W2(9)---  9 -10 -11 -12 -13 -14 -15 -16    (row 1, W2 작업대)
           |   |   |   |   |   |   |   |
          17 -18 -[19]-[20]-21-[22]-[23]-24   (row 2, []=선반)
           |   |   |   |   |   |   |   |
-W2(34)-- 25 -26 -27 -28 -29 -30 -31 -32    (row 3, 통로)
+         25 -26 -[27]-[28]-29-[30]-[31]-32   (row 3, []=선반)
+          |   |   |   |   |   |   |   |
+W1(33)-- 33 -34 -35 -36 -37 -38 -39 -40    (row 4, W1 작업대)
+          |   |   |   |   |   |   |   |
+         41 -42 -43 -44 -45 -46 -47 -48    (row 5, 통로)
 ```
 
 | 항목 | 값 |
 |------|----|
-| 전체 노드 | 34개 (8x4 그리드 + 작업대 2개) |
-| 선반 노드 | 8개 — 11, 12, 14, 15, 19, 20, 22, 23 |
-| 작업대 | W1=33, W2=34 |
-| W1 회랑 | gateway=1, staging=9, trigger=2 |
-| W2 회랑 | gateway=25, staging=17, trigger=26 |
+| 전체 노드 | 48개 (8×6 그리드) |
+| 선반 노드 | 8개 — 19, 20, 22, 23, 27, 28, 30, 31 |
+| 작업대 | W1=33 (user_id=1), W2=9 (user_id=2) |
+| W1 회랑 | gateway=25, staging=25, trigger=34 |
+| W2 회랑 | gateway=17, staging=17, trigger=10 |
+| AGV 홈 | AGV-1: node 9 (W2), AGV-2: node 33 (W1) |
 | 노드 타입 | M(통로), S(선반), W(작업대) |
 
 ---
@@ -130,35 +144,34 @@ W2(34)-- 25 -26 -27 -28 -29 -30 -31 -32    (row 3, 통로)
 
 | 토픽 | 방향 | 설명 |
 |------|------|------|
-| `/agv/plan` | Server -> AGV | 경로 계획 (노드 경로 + 타임스텝) |
-| `/agv/shelf_cmd` | Server -> AGV | 선반 리프트 명령 (pickup / putdown) |
-| `/agv/control` | Server -> AGV | resume 명령 (NODE_WAIT 해제) |
-| `/agv/arrived` | AGV -> Server | 목표 노드 도착 / 중간 노드 위치 보고 |
-| `/agv/shelf_ack` | AGV -> Server | 리프트 동작 완료 알림 |
-| `/agv/marker` | AGV -> Server | ArUco 마커 감지 (트리거 노드 통과) |
-| `agv/algorithm` | GUI/CLI -> Server | 주문/완료 명령 수신 |
-| `warehouse/agv/at_ws` | Server -> GUI | AGV 작업대 도착 알림 (선반 셀 활성화) |
+| `/agv/cmd` | Server → AGV | 이동/회전/리프트 명령 |
+| `/agv/marker` | AGV → Server | ArUco 마커 감지 (위치 + heading) |
+| `/agv/cmd_ack` | AGV → Server | 회전/리프트 완료 알림 |
+| `agv/algorithm` | GUI/CLI → Server | 주문/완료 명령 수신 |
+| `warehouse/agv/at_ws` | Server → GUI | AGV 작업대 도착 알림 (선반 셀 활성화) |
 
 ### 메시지 형식
 
-경로 발행:
+서버 → AGV 명령 (`/agv/cmd`):
 ```json
-{
-  "robots": [
-    {
-      "rid": 1,
-      "start": 33,
-      "goal": 11,
-      "node_path": [33, 1, 9, 10, 11],
-      "timed_path": [{"node": 33, "t": 0}, {"node": 1, "t": 1}, ...]
-    }
-  ]
-}
+{"rid": 1, "cmd": "forward"}
+{"rid": 1, "cmd": "turn_left"}
+{"rid": 1, "cmd": "turn_right"}
+{"rid": 1, "cmd": "turn_180"}
+{"rid": 1, "cmd": "lift_up"}
+{"rid": 1, "cmd": "lift_down"}
 ```
 
-선반 리프트 명령:
+AGV → 서버 위치 보고 (`/agv/marker`):
 ```json
-{"rid": 1, "command": "pickup", "shelf_id": 11}
+{"rid": 1, "marker_id": 14, "heading": 90, "ts": 1700000000}
+```
+- `heading`: 0=North, 90=East, 180=South, 270=West
+
+AGV → 서버 완료 알림 (`/agv/cmd_ack`):
+```json
+{"type": "cmd_ack", "rid": 1, "cmd": "turn_left", "status": "done"}
+{"type": "cmd_ack", "rid": 1, "cmd": "lift_up",   "status": "done"}
 ```
 
 주문 시작:
@@ -351,12 +364,12 @@ get_next_pending_task_fair()  : 활성 로봇이 적은 WS 태스크 우선 배�
 
 | 단계 | 내용 | 상태 |
 |------|------|------|
-| Step 1 | 8x4 창고 씬 레이아웃 확인 | 완료 |
+| Step 1 | 8x6 창고 씬 레이아웃 확인 | 완료 |
 | Step 2 | ArUco 바닥 마커 + 3층 선반 + 작업대 | 완료 |
 | Step 3 | AGV 이동 + MQTT 연동 | 완료 |
 | Step 4 | 리프트 애니메이션 + 선반 이동 (USD API) | 완료 |
-| Step 5 | 가상 카메라 ArUco 감지 (근접 기반) | 완료 |
-| Step 6 | 모터 추상화 + 차동구동 이동 + 바퀴 회전 + 시각 개선 | 검증 진행 중 |
+| Step 5 | 가상 카메라 ArUco 감지 (근접 기반, cmd-based) | 완료 |
+| Step 6 | 바퀴 회전 + 터치스크린 + 선반 orient 유지 (코드 완료) | 🔲 런타임 검증 필요 |
 
 ### 실행 방법
 
@@ -397,10 +410,12 @@ Shelf_{node_id} (Xform 루트 — translate/orient 로 이동/회전)
 - 자식 prim을 절대 좌표로 생성 → 루트 translate = delta(dx, dy)
 - 문제: 루트 orient 추가 시 자식이 world 원점 기준으로 회전해 위치가 틀어짐
 
-### Step 6 — 선반 절대좌표 + orient 방식
+### Step 6 — 선반 절대좌표 + orient offset 방식
 
 `world.reset()` 이후에 루트 translate를 설정하면 reset 으로 초기화되지 않는다.
 자식 prim 을 루트 기준 **로컬 좌표**로 생성해야 orient 회전이 올바르게 동작한다.
+
+선반 orient를 pickup 시 고정(offset 저장)하여 운반/내려놓기 중에도 회전이 유지된다.
 
 ```python
 # build_shelf(): 자식을 로컬 좌표로 생성 (x, y 오프셋 제거)
@@ -409,13 +424,20 @@ VisualCuboid(position=np.array([dx * LEG_OFFSET, dy * LEG_OFFSET, LEG_HEIGHT / 2
 # world.reset() 이후: 루트에 translate 추가
 UsdGeom.Xformable(prim).AddTranslateOp().Set(Gf.Vec3d(node_x, node_y, 0.0))
 
-# _sync_shelf(): AGV가 선반 운반 중 — 절대 위치 + heading orient
-xform.translate = (agv.pos[0], agv.pos[1], lift_dz)
-xform.orient    = heading (Z 회전 쿼터니언)
+# execute_cmd("lift_up"): pickup 시 orient offset 저장
+q_shelf = self._read_shelf_orient(shelf_id)        # 현재 선반 orient
+q_agv   = self._heading_quat(self.heading)          # AGV heading → quatf
+q_inv   = Gf.Quatf(q_agv.GetReal(), -q_agv.GetImaginary())
+self.shelf_offset = q_inv * q_shelf                 # heading 대비 offset
 
-# _place_shelf(): putdown 완료 — 원위치 + orient 리셋
+# _sync_shelf(): 운반 중 — 절대 위치 + offset 유지
+orient = self._heading_quat(self.heading) * self.shelf_offset
+xform.translate = (agv.pos[0], agv.pos[1], lift_dz)
+xform.orient    = orient   # heading 바뀌어도 선반 방향 고정
+
+# _place_shelf(): putdown 완료 — 원위치, orient는 그대로 유지
 xform.translate = (orig_x, orig_y, 0.0)
-xform.orient    = identity (1, 0, 0, 0)
+# ⚠️ orient 리셋하지 않음 — 선반 내 물품 배치 방향 유지
 ```
 
 ### Step 5 — 가상 카메라 ArUco 감지
@@ -526,41 +548,28 @@ xform.AddOrientOp(UsdGeom.XformOp.PrecisionFloat).Set(Gf.Quatf(w, Gf.Vec3f(x, y,
 
 ---
 
-### Step 6 — 모터 추상화 + 차동구동 이동 + 시각 개선
+### Step 6 — cmd-based AGV 제어 + 시각 개선
 
-#### 모터 추상화 구조 (hardware/isaac_hw.py)
+#### AGV 이동 방식 (cmd-based)
 
-```
-hardware/
-└── isaac_hw.py     IsaacMotors.set_speeds(left, right)
-                    IsaacMotors.get_velocity() -> (linear, angular)
-
-교체 경로:
-  시뮬레이션: IsaacMotors  (가상 차동구동 계산)
-  실물 RPi  : RaspiMotors  (STM32 UART 명령 전송)
-  시그니처 동일 → 나머지 코드 수정 없음
-```
-
-#### 이동 방식 (Webots Navigator 와 동일)
+서버가 경로를 한 칸씩 분해해서 명령을 발행함. AGV는 명령 하나씩 실행:
 
 ```
-TURNING  : 제자리 회전 (목표 방향으로 heading 정렬)
-           set_speeds(-speed, +speed) / (+speed, -speed)
-           오버슈트 방지: min(1.0, abs(diff) / 0.5) × TURN_SPEED
-
-MOVING   : 직진 + 각도 보정
-           correction = clip(angle_error × 2.0, -0.5, 0.5)
-           set_speeds(MOVE_SPEED - correction, MOVE_SPEED + correction)
+IDLE
+  ├─ forward  → 현재 heading 방향으로 직선 이동 → 마커 감지 시 완료
+  ├─ turn_left / turn_right / turn_180 → 제자리 회전 → cmd_ack 발행
+  ├─ lift_up / lift_down → 리프트 → cmd_ack 발행
+  └─ 완료 후 IDLE (다음 명령 대기)
 ```
 
-#### 바퀴 회전 원리
+#### 바퀴 회전 시각 효과
 
 ```python
-# MOVING 중: 실제 이동 거리 기반 누적
-self.wheel_angle += abs(v) * dt / WHEEL_RADIUS   # arc = distance / radius
+# forward 이동 중: 이동 거리 기반 누적
+self.wheel_angle += abs(v) * dt / WHEEL_RADIUS
 
-# 쿼터니언: 90°X 기본자세 + world-Y 롤링
-q_wheel = q_roll(wheel_angle, Y축) * q_base(90°, X축)
+# 쿼터니언: 90°X 기본자세 + world-Y 롤링 + heading 방향 반영
+q_wheel = q_head(heading) * q_roll(wheel_angle) * q_base(90°X)
 ```
 
 #### CAD 교체 포인트
@@ -574,29 +583,34 @@ CAD_PATHS = {
 }
 ```
 
-### MQTT 스레드 안전성 (step5 핵심 패턴)
+### MQTT 스레드 안전성 (step6 핵심 패턴)
 
 MQTT 콜백은 별도 스레드에서 실행되므로, AGV 상태를 직접 수정하면 race condition 발생.
-pending 필드를 통해 main loop에서만 상태를 변경한다.
+`_pending_cmd` 필드를 통해 main loop에서만 상태를 변경한다.
 
 ```python
-# MQTT 스레드: pending에 저장만
-agv._pending_plan = (node_path, goal)
+# MQTT 콜백 (Bridge._on_cmd): pending에 저장만
+agv._pending_cmd = msg["cmd"]
 
-# main loop: pending 소비 후 상태 변경
-if agv._pending_plan is not None:
-    node_path, goal = agv._pending_plan
-    agv._pending_plan = None
-    if agv.state == "IDLE":
-        agv.pos = node_xy(start_node).copy()
-        agv.set_plan(...)
-    elif agv.state == "NODE_WAIT" and agv.current_node == start_node:
-        # 이미 해당 노드 대기 중 -> arrived 재발행해서 서버 resume 트리거
-        agv.path_queue = list(node_path[1:])
-        bridge._publish_arrived(agv.rid, start_node)
-    else:
-        # MOVING 중 -> path만 교체
-        agv.path_queue = list(node_path[1:])
+# main loop: IDLE 상태일 때만 소비
+if agv._pending_cmd is not None and agv.state == "IDLE":
+    cmd = agv._pending_cmd
+    agv._pending_cmd = None
+    agv.execute_cmd(cmd)   # forward/turn_left/turn_right/turn_180/lift_up/lift_down
+
+# execute_cmd 처리:
+# - forward   : 현재 heading 방향으로 이동 시작, 마커 감지 시 완료
+# - turn_*    : 회전 완료 후 bridge.publish_cmd_ack(cmd) 발행
+# - lift_up/down : 리프트 완료 후 bridge.publish_cmd_ack("lift_up"/"lift_down") 발행
+```
+
+마커 감지 흐름:
+```python
+# poll_camera() — main loop에서 호출
+(marker_id, heading) = camera.detect()
+if marker_id is not None:
+    bridge.publish_marker(agv.rid, marker_id, heading)  # → /agv/marker
+    # 서버가 위치 갱신 후 다음 명령 발행
 ```
 
 ---
@@ -671,26 +685,57 @@ python3 warehouse_gui.py
 ```
 +---------------------------+
 |      Raspberry Pi 5       |  상위 제어부
-|  - MQTT 수신 (/agv/plan)  |
+|  - MQTT 수신 (/agv/cmd)   |
 |  - 카메라: ArUco 감지     |
-|  - UART -> STM32 명령     |
+|  - UART → STM32 명령      |
 +---------------------------+
-           | UART
+           | UART 115200bps
 +---------------------------+
 |          STM32            |  하위 제어부
 |  - 모터 드라이버 (바퀴)   |
-|  - 리니어 액추에이터 (리프트) |
-|  - 엔코더 피드백          |
+|  - 리프트 액추에이터      |
+|  - 인코더 피드백          |
 +---------------------------+
 ```
 
 ### AGV 실물 통신 흐름
 
 ```
-서버 --MQTT--> RPi --UART--> STM32 --PWM--> 모터/액추에이터
-서버 <-MQTT-- RPi <-UART-- STM32          (arrived, shelf_ack)
-카메라 -> RPi (OpenCV ArUco) --MQTT--> 서버 (marker)
+서버 --MQTT(/agv/cmd)--> RPi --UART--> STM32 --PWM--> 모터/리프트
+서버 <-MQTT(/agv/marker, /agv/cmd_ack)-- RPi <-UART-- STM32
+카메라 → RPi (OpenCV ArUco) --MQTT(/agv/marker)--> 서버
 ```
+
+### 하드웨어 추상화 계층 (hardware/)
+
+```
+hardware/
+├── __init__.py
+├── camera.py          ← RpiCamera / IsaacCamera 공통 ABC
+├── isaac_hw.py        ← IsaacMotors (시뮬레이터용 가상 모터)
+└── rpi/
+    ├── __init__.py
+    ├── bridge.py      ← MQTT ↔ UART 브릿지 (두 모드 동일 클래스)
+    └── main.py        ← RPi 진입점
+```
+
+**Bridge 두 모드:**
+```python
+# Isaac Sim 콜백 모드 (step6_visual.py)
+bridge = Bridge(rid=1, cmd_handler=agv._on_cmd_from_bridge)
+bridge.connect()   # MQTT만 연결, UART 없음
+
+# RPi 실물 모드 (hardware/rpi_main.py)
+bridge = Bridge(rid=1)   # cmd_handler=None → UART 모드
+bridge.open_uart()        # UART 포트 열기 + 수신 스레드
+bridge.connect()
+```
+
+**실물 전환 체크리스트:**
+1. `hardware/bridge.py`: `UART_ENABLED = True`, `MQTT_HOST = "서버IP"`
+2. `camera_calibration.pkl` 파일 준비
+3. RPi에서: `python3 hardware/rpi_main.py <rid>`
+4. 서버 코드 변경 없음 (MQTT 토픽 동일)
 
 ---
 
@@ -705,78 +750,63 @@ python3 warehouse_gui.py
 
 ### 발표 후 — 하드웨어 연동
 
-#### RPi와 STM32가 어떻게 연결되는가
-
-Python이 C코드를 직접 실행하거나 불러오는 것이 아님.
-RPi(Python)와 STM32(C 펌웨어)는 **UART 케이블로 연결된 별개의 기기**이고,
-서로 **바이트 데이터를 주고받는 방식**으로 통신함.
+#### RPi ↔ STM32 통신 구조
 
 ```
 서버 (노트북)
-  │  MQTT
+  │  MQTT /agv/cmd  {"rid":1, "cmd":"forward"}
   ▼
-RPi (Python — raspi_hw.py)
-  │  UART 케이블 — 속도 명령 바이트 전송
+RPi (Python — hardware/bridge.py)
+  │  UART 패킷: [0xAA][CMD][LEN][PAYLOAD][CRC]
   ▼
 STM32 (C 펌웨어)
   │  PWM
   ▼
-모터 드라이버 → 바퀴
+모터/리프트
 ```
 
-흐름 예시:
-```
-1. 서버가 MQTT로 "/agv/plan" 발행
-2. RPi Python이 수신 → navigation 계산 → 좌우 바퀴 속도(m/s) 결정
-3. raspi_hw.py set_speeds(left, right) 호출
-   → serial.write(bytes([0xAA, left_byte, right_byte, 0x55]))
-   → UART로 STM32에 4바이트 전송
-4. STM32 C 코드가 UART 인터럽트로 수신
-   → 바이트 파싱 → PWM duty cycle 계산 → 모터 구동
-```
+#### UART 패킷 프로토콜 (RPi → STM32)
 
-STM32 C 코드를 Python으로 "불러오는" 것이 아니라,
-**Python이 명령 바이트를 보내면 STM32가 받아서 실행하는 구조**.
+| CMD  | 이름          | PAYLOAD |
+|------|---------------|---------|
+| 0x01 | MOVE_FORWARD  | 없음    |
+| 0x02 | STOP          | 없음    |
+| 0x03 | LIFT_UP       | 없음    |
+| 0x04 | LIFT_DOWN     | 없음    |
+| 0x05 | ROTATE_LEFT   | 없음    |
+| 0x06 | ROTATE_RIGHT  | 없음    |
+| 0x07 | ROTATE_180    | 없음    |
 
----
+#### STM32 → RPi 이벤트
 
-#### STM32 코드 완성 후 연동 방법
+| CMD  | 이름         | 의미                               |
+|------|--------------|------------------------------------|
+| 0x82 | ROTATE_DONE  | 회전 완료 → `/agv/cmd_ack` (turn)  |
+| 0x83 | LIFT_DONE    | 리프트 완료 → `/agv/cmd_ack` (lift)|
+| 0xFF | ACK          | 명령 수신 확인                     |
 
-**Step 1.** STM32 팀이 C 펌웨어에서 UART 프로토콜을 정의함.
-예: `[0xAA][left_speed][right_speed][0x55]` 형식으로 수신하면 모터 구동.
+LIFT_DONE payload: `[1]` = lift_up 완료, `[0]` = lift_down 완료
 
-**Step 2.** `raspi_hw.py`의 `RaspiMotors.set_speeds()` 안에 그 프로토콜에 맞게 채움:
+#### 실물 전환 방법
+
+**Step 1.** `hardware/bridge.py` 설정 변경:
 ```python
-# raspi_hw.py — RaspiMotors.set_speeds() 안
-# TODO 부분을 STM32 팀과 협의한 프로토콜로 채우기
-def set_speeds(self, left: float, right: float):
-    left_byte  = int(max(-100, min(100, left  * 100)) + 128) & 0xFF
-    right_byte = int(max(-100, min(100, right * 100)) + 128) & 0xFF
-    cmd = bytes([0xAA, left_byte, right_byte, 0x55])
-    self._serial.write(cmd)
+UART_ENABLED = True
+UART_PORT    = "/dev/ttyAMA0"
+MQTT_HOST    = "192.168.x.x"   # 서버 PC IP
 ```
 
-**Step 3.** Isaac Sim의 `step6_visual.py`에서 한 줄 교체:
-```python
-# IsaacAGV.__init__ 안 (step6_visual.py)
-
-# 시뮬레이션 (지금)
-from hardware.isaac_hw import IsaacMotors
-self.motors = IsaacMotors()
-
-# 실물 RPi 로 전환할 때
-from hardware.raspi_hw import RaspiMotors   # ← 이 두 줄로 교체
-self.motors = RaspiMotors()                 # ← 나머지 코드 수정 없음
+**Step 2.** RPi에서 실행:
+```bash
+python3 hardware/rpi_main.py 1   # AGV-1
+python3 hardware/rpi_main.py 2   # AGV-2
 ```
 
-navigation 로직(TURNING/MOVING), 서버 MQTT, 충돌 회피 — 모두 수정 불필요.
+**Step 3.** 서버 코드 변경 없음 — `/agv/cmd`, `/agv/marker`, `/agv/cmd_ack` 토픽 동일.
 
 ---
 
 #### CAD 파일 완성 후 적용 방법
-
-CAD 파일(STEP/STL)을 Isaac Sim USD 포맷으로 변환한 뒤,
-`step6_visual.py` 상단의 `CAD_PATHS`에 경로만 입력하면 됨.
 
 ```python
 # step6_visual.py 상단 — 지금은 전부 None (기본 도형 사용)
@@ -787,50 +817,19 @@ CAD_PATHS = {
 }
 ```
 
-CAD 파일이 없는 지금은 VisualCuboid/VisualCylinder 기본 도형을 사용하고,
-CAD 파일이 생기면 경로만 바꾸면 `build_agv()`, `build_shelf()` 함수가 자동으로 USD 파일을 로드함.
-
----
-
-#### ROS2는 왜 나오는가 (지금 당장 필요 없음)
-
-지금 구조는 RPi에서 Python 스크립트 하나가 MQTT + navigation + UART를 모두 처리함.
-이것만으로 충분하고, 발표에도 문제없음.
-
-ROS2는 나중에 RPi 내부 소프트웨어를 **역할별로 분리**하고 싶을 때 선택적으로 도입하는 것:
-
-```
-지금 (MQTT + Python 단일 스크립트)
-  RPi: agv_controller.py 혼자 다 처리
-       ├─ MQTT 수신/발행
-       ├─ navigation 계산
-       ├─ UART → STM32
-
-나중에 ROS2 도입 시 (선택)
-  RPi: 역할별 노드로 분리
-       ├─ MQTT Bridge 노드  ← 서버 MQTT ↔ ROS2 내부 토픽 변환
-       ├─ Navigation 노드   ← cmd_vel 계산
-       ├─ Motor 노드        ← cmd_vel → UART → STM32
-       └─ Camera 노드       ← ArUco 감지 → /agv/marker 발행
-```
-
-ROS2를 써도 서버(노트북)는 수정 없음. RPi 내부 구조만 달라지는 것.
-STM32에 micro-ROS를 올리면 UART 대신 ROS2 토픽으로 직접 통신도 가능하지만 난이도 높음.
-
 ---
 
 #### 전체 하드웨어 연동 순서
 
 | 순서 | 항목 | 구체적 작업 | 난이도 |
 |------|------|------------|--------|
-| 1 | STM32 최소 펌웨어 | UART 수신 → PWM 출력 (C 코드) | 낮음 |
-| 2 | UART 프로토콜 협의 | STM32 팀과 바이트 포맷 정의 | 낮음 |
-| 3 | RPi raspi_hw.py 완성 | set_speeds() UART 채우기 | 낮음 |
-| 4 | Isaac Sim → RPi 전환 | IsaacMotors → RaspiMotors 한 줄 | 낮음 |
-| 5 | CAD 파일 변환 적용 | STEP → USD, CAD_PATHS 입력 | 낮음 |
-| 6 | 카메라 ArUco 실물 | RPi 카메라 + OpenCV 테스트 | 중간 |
-| 7 | 리프트 캘리브레이션 | 선반 높이 대비 스트로크 튜닝 | 중간 |
-| 8 | ROS2 전환 (선택) | RPi 내부 구조만 재작성, 서버 무수정 | 높음 |
+| 1 | UART 프로토콜 연동 | STM32 팀과 패킷 포맷 최종 확인 | 낮음 |
+| 2 | bridge.py UART 활성화 | UART_ENABLED=True, IP 설정 | 낮음 |
+| 3 | RPi 실행 확인 | main.py 1/2 실행 → MQTT ↔ UART 동작 | 낮음 |
+| 4 | 카메라 캘리브레이션 | camera_calibration.pkl 생성 | 중간 |
+| 5 | RpiCamera ArUco 실물 | 마커 감지 + heading 정확도 확인 | 중간 |
+| 6 | 리프트 타이밍 조정 | lift_up/down 완료 타이밍 튜닝 | 중간 |
+| 7 | CAD 파일 적용 | STEP → USD, CAD_PATHS 입력 | 낮음 |
 
 ### 장기 (선택적)
 

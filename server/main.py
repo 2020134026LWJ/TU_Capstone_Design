@@ -88,19 +88,13 @@ class AGVServer:
     def _setup_mqtt_subscriptions(self):
         """AGV 컨트롤러 및 GUI로부터 MQTT 메시지 수신 설정"""
         self.mqtt_publisher.subscribe(
-            "/agv/arrived",
-            lambda data: self._handle_mqtt_arrived(data),
-        )
-        self.mqtt_publisher.subscribe(
-            self.config.mqtt_topic_shelf_ack,
-            lambda data: self._handle_mqtt_shelf_ack(data),
-        )
-        self.mqtt_publisher.subscribe(
-            "/agv/marker",
+            self.config.mqtt_topic_marker,
             lambda data: self._handle_mqtt_marker(data),
         )
-        # [추가] warehouse GUI(라즈베리파이)로부터 주문/선반완료/주문완료 수신
-        # 기존 agv/algorithm 토픽 대신 warehouse/* 토픽 3개로 분리
+        self.mqtt_publisher.subscribe(
+            self.config.mqtt_topic_cmd_ack,
+            lambda data: self._handle_mqtt_cmd_ack(data),
+        )
         self.mqtt_publisher.subscribe(
             "warehouse/order/start",
             lambda data: self._handle_mqtt_gui({
@@ -125,35 +119,22 @@ class AGVServer:
             }),
         )
         print("[AGVServer] MQTT subscriptions ready "
-              "(/agv/arrived, /agv/shelf_ack, /agv/marker, "
+              "(/agv/marker, /agv/cmd_ack, "
               "warehouse/order/start, warehouse/shelf/complete, warehouse/order/complete)")
 
-    def _handle_mqtt_arrived(self, data):
-        """AGV 도착/위치 이벤트 → request_handler 라우팅"""
-        if data.get("type") == "robot_position":
-            self.request_handler.handle_message(json.dumps(data))
-            return
-        data["type"] = "robot_arrived"
-        result = self.request_handler.handle_message(json.dumps(data))
-        print(f"[AGVServer] MQTT arrived: robot {data.get('rid')} at node {data.get('node')} → {result.get('action', '?')}")
-
-    def _handle_mqtt_shelf_ack(self, data):
-        """AGV 선반 리프트 완료 이벤트 → request_handler 라우팅"""
-        data["type"] = "shelf_ack"
-        result = self.request_handler.handle_message(json.dumps(data))
-        print(f"[AGVServer] MQTT shelf_ack: robot {data.get('rid')} {data.get('command')} shelf {data.get('shelf_id')} → {result.get('action', '?')}")
-
     def _handle_mqtt_marker(self, data):
-        """AGV 마커 인식 이벤트 → 스테이징 트리거 처리"""
+        """AGV 마커 인식 → 위치 보고 + 다음 명령 결정"""
+        data["type"] = "marker_report"
+        result = self.request_handler.handle_message(json.dumps(data))
         rid = data.get("rid")
         marker_id = data.get("marker_id")
-        if rid is None or marker_id is None:
-            return
+        print(f"[AGVServer] Marker: AGV-{rid} at node {marker_id} → {result.get('action', '?')}")
 
-        released = self.request_handler.handle_marker_trigger(rid, marker_id)
-        if released:
-            print(f"[AGVServer] Marker trigger: AGV-{rid} at marker {marker_id} → "
-                  f"releasing AGV-{released.rid} to W{released.target_ws}")
+    def _handle_mqtt_cmd_ack(self, data):
+        """AGV 명령 완료 보고 → request_handler 라우팅"""
+        data["type"] = "cmd_ack"
+        result = self.request_handler.handle_message(json.dumps(data))
+        print(f"[AGVServer] cmd_ack: AGV-{data.get('rid')} {data.get('cmd')} → {result.get('action', '?')}")
 
     def _handle_mqtt_gui(self, data):
         """GUI로부터 MQTT 메시지 수신 → request_handler 라우팅"""

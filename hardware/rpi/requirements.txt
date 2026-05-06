@@ -1,3 +1,0 @@
-# RPi Bridge 의존성
-paho-mqtt>=1.6.0
-pyserial>=3.5

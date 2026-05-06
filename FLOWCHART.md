@@ -1014,6 +1014,50 @@ ws_node = robot.home_node
 
 ---
 
+### 수정 27: 인터셉트 inline corridor 해제 → 위임 호출로 통합 (2026-04-29)
+
+**파일**: `server/request_handler.py` (`_try_intercept_returning_shelf`)
+
+**문제**: 인터셉트 시 inline으로 작성된 corridor 해제 로직(약 19줄)이 `staging_manager.release_corridor_without_trigger()`와 비교해 두 가지 누락 존재
+- `corridor.is_exiting = False` 리셋 누락 → 새 점유자가 OCCUPIED + is_exiting=True 잔존 상태로 시작
+- `corridor.state = CorridorState.OCCUPIED` 명시 누락 (큐 승계 케이스) → state 일관성 의존성 위험
+
+**영향**: 인터셉트 직후 `check_position_release`가 corridor_area 밖 이동을 보고 새 AGV(승계자)를 잘못 해제할 수 있음. 시뮬에선 우연히 동작하더라도 회귀 위험.
+
+**수정 내용**: inline 19줄을 `release_corridor_without_trigger()` 호출로 교체 (수정 24 위임 패턴과 일치)
+```python
+# 수정 전 (inline 19줄 — is_exiting 리셋 누락)
+for ws_node, corridor in self.staging_manager.corridors.items():
+    if (corridor.occupying_rid == carrying_robot.rid and
+            corridor.state == CorridorState.OCCUPIED):
+        if corridor.queue:
+            ...
+        else:
+            corridor.state = CorridorState.FREE
+            corridor.occupying_rid = None
+        break
+
+# 수정 후 (위임 호출 — release 함수 내부에서 is_exiting=False, state 일관 처리)
+for ws_node, corridor in self.staging_manager.corridors.items():
+    if corridor.occupying_rid == carrying_robot.rid:
+        released = self.staging_manager.release_corridor_without_trigger(
+            ws_node, carrying_robot.rid
+        )
+        if released:
+            released_robot = self.robot_manager.get_robot(released.rid)
+            if released_robot:
+                self._plan_and_publish_move(
+                    released_robot.rid, released_robot.current_node, ws_node
+                )
+        break
+```
+
+**근거**: 검증 체크리스트 영역 3 NG 1 항목 (검증_체크리스트.md, 2026-04-29 작성)
+
+**수정 파일**: `server/request_handler.py`
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
@@ -1080,20 +1124,38 @@ IDLE → MOVING (선형 보간) → 노드 도착
 
 ---
 
-### Isaac Step 6: 시각적 현실감 개선 (`step6_visual.py`, 예정)
+### Isaac Step 6: 시각적 현실감 개선 (`step6_visual.py`)
 
 **방식**: step5 기반 — 이동 로직/MQTT/서버 변경 없이 시각 레이어만 추가
 
-**구현 목표**:
-- **바퀴 회전**: 이동 속도 기반 RPM → 바퀴 prim `xformOp:rotateX` 매 프레임 갱신
-- **차체 방향 전환**: heading 즉시 전환 → 스무스 보간 (회전 애니메이션)
-- **시각 현실감**: AGV/선반/작업대 디테일 개선 (색상, 비율, 구조)
+**구현 완료 (2026-03-24)**:
+- **바퀴 회전**: `_wheel_quat(angle, heading)` — q_head * q_roll * q_base 쿼터니언 합성
+- **시저리프트 애니메이션**: arm_half=0.14, arccos 공식으로 팔 각도 계산
+- **선반 이동**: 자식 prim 로컬 좌표 + OrientOp (delta 방식 폐기, USD orient 직접 적용)
+- **창고 환경**: 컨베이어, 작업자, 3면 벽, 천장 조명
+- **작업대 터치스크린**: 스탠드 폴 + 암 + 베젤 + 스크린 + 버튼/텍스트 UI 요소
+  - 스크린이 -Y 방향(카메라 정면)을 향하도록 배치
+  - 작업자 위치를 WS 앞쪽(+Y → -Y, 카메라 viewer 쪽)으로 수정
 
-**목적**: 2주 후 발표용 시각적 완성도 확보
-**물리 엔진 전환**: 발표 이후 별도 단계로 진행 (ArticulationRoot + Joint + PID)
+**선반 orient 유지 버그 수정**:
+- **문제**: 선반을 들어올릴 때(lift_up) / 내려놓을 때(lift_down) 순간 OrientOp이 스냅되어 선반 내 물품 배치가 무작위로 바뀌는 현상
+- **원인**: `_sync_shelf`에서 매 프레임 `q_agv(heading)`를 orient로 덮어씌움 → heading 변경 시 선반 회전
+- **수정 내용**:
+  - `execute_cmd("lift_up")`: pickup 시점 선반의 현재 orient 읽기(`_read_shelf_orient()`)
+    - `q_inv = q_agv_inverse`, `self.shelf_offset = q_inv * q_shelf` (AGV heading 대비 상대 offset 저장)
+  - `_sync_shelf()`: `orient = _heading_quat(heading) * shelf_offset` 적용
+    - 이동 중 AGV heading이 바뀌어도 선반은 처음 들어올린 방향 유지
+  - `_place_shelf()`: orient 리셋 없이 translate만 업데이트 → 내려놓을 때도 회전 유지
+- **헬퍼 메서드**: `_heading_quat(heading)`, `_read_shelf_orient(shelf_id)` 추가
 
-**수정 파일**: `isaac_simulation/step6_visual.py` (신규 예정)
-**상태**: 🔲 예정
+**robot_config.json home_node 스왑 (2026-03-24)**:
+- **변경**: AGV-1 home 33→9, AGV-2 home 9→33
+- **이유**: node 25(W1 gateway) 교착 — AGV-2 귀환 경로(26→25→17)가 W1 gateway를 통과하는데 AGV-1이 node 25에서 STG 대기 → 상호 교착
+- **해결**: 각 AGV의 home이 담당 WS와 일치 → 귀환 경로가 서로 다른 corridor 사용
+- **DEMO_MODE 연동**: home_node 기반 WS 자동 배정 → AGV-1(home=9=W2)→W2, AGV-2(home=33=W1)→W1
+
+**수정 파일**: `isaac_simulation/step6_visual.py`, `server/robot_config.json`
+**상태**: 코드 완료, 런타임 검증 필요 🔲
 
 ---
 
