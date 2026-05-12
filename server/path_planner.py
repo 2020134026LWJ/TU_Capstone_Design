@@ -74,6 +74,34 @@ class PathPlanner:
         else:
             return 1 if dx > 0 else 3
 
+    def calc_heading_from_path(
+        self, planned_path: List[int], current_node: int
+    ) -> Optional[int]:
+        """경로에서 현재 노드 기준 heading(도) 계산
+
+        Args:
+            planned_path: 계획된 노드 경로 ([prev_node, ..., current_node, ...])
+            current_node: 기준 노드
+
+        Returns:
+            0=N / 90=E / 180=S / 270=W, 계산 불가 시 None
+        """
+        if not planned_path or current_node not in planned_path:
+            return None
+        idx = planned_path.index(current_node)
+        if idx == 0:
+            return None
+        prev_node = planned_path[idx - 1]
+        px, py = self.nodes.get(prev_node, (None, None))
+        cx, cy = self.nodes.get(current_node, (None, None))
+        if px is None or cx is None:
+            return None
+        dx, dy = cx - px, cy - py
+        if abs(dx) < abs(dy):
+            return 0 if dy > 0 else 180
+        else:
+            return 90 if dx > 0 else 270
+
     def astar_with_time(
         self,
         start: int,

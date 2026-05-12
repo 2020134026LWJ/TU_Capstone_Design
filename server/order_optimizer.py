@@ -1,5 +1,5 @@
 """
-작업 스케줄러 모듈
+주문 최적화 모듈 (구 task_scheduler)
 - 엑셀 주문 목록 로드
 - 물품 → 선반 방문 순서 최적화
 - AGV 경로 효율화를 위한 재배열
@@ -26,8 +26,8 @@ class ScheduledTask:
     distance_from_start: float  # 시작점으로부터 거리
 
 
-class TaskScheduler:
-    """작업 스케줄러 - 물품 피킹 순서 최적화"""
+class OrderOptimizer:
+    """주문 최적화 — 물품 → 선반 방문 순서 결정 (Nearest Neighbor)"""
 
     # 노드 좌표 (맵 기준, 6×8 그리드)
     NODE_COORDS = {
@@ -61,7 +61,7 @@ class TaskScheduler:
             shelf_label = self.db_loader.get_item_shelf_label(item_name)
 
             if shelf_node is None:
-                print(f"[TaskScheduler] Warning: '{item_name}' not found in inventory")
+                print(f"[OrderOptimizer] Warning: '{item_name}' not found in inventory")
                 continue
 
             if shelf_node not in shelf_groups:
@@ -94,7 +94,7 @@ class TaskScheduler:
         shelf_groups = self._group_items_by_shelf(items)
 
         if not shelf_groups:
-            print("[TaskScheduler] No valid items to schedule")
+            print("[OrderOptimizer] No valid items to schedule")
             return []
 
         # 2. Nearest Neighbor 알고리즘으로 방문 순서 결정
@@ -207,14 +207,14 @@ class TaskScheduler:
         # 1. 주문 정보 로드
         order_info = self.db_loader.get_order(user_id, order_id)
         if not order_info:
-            print(f"[TaskScheduler] Order not found: user={user_id}, order={order_id}")
+            print(f"[OrderOptimizer] Order not found: user={user_id}, order={order_id}")
             return None
 
         workstation = order_info["workstation_id"]
         items = [item["name"] for item in order_info["items"]]
 
-        print(f"[TaskScheduler] Loading order: user={user_id}, order={order_id}")
-        print(f"[TaskScheduler] Items: {items}")
+        print(f"[OrderOptimizer] Loading order: user={user_id}, order={order_id}")
+        print(f"[OrderOptimizer] Items: {items}")
 
         # 2. 최적화
         if optimization == "nearest":
@@ -223,11 +223,11 @@ class TaskScheduler:
             tasks = self.optimize_order_by_distance(items, start_node=workstation)
 
         if not tasks:
-            print(f"[TaskScheduler] No tasks scheduled for order {order_id}")
+            print(f"[OrderOptimizer] No tasks scheduled for order {order_id}")
             return None
 
         # 3. 결과 출력
-        print(f"[TaskScheduler] Optimized schedule:")
+        print(f"[OrderOptimizer] Optimized schedule:")
         for task in tasks:
             print(f"  {task.order}. 선반 {task.shelf_label} (노드 {task.shelf_node}): {task.items}")
 
@@ -271,7 +271,7 @@ if __name__ == "__main__":
 
     db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Database")
     db_loader = DBLoader(db_dir)
-    scheduler = TaskScheduler(db_loader)
+    scheduler = OrderOptimizer(db_loader)
 
     # 사용자 1의 주문 1 스케줄링
     schedule = scheduler.schedule_order(user_id=1, order_id=1)

@@ -1058,6 +1058,105 @@ for ws_node, corridor in self.staging_manager.corridors.items():
 
 ---
 
+### 수정 28: Staging 노드 이동 + Staging blocker deadlock 안전망 (2026-05-12)
+
+**문제**: 사용자 1의 4-선반 주문 처리 중 두 AGV가 W33으로 동시 배달하면서 deadlock 발생.
+
+```
+AGV-1: 19 → 27 → 26 → 25 → 33  (corridor 점유, 25 통과 필요)
+AGV-2: 27 → 26 → 25 (staging_wait)
+                ↑ AGV-2가 25 점유 → AGV-1 통과 불가
+```
+
+**근본 원인 (변경 A)**: `staging_node`(25, 17)가 corridor 진입 경로상에 있음. STG = 입구 = 점유 노드 → 대기자가 입구를 막음.
+
+**감지 누락 (변경 B)**: `_retry_blocked_robots()`의 blocker 체크가 `blocker_rid in self._blocked_robots`만 검사. staging AGV는 `command_queue`가 비어있어 `_blocked_robots`에 없음 → deadlock 자동 해결 미발동.
+
+**수정 A — shelf_config.json**: staging 노드를 작업대 반대편으로 이동
+```json
+"33": {"label": "W1", "gateway_node": 25, "staging_node": 41, "trigger_node": 34, ...}
+"9":  {"label": "W2", "gateway_node": 17, "staging_node": 1,  "trigger_node": 10, ...}
+```
+- W1 staging: 25 → **41** (Row 6, 작업대 아래)
+- W2 staging: 17 → **1** (Row 1, 작업대 위)
+- gateway/trigger 그대로 (corridor_area, exit 흐름과 무관)
+
+**효과**: 대기자(staging)와 입구(gateway)가 물리적으로 분리됨. 정상 동작 시 deadlock 발생 불가.
+
+**수정 B — request_handler.py**: staging blocker 감지 + 강제 yield 안전망
+
+1) `_is_staging_robot(rid)` 헬퍼 추가 — corridor.queue 멤버십 검사
+2) `_retry_blocked_robots()`에서 blocker가 `_blocked_robots`에 없어도 staging이면 deadlock 처리 발동
+3) `_resolve_deadlock()`에서 **staging AGV는 무조건 yield** (carrying/rid 비교 이전):
+   ```python
+   if a_staging and not b_staging:
+       yield_rid, block_rid = rid_a, rid_b
+   elif b_staging and not a_staging:
+       yield_rid, block_rid = rid_b, rid_a
+   else:
+       # 기존 우선순위 (carrying > non-carrying, max rid yields)
+   ```
+4) Staging AGV의 Strategy 2 분기: yield_node로 **1-step만 이동** (재계획 안 함). corridor 정상 해제 시 yield_node에서 직접 plan.
+5) `_yielded_staging_robots: Set[int]` 추가 — release 흐름에서 staging_node 미도착 케이스와 구분
+6) Release 흐름 보정 (`_handle_marker_report` 내 `check_position_release` / `handle_marker_trigger` 분기): yielded 상태면 현재 위치(yield_node)에서 곧장 target_ws로 plan
+
+**근거**: 검증 체크리스트 영역 2 의심 미커버 케이스 — 정면(head-on) 교착만 검증되어 있었고, 같은 방향 진행 시 staging 대기자가 점유자를 막는 "side-by-side" 패턴은 누락. Stage 3 런타임에서 실제 발현 확인 → 즉시 보강.
+
+**수정 파일**:
+- `server/shelf_config.json` (변경 A)
+- `server/request_handler.py` (변경 B)
+- `tests/test_stg.py` (staging_node 값 갱신)
+- `tests/test_deadlock.py` (`test_staging_blocker_forces_yield` 추가)
+
+**테스트 결과**: pytest 21 passed (기존 20 + 신규 1)
+
+---
+
+### 수정 29: request_handler 대분리 + 모듈 이름 정리 (2026-05-12)
+
+**배경**: `request_handler.py` 1602줄로 비대 + 일부 파일/클래스 이름이 실제 역할과 안 맞음 (task_scheduler vs task_manager 혼동, mqtt_publisher가 subscribe도 함 등)
+
+**변경 A — Mixin 분리 (3개)**: `request_handler.py` 1602줄 → 195줄 베이스 + 3 Mixin
+
+| Mixin 파일 | 클래스 | 역할 |
+|-----------|-------|------|
+| `_movement_mixin.py` (507줄) | `MovementMixin` | 이동 명령 발행 + 충돌/교착 회피 + 경로 계획 |
+| `_marker_mixin.py` (220줄) | `MarkerMixin` | AGV 이벤트 수신 (marker, cmd_ack, marker_trigger) |
+| `_workflow_mixin.py` (789줄) | `WorkflowMixin` | 주문/태스크/F-노드/인터셉트 워크플로우 |
+
+```python
+class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
+    # 베이스: __init__ (상태 변수 + 매니저), handle_message 라우터, 상태 조회
+```
+
+**변경 B — 파일/클래스 이름 (4쌍)**:
+- `task_scheduler.py / TaskScheduler` → `order_optimizer.py / OrderOptimizer`
+- `mqtt_publisher.py / MQTTPublisher` → `mqtt_client.py / MQTTClient`
+- `_collision_mixin.py / CollisionMixin` → `_movement_mixin.py / MovementMixin`
+- `_task_mixin.py / TaskMixin` → `_workflow_mixin.py / WorkflowMixin`
+
+**변경 C — 로직 이동 (2개)**:
+- `_calc_heading` (`_marker_mixin`) → `path_planner.calc_heading_from_path()` — 좌표 계산은 path_planner 도메인
+- turn heading 갱신 inline (`_marker_mixin._handle_cmd_ack`, 9줄) → `robot_manager.apply_turn(rid, cmd)` (1줄 위임)
+
+**부수 수정**: 잘못된 import 정리
+- `tests/conftest.py:27`, `tests/test_intercept.py:16`, `tests/test_smoke.py:6` — `from TU_Capstone_Design.server.*` → `from server.*`
+
+**검증**: pytest 21 passed 유지 (작업 전후 동일). 매 단계마다 회귀 확인.
+
+**근거**: 코드 가독성/유지보수성 향상 + 향후 yield 로직 등 수정 시 진입 비용 절감. 외부 API 변경 0.
+
+**수정 파일**:
+- `server/request_handler.py` (전면 슬림화)
+- `server/_movement_mixin.py`, `_marker_mixin.py`, `_workflow_mixin.py` (신규)
+- `server/order_optimizer.py`, `mqtt_client.py` (rename)
+- `server/path_planner.py` (calc_heading_from_path 추가)
+- `server/robot_manager.py` (apply_turn 추가)
+- `server/__init__.py`, `server/main.py`, `server/task_manager.py` (참조 갱신)
+- `tests/conftest.py`, `tests/test_intercept.py`, `tests/test_smoke.py` (import 수정)
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.

@@ -78,14 +78,17 @@ TU_Capstone_Design/
 +-- server/                     # AGV 서버 (시뮬레이터와 무관, MQTT 기반)
 |   +-- main.py                 # 서버 진입점
 |   +-- config.py               # 설정값 (포트, 파일경로, MQTT 토픽)
-|   +-- request_handler.py      # 핵심: 요청 처리 + 로봇 배정 알고리즘
+|   +-- request_handler.py      # 195줄 베이스 (라우터)
+|   +-- _movement_mixin.py      # ★ 이동/충돌/yield (수정 29)
+|   +-- _marker_mixin.py        # AGV 이벤트 수신
+|   +-- _workflow_mixin.py      # 주문/태스크 워크플로우
 |   +-- task_manager.py         # 작업 분해 (서브태스크 시퀀스 생성)
-|   +-- task_scheduler.py       # Nearest Neighbor 선반 방문 순서 최적화
+|   +-- order_optimizer.py      # Nearest Neighbor 최적화 (구 task_scheduler)
 |   +-- robot_manager.py        # 로봇 6단계 상태 머신
 |   +-- shelf_manager.py        # 선반 상태 추적
 |   +-- staging_manager.py      # 작업대 회랑 진입/퇴출 게이팅
 |   +-- path_planner.py         # A* 시간 기반 경로 계획
-|   +-- mqtt_publisher.py       # MQTT 발행
+|   +-- mqtt_client.py          # MQTT 클라이언트 publish + subscribe (구 mqtt_publisher)
 |   +-- db_loader.py            # 엑셀 주문 DB 로더
 |   +-- map.json                # 8x6 그리드 맵 (48노드)
 |   +-- shelf_config.json       # 선반/물품/작업대 설정
@@ -113,7 +116,7 @@ TU_Capstone_Design/
 ## 3. 맵 구조
 
 ```
-W2(9)--- 1 - 2 - 3 - 4 - 5 - 6 - 7 - 8    (row 0, 통로)
+          1 - 2 - 3 - 4 - 5 - 6 - 7 - 8    (row 0, 통로)
           |   |   |   |   |   |   |   |
 W2(9)---  9 -10 -11 -12 -13 -14 -15 -16    (row 1, W2 작업대)
           |   |   |   |   |   |   |   |
@@ -131,8 +134,8 @@ W1(33)-- 33 -34 -35 -36 -37 -38 -39 -40    (row 4, W1 작업대)
 | 전체 노드 | 48개 (8×6 그리드) |
 | 선반 노드 | 8개 — 19, 20, 22, 23, 27, 28, 30, 31 |
 | 작업대 | W1=33 (user_id=1), W2=9 (user_id=2) |
-| W1 회랑 | gateway=25, staging=25, trigger=34 |
-| W2 회랑 | gateway=17, staging=17, trigger=10 |
+| W1 회랑 | gateway=25, staging=41, trigger=34 (수정 28: staging 25→41) |
+| W2 회랑 | gateway=17, staging=1,  trigger=10 (수정 28: staging 17→1) |
 | AGV 홈 | AGV-1: node 9 (W2), AGV-2: node 33 (W1) |
 | 노드 타입 | M(통로), S(선반), W(작업대) |
 
@@ -207,14 +210,16 @@ main.py
   +-- WebSocket 서버 시작 (Admin UI)
 
 request_handler.py  [핵심]
-  +-- _handle_start_order()      : 주문 시작 -> DB 로드 -> 선반 배정 -> 경로 발행
+  +-- _handle_start_order()      : 주문 시작 -> DB 로드 -> 선반 배정 -> 명령 발행
   +-- _handle_shelf_complete()   : 선반 피킹 완료 -> 반납 or 포워딩 결정
-  +-- _handle_robot_arrived()    : 최종 도착 -> 다음 서브태스크 실행
-  +-- _handle_robot_position()   : 중간 위치 갱신 -> resume 판단 -> 회랑 해제
-  +-- _handle_pickup_ack()       : 리프트 완료 -> 작업대로 이동 명령
-  +-- _handle_putdown_ack()      : 내려놓기 완료 -> 다음 선반 or IDLE
-  +-- _handle_mqtt_marker()      : ArUco 마커 -> 회랑 해제
-  +-- _plan_and_publish_move()   : STG 체크 포함 경로 계획 + MQTT 발행
+  +-- _handle_marker_report()    : /agv/marker 수신 -> 위치 갱신 -> 다음 cmd 발행
+  +-- _handle_cmd_ack()          : /agv/cmd_ack 수신 -> turn/lift 완료 처리
+  +-- _handle_putdown_ack()      : lift_down 완료 -> 다음 선반 or IDLE
+  +-- _send_next_command()       : forward 충돌 체크 + _reserved_nodes 예약
+  +-- _retry_blocked_robots()    : blocked 재시도 + 교착 감지
+  +-- _resolve_deadlock()        : 우선순위 결정 + 우회/yield 전략
+  +-- _is_staging_robot()        : staging 큐 멤버십 (수정 28)
+  +-- _plan_and_publish_move()   : STG 체크 포함 경로 계획
   +-- _try_assign_pending_tasks(): PENDING 작업 재배정 루프
 
 task_manager.py
@@ -222,8 +227,8 @@ task_manager.py
   +-- handle_shelf_complete()    : 선반 단위 완료 처리
   +-- rotate_shelf_to_end()      : 블록 선반을 순서 뒤로
 
-task_scheduler.py
-  +-- Nearest Neighbor 알고리즘으로 선반 방문 순서 최적화
+order_optimizer.py
+  +-- Nearest Neighbor 알고리즘으로 선반 방문 순서 최적화 (구 task_scheduler)
 
 robot_manager.py
   +-- 6단계 상태 머신 관리
@@ -302,7 +307,7 @@ AGV가 WS로 이동 요청
 ### TRG — ArUco 마커 트리거
 
 ```
-AGV가 trigger 노드(2 or 26) 통과
+AGV가 trigger 노드(W1=34 or W2=10) 통과
   -> /agv/marker 발행
   -> handle_marker_trigger() 호출
   -> 대기 큐의 다음 AGV 해제 -> 새 경로 발행
@@ -321,17 +326,21 @@ _try_intercept_returning_shelf() 호출
   -> FORWARD_SHELF 서브태스크 삽입
 ```
 
-### NODE_WAIT — 서버 기반 노드 단위 이동
+### 충돌 회피 — cmd-based 노드 예약
 
 ```
-AGV 중간 노드 도착
-  -> /agv/arrived (type: robot_position) 발행
-  -> 서버 _is_safe_to_resume() 확인
-        |
-        +-> 안전 (다음 노드에 다른 AGV 없음) -> /agv/control resume 발행
-        |
-        +-> 위험 (충돌 예상)                -> 대기 (다음 도착 시 재확인)
+AGV가 forward 직전:
+  서버 _send_next_command() 충돌 체크
+    +-> next_node 점유/예약 -> _blocked_robots 추가 -> 명령 보류
+    +-> 안전 -> _reserved_nodes[next_node]=rid 예약 + forward 발행
+
+AGV가 마커 도착:
+  /agv/marker 발행 -> 서버 위치 갱신 + _reserved_nodes 해제
+  _retry_blocked_robots() -> 보류 중인 다른 AGV 재시도
+    +-> blocker도 blocked OR staging -> _resolve_deadlock() (수정 28)
 ```
+
+> 구 NODE_WAIT 방식(`/agv/arrived` + `/agv/control` resume)은 cmd-based로 통합됨.
 
 ### F 노드 — 선반 가용성 6분기
 
@@ -710,13 +719,12 @@ python3 warehouse_gui.py
 
 ```
 hardware/
-├── __init__.py
-├── camera.py          ← RpiCamera / IsaacCamera 공통 ABC
-├── isaac_hw.py        ← IsaacMotors (시뮬레이터용 가상 모터)
-└── rpi/
-    ├── __init__.py
-    ├── bridge.py      ← MQTT ↔ UART 브릿지 (두 모드 동일 클래스)
-    └── main.py        ← RPi 진입점
++-- __init__.py
++-- bridge.py       # MQTT <-> UART 브릿지 (두 모드 동일 클래스)
++-- camera.py       # RpiCamera / IsaacCamera 공통 ABC
++-- isaac_hw.py     # IsaacMotors (시뮬레이터용 가상 모터)
++-- rpi_main.py     # RPi 진입점
++-- stm32/          # STM32 C 펌웨어 (CubeIDE)
 ```
 
 **Bridge 두 모드:**
@@ -726,7 +734,7 @@ bridge = Bridge(rid=1, cmd_handler=agv._on_cmd_from_bridge)
 bridge.connect()   # MQTT만 연결, UART 없음
 
 # RPi 실물 모드 (hardware/rpi_main.py)
-bridge = Bridge(rid=1)   # cmd_handler=None → UART 모드
+bridge = Bridge(rid=1)   # cmd_handler=None -> UART 모드
 bridge.open_uart()        # UART 포트 열기 + 수신 스레드
 bridge.connect()
 ```

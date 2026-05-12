@@ -91,13 +91,14 @@ hostname -I
 nano ~/agv_warehouse_system/warehouse_gui_v2.py
 ```
 
-**21번째 줄 수정:**
+**32번째 줄 수정 (`warehouse_gui_v2.py` 기준):**
 ```python
-# 설정
 SERVER_IP = '172.30.1.72'  # ← 노트북 IP로 변경!
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 ```
+
+> 현재 시작 시 IP 입력 팝업이 추가되어 코드 수정 없이도 IP 변경 가능 (config.json에 저장).
 
 **저장: Ctrl+O, Enter, Ctrl+X**
 
@@ -374,7 +375,7 @@ GET http://서버IP:5000/api/picking/user/1/order/1
 
 **해결:**
 1. 노트북 서버가 실행 중인지 확인
-2. SERVER_IP가 올바른지 확인 (21번째 줄)
+2. SERVER_IP가 올바른지 확인 (32번째 줄)
 3. ping 테스트: `ping 서버IP`
 4. 방화벽 확인
 
@@ -480,8 +481,8 @@ WiFi 변경 시 순서대로 진행:
 
 - [ ] **Step 1**: 노트북 새 IP 확인 (`hostname -I`)
 - [ ] **Step 2**: 노트북 서버 재시작
-- [ ] **Step 3**: 라즈베리파이 user1 - `warehouse_gui_v2.py` 21번째 줄 수정
-- [ ] **Step 4**: 라즈베리파이 user2 - `warehouse_gui_v2.py` 21번째 줄 수정
+- [ ] **Step 3**: 라즈베리파이 user1 - `warehouse_gui_v2.py` 32번째 줄 수정
+- [ ] **Step 4**: 라즈베리파이 user2 - `warehouse_gui_v2.py` 32번째 줄 수정
 - [ ] **Step 5**: ping 테스트 (`ping 새IP`)
 - [ ] **Step 6**: HTTP 테스트 (`curl http://새IP:5000/health`)
 - [ ] **Step 7**: GUI 재시작 (user1, user2)

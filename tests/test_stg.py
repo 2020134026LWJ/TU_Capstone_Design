@@ -8,7 +8,10 @@
   - `handle_marker_trigger(rid, marker_id)`: trigger 마커 통과 → 큐 승계 + release
   - `check_position_release(rid, node)`: corridor_area 밖 이동 시 자동 해제 (인터셉트 케이스)
 
-플로우차트 기준 W1=33 (gateway/staging=25, trigger=34) / W2=9 (gateway/staging=17, trigger=10).
+설정 (수정 28 기준):
+  - W1=33: gateway=25, staging=41 (Row 6, 작업대 아래), trigger=34
+  - W2=9:  gateway=17, staging=1  (Row 1, 작업대 위),   trigger=10
+staging_node를 corridor 진입 경로 밖으로 분리 → "대기자가 입구를 막는" deadlock 제거.
 """
 
 import pytest
@@ -22,7 +25,7 @@ from server.staging_manager import CorridorState
 def test_stg_basic_first_enters_second_stages(handler):
     """빈 corridor → 첫 AGV 즉시 진입(None). 점유된 corridor → 두 번째 AGV는 staging_node 반환."""
     sm = handler.staging_manager
-    ws = 33  # W1, staging_node=25
+    ws = 33  # W1, staging_node=41
 
     first = sm.should_stage(ws, incoming_rid=1)
     assert first is None, "빈 corridor → 즉시 진입(None)"
@@ -30,7 +33,7 @@ def test_stg_basic_first_enters_second_stages(handler):
     assert sm.corridors[ws].occupying_rid == 1
 
     second = sm.should_stage(ws, incoming_rid=2)
-    assert second == 25, "이미 점유 → AGV-2는 staging_node(25)로 우회"
+    assert second == 41, "이미 점유 → AGV-2는 staging_node(41)로 우회"
     assert sm.corridors[ws].occupying_rid == 1, "점유자는 그대로"
 
     sm.add_staged_agv(ws, rid=2, staging_node=second)
@@ -65,8 +68,8 @@ def test_release_via_trigger_marker(handler):
     assert corridor.is_exiting is True
 
     # AGV-2가 staged 큐에서 대기
-    assert sm.should_stage(ws, incoming_rid=2) == 25
-    sm.add_staged_agv(ws, rid=2, staging_node=25)
+    assert sm.should_stage(ws, incoming_rid=2) == 41
+    sm.add_staged_agv(ws, rid=2, staging_node=41)
 
     # AGV-1이 trigger 노드 통과
     released = sm.handle_marker_trigger(rid=1, marker_id=trigger_node)

@@ -1,16 +1,17 @@
+# hardware/ — AGV 하드웨어 추상화
 
-.# hardware/ — AGV 하드웨어 추상화
+시뮬레이션(Isaac Sim)과 실물(STM32 + RPi) 양쪽에서 공통으로 쓰는 추상화 레이어.
 
 ## 구조
 
 ```
 hardware/
-├── __init__.py
-├── bridge.py      ← MQTT ↔ UART 브릿지 (Isaac Sim / RPi 공통)
-├── camera.py      ← RpiCamera / IsaacCamera 공통 인터페이스
-├── isaac_hw.py    ← IsaacMotors (Isaac Sim 전용 가상 모터)
-├── rpi_main.py    ← RPi 진입점
-└── stm32/         ← STM32 C 펌웨어
++-- __init__.py
++-- bridge.py      # MQTT <-> UART 브릿지 (Isaac Sim 콜백 / RPi UART 두 모드)
++-- camera.py      # RpiCamera / IsaacCamera 공통 ABC
++-- isaac_hw.py    # IsaacMotors (Isaac Sim 전용 가상 모터)
++-- rpi_main.py    # RPi 진입점
++-- stm32/         # STM32 C 펌웨어 (CubeIDE)
 ```
 
 ---

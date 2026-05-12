@@ -55,6 +55,67 @@ def test_head_on_deadlock_yield_robot_replans(handler, mock_mqtt):
 
 
 @pytest.mark.deadlock
+def test_staging_blocker_forces_yield(handler, mock_mqtt):
+    """
+    Staging AGV가 corridor 점유자의 경로를 막는 deadlock 시나리오 (수정 28).
+
+    Setup:
+      - AGV-1: corridor(W1=33) 점유, 노드 42에서 heading 서쪽(270)으로 forward
+        → 다음 노드 41(=staging 위치)이 AGV-2 점유로 blocked
+      - AGV-2: staging_wait (corridor.queue에 등록, command_queue 비어있음, 노드 41)
+
+    Expected:
+      - _retry_blocked_robots()에서 staging blocker(AGV-2) 감지
+      - _resolve_deadlock에서 AGV-2 강제 yield (carrying 동급이어도)
+      - AGV-2가 _yielded_staging_robots에 등록
+      - AGV-2에 1-step 이동 명령(turn/forward) 발행됨
+    """
+    sm = handler.staging_manager
+
+    # AGV-1: corridor 점유 (W1)
+    sm.should_stage(33, incoming_rid=1)  # occupying_rid=1
+    # AGV-2: 큐 등록 (staging_node=41)
+    sm.add_staged_agv(33, rid=2, staging_node=41)
+
+    # AGV-1 위치/상태
+    a = _ready(handler, rid=1, node=42, heading=270, planned_path=[42, 41, 33])
+    a.carrying_shelf = 27  # carrying (현실적 설정)
+
+    # AGV-2 staging_wait — command_queue 비어있음
+    b = handler.robot_manager.get_robot(2)
+    b.current_node = 41
+    b.heading = 90
+    b.heading_initialized = True
+    b.command_queue = []
+    b.planned_path = []
+    b.carrying_shelf = 19  # carrying (동급 priority여도 staging이 양보)
+
+    # AGV-1 forward → 41 점유로 blocked
+    assert handler._send_next_command(1) is False
+    assert 1 in handler._blocked_robots
+
+    # AGV-2는 staging이라 _blocked_robots에 없음
+    assert 2 not in handler._blocked_robots
+    assert handler._is_staging_robot(2) is True
+
+    mock_mqtt.reset()
+
+    # retry → staging blocker 감지 → resolve_deadlock → AGV-2 강제 yield
+    handler._retry_blocked_robots()
+
+    # AGV-2가 yielded set에 등록됨
+    assert 2 in handler._yielded_staging_robots, "staging AGV가 yielded set에 등록되어야 함"
+
+    # AGV-2에 명령 발행됨 (turn 또는 forward)
+    cmds_for_2 = mock_mqtt.cmds_for(2)
+    assert len(cmds_for_2) > 0, "yielded AGV-2에 1-step 이동 명령 발행"
+
+    # AGV-2의 새 planned_path는 1-step 길이 (current → yield_node)
+    assert len(b.planned_path) == 2, \
+        f"staging yield는 1-step (현재→yield_node), 실제: {b.planned_path}"
+
+
+@pytest.mark.deadlock
 def test_carrying_robot_priority(handler, mock_mqtt):
     """
     carrying_shelf > non-carrying 우선순위 검증.

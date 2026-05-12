@@ -15,7 +15,7 @@ import sys
 
 from .config import Config
 from .path_planner import PathPlanner
-from .mqtt_publisher import MQTTPublisher
+from .mqtt_client import MQTTClient
 from .robot_manager import RobotManager
 from .shelf_manager import ShelfManager
 from .staging_manager import StagingManager
@@ -35,7 +35,7 @@ class AGVServer:
         print("[AGVServer] Initializing modules...")
 
         self.path_planner = PathPlanner(self.config.map_file)
-        self.mqtt_publisher = MQTTPublisher(self.config)
+        self.mqtt_publisher = MQTTClient(self.config)
         self.robot_manager = RobotManager(self.config)
         self.shelf_manager = ShelfManager(self.config.shelf_config_file)
         self.staging_manager = StagingManager(self.shelf_manager.workstations)

@@ -1015,9 +1015,11 @@ for rid, home_node in sorted(robot_homes.items()):
     x, y = n["x"], n["y"]
     build_agv(stage, rid, x, y)
     agvs[rid] = IsaacAGV(rid, home_node)
-    print(f"[AGV {rid}] Home: node {home_node}  ({x}, {y})")
+    print(f"[AGV {rid}] Home: node {home_node}  ({x}, {y})", flush=True)
 
+print("[DIAG] world.reset() 호출 전...", flush=True)
 world.reset()
+print("[DIAG] world.reset() 완료", flush=True)
 
 # 선반 루트 위치 설정 — world.reset() 이후에 해야 유지됨
 # 자식 prim은 로컬 좌표로 생성되었으므로, 루트에 translate만 추가하면 됨
@@ -1027,10 +1029,12 @@ for node_id in shelf_node_ids:
     if shelf_root_prim.IsValid():
         UsdGeom.Xformable(shelf_root_prim).AddTranslateOp().Set(
             Gf.Vec3d(node["x"], node["y"], 0.0))
+print("[DIAG] 선반 루트 위치 완료", flush=True)
 
 # AGV 초기 상태 동기화 (시저리프트/바퀴 포함)
 for agv in agvs.values():
     agv._sync_prim(stage)
+print("[DIAG] AGV sync 완료", flush=True)
 
 print("  선반/작업대/AGV 배치 완료")
 

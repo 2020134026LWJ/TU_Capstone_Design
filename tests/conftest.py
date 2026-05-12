@@ -35,7 +35,7 @@ from server.request_handler import RequestHandler
 
 @dataclass
 class _MockClient:
-    """mqtt_publisher.client 대용 — broadcast 발행만 stub"""
+    """mqtt_client.client 대용 — broadcast 발행만 stub"""
     broadcasts: List[Tuple[str, Any]] = field(default_factory=list)
 
     def publish(self, topic: str, payload: Any, qos: int = 0):
@@ -98,7 +98,7 @@ def handler(config: Config, mock_mqtt: MockMqttPublisher) -> RequestHandler:
     """
     실제 매니저 + Mock MQTT로 구성한 RequestHandler.
 
-    main.py의 AGVServer.__init__을 그대로 따라가되 MQTTPublisher만 대체.
+    main.py의 AGVServer.__init__을 그대로 따라가되 MQTTClient만 대체.
     """
     path_planner = PathPlanner(config.map_file)
     robot_manager = RobotManager(config)

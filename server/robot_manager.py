@@ -149,6 +149,30 @@ class RobotManager:
             return True
         return False
 
+    def apply_turn(self, rid: int, cmd: str) -> bool:
+        """turn 명령 완료 시 heading 갱신 (cmd_ack 처리용)
+
+        Args:
+            rid: 로봇 ID
+            cmd: "turn_left" / "turn_right" / "turn_180"
+
+        Returns:
+            True 갱신 성공, False 로봇 없음 또는 잘못된 cmd
+        """
+        robot = self.robots.get(rid)
+        if not robot:
+            return False
+        if cmd == "turn_right":
+            robot.heading = (robot.heading + 90) % 360
+        elif cmd == "turn_left":
+            robot.heading = (robot.heading + 270) % 360
+        elif cmd == "turn_180":
+            robot.heading = (robot.heading + 180) % 360
+        else:
+            return False
+        print(f"[RobotManager] Robot {rid}: heading updated to {robot.heading}° after {cmd}")
+        return True
+
     def set_carrying_shelf(self, rid: int, shelf_id: Optional[int]) -> bool:
         """로봇 선반 운반 상태 설정"""
         robot = self.robots.get(rid)

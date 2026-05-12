@@ -11,7 +11,7 @@ TU Capstone Design - AGV 물류 피킹 시스템
 
 from .config import Config
 from .path_planner import PathPlanner
-from .mqtt_publisher import MQTTPublisher
+from .mqtt_client import MQTTClient
 from .robot_manager import RobotManager
 from .shelf_manager import ShelfManager
 from .task_manager import TaskManager
@@ -21,7 +21,7 @@ from .websocket_handler import WebSocketHandler
 __all__ = [
     "Config",
     "PathPlanner",
-    "MQTTPublisher",
+    "MQTTClient",
     "RobotManager",
     "ShelfManager",
     "TaskManager",
