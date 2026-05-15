@@ -49,18 +49,45 @@ class MovementMixin:
 
     def _retry_blocked_robots(self):
         """블록 해제된 로봇들 명령 재시도 + 교착 감지/해제"""
+        # goal-locked 로봇 중 blocker가 떠난 경우 재계획
+        self._check_goal_locked_robots()
         for rid in sorted(self._blocked_robots.copy()):
             if rid not in self._blocked_robots:
                 continue  # 앞 iteration에서 이미 해제됨
             success = self._send_next_command(rid)
             if not success:
-                # 교착 감지: blocker가 또한 blocked이거나 staging 상태이면 처리 발동
+                # 교착 감지: blocker가 또한 blocked / staging / 장기 정차(WAITING_FOR_PICK, IDLE)면 처리 발동
                 blocker_rid = self._get_blocker_of(rid)
+                blocker = self.robot_manager.get_robot(blocker_rid) if blocker_rid is not None else None
                 if blocker_rid is not None and (
                     blocker_rid in self._blocked_robots
                     or self._is_staging_robot(blocker_rid)
+                    or (blocker and blocker.status in (RobotStatus.WAITING_FOR_PICK, RobotStatus.IDLE))
                 ):
                     self._resolve_deadlock(rid, blocker_rid)
+
+    def _check_goal_locked_robots(self):
+        """Goal-locked 로봇들 중 blocker가 goal에서 떠난 경우 재계획"""
+        for rid in list(self._goal_locked_robots):
+            goal = self._deferred_goals.get(rid)
+            if goal is None:
+                self._goal_locked_robots.discard(rid)
+                continue
+            robot = self.robot_manager.get_robot(rid)
+            if not robot:
+                self._goal_locked_robots.discard(rid)
+                self._deferred_goals.pop(rid, None)
+                continue
+            blocker_still_at_goal = any(
+                other.current_node == goal
+                for other_rid, other in self.robot_manager.robots.items()
+                if other_rid != rid
+            )
+            if not blocker_still_at_goal:
+                print(f"[RequestHandler] Goal-locked: Robot {rid} blocker left goal {goal}, replan")
+                self._goal_locked_robots.discard(rid)
+                self._deferred_goals.pop(rid, None)
+                self._plan_and_publish_move(rid, robot.current_node, goal)
 
     def _get_blocker_of(self, rid: int) -> Optional[int]:
         """rid가 blocked된 원인 로봇 ID 반환 (없으면 None)"""
@@ -199,10 +226,38 @@ class MovementMixin:
             self._send_next_command(yield_rid)
             return
 
+        # yield 선정된 로봇이 plan 없으면 (IDLE 등 장기 정차) 역할 스왑 — 이동 중인 쪽이 우회
         if not yield_robot.planned_path:
-            return
+            yield_rid, block_rid = block_rid, yield_rid
+            yield_robot = self.robot_manager.get_robot(yield_rid)
+            block_robot = self.robot_manager.get_robot(block_rid)
+            if not yield_robot or not yield_robot.planned_path:
+                return
 
         goal = yield_robot.planned_path[-1]
+
+        # ─── goal-block 케이스: blocker가 goal에 있음 → alt-path 불가 ───────
+        # Strategy 1/2 모두 path가 goal에서 끝나서 또 막힘 → 1-step yield + 대기
+        # blocker가 goal 떠나면 _check_goal_locked_robots()에서 재계획
+        if block_robot.current_node == goal:
+            if yield_rid in self._goal_locked_robots:
+                return  # 이미 yield 완료, 재시도 안 함 (loop 차단)
+            yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
+            if yield_node is None:
+                print(f"[RequestHandler] Goal-locked: Robot {yield_rid} stuck "
+                      f"(blocker {block_rid} at goal {goal}, no yield node)")
+                return
+            yield_robot.planned_path = [yield_robot.current_node, yield_node]
+            yield_robot.command_queue = self._path_to_commands(
+                yield_robot.planned_path, yield_robot.heading
+            )
+            self._goal_locked_robots.add(yield_rid)
+            self._deferred_goals[yield_rid] = goal
+            self._blocked_robots.discard(yield_rid)
+            print(f"[RequestHandler] Goal-locked: Robot {yield_rid} → side {yield_node} "
+                  f"(deferred goal {goal}, blocker {block_rid})")
+            self._send_next_command(yield_rid)
+            return
 
         # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가 (두 전략 모두 적용)
         shelf_excluded: Optional[Set[int]] = None
@@ -280,13 +335,18 @@ class MovementMixin:
         return occupied
 
     def _get_idle_wait_node(self, rid: int) -> int:
-        """idle 로봇의 대기 노드: 홈 WS의 staging 노드 반환 (staging 없으면 home_node)"""
+        """idle 로봇의 대기 노드: 홈 WS의 gateway 노드 반환
+
+        staging 노드(1/41)는 다른 AGV가 W 진입 대기용으로 쓰므로 idle 주차지로 부적합 —
+        idle AGV가 staging 점유 시 active AGV staging 진입 차단 → head-on deadlock.
+        gateway 노드(17/25)는 corridor 점유 trigger와 분리되어 있어 idle 주차 가능.
+        """
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return None
         corridor = self.staging_manager.corridors.get(robot.home_node)
         if corridor:
-            return corridor.staging_node
+            return corridor.gateway_node
         return robot.home_node
 
     # ─── 명령 발행 (충돌 체크 포함) ───

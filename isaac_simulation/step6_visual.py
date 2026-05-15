@@ -283,15 +283,18 @@ class IsaacAGV:
         return best_node
 
     def _find_nearby_shelf(self) -> int | None:
-        """현재 위치 근처 선반 노드 탐색 (lift_up 시 어떤 선반인지 결정)"""
+        """현재 위치 근처 선반 탐색 (lift_up 시 어떤 선반인지 결정)
+
+        shelf_origins는 _place_shelf에서 actual 위치로 갱신되므로,
+        선반이 작업대(W) 등 home 외 노드에 놓여있어도 정확히 찾음 (포워딩 재픽업).
+        """
         best_nid  = None
         best_dist = POSITION_TOLERANCE * 3
-        for nid in shelf_node_ids:
-            n = nodes[nid]
-            dist = float(np.linalg.norm(self.pos - np.array([n["x"], n["y"]])))
+        for sid, (sx, sy) in shelf_origins.items():
+            dist = float(np.linalg.norm(self.pos - np.array([sx, sy])))
             if dist < best_dist:
                 best_dist = dist
-                best_nid  = nid
+                best_nid  = sid
         return best_nid
 
     # ─── 업데이트 ────────────────────────────────────────────────────────────

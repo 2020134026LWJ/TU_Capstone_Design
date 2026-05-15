@@ -1112,6 +1112,107 @@ AGV-2: 27 → 26 → 25 (staging_wait)
 
 ---
 
+### 수정 30: Deadlock 안전망 확장 + idle 주차지 분리 + 선반 재픽업 fix (2026-05-15)
+
+**배경**: 시연용 자동 체인 테스트 중 3가지 결함 발견 — (1) `WAITING_FOR_PICK`/`IDLE` 로봇이 차단해도 deadlock 감지 안 됨, (2) idle AGV가 staging 노드를 주차지로 써서 active AGV staging 진입 차단 → head-on deadlock, (3) 작업대에 놓인 선반을 재픽업 시 carrying_shelf=None (포워딩/일반 배달 모두 영향).
+
+**변경 A — `_retry_blocked_robots` deadlock 트리거 확장** (`_movement_mixin.py`):
+```python
+# 수정 전: blocker가 blocked 또는 staging일 때만 deadlock 처리
+if blocker_rid in self._blocked_robots or self._is_staging_robot(blocker_rid):
+    self._resolve_deadlock(rid, blocker_rid)
+
+# 수정 후: 장기 정차 상태(WAITING_FOR_PICK, IDLE)도 추가
+blocker = self.robot_manager.get_robot(blocker_rid) if blocker_rid is not None else None
+if (blocker_rid in self._blocked_robots
+    or self._is_staging_robot(blocker_rid)
+    or (blocker and blocker.status in (RobotStatus.WAITING_FOR_PICK, RobotStatus.IDLE))):
+    self._resolve_deadlock(rid, blocker_rid)
+```
+
+**변경 B — `_resolve_deadlock` IDLE 역할 스왑** (`_movement_mixin.py`):
+IDLE 로봇이 yield 선정되면 `planned_path` 없어 early return → 교착 미해제. 역할 스왑으로 이동 중인 쪽이 우회.
+```python
+if not yield_robot.planned_path:
+    yield_rid, block_rid = block_rid, yield_rid   # 스왑
+    yield_robot = self.robot_manager.get_robot(yield_rid)
+    block_robot = self.robot_manager.get_robot(block_rid)
+    if not yield_robot or not yield_robot.planned_path:
+        return
+```
+
+**변경 C — Goal-locked deadlock 무한 루프 차단** (`_movement_mixin.py` + `request_handler.py`):
+blocker가 yield_robot의 goal 노드에 있을 때 Strategy 1 alt-path가 `excluded_transit={blocker_node}`로 제외해도 goal은 endpoint라 제외 안 됨 → 같은 경로 반환 → 무한 반복 (Strategy 2 yield 후 다시 Strategy 1 호출).
+
+**새 상태 변수** (`request_handler.py:84-87`):
+```python
+self._goal_locked_robots: Set[int] = set()       # yield 완료 후 대기 중
+self._deferred_goals: Dict[int, int] = {}        # rid → 원래 goal (재계획용)
+```
+
+**`_resolve_deadlock` 분기 추가** (Strategy 1 진입 전):
+```python
+if block_robot.current_node == goal:
+    if yield_rid in self._goal_locked_robots:
+        return   # 이미 yield 완료 — 루프 차단 핵심
+    yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
+    if yield_node is None: return
+    yield_robot.planned_path = [yield_robot.current_node, yield_node]
+    yield_robot.command_queue = self._path_to_commands(...)
+    self._goal_locked_robots.add(yield_rid)
+    self._deferred_goals[yield_rid] = goal
+    self._send_next_command(yield_rid)
+    return
+```
+
+**자동 재계획 헬퍼** (`_check_goal_locked_robots`): `_retry_blocked_robots` 진입 시 호출. blocker가 goal에서 떠나면 deferred_goal로 `_plan_and_publish_move` 재실행.
+
+**변경 D — idle 주차지 staging → gateway** (`_movement_mixin.py`):
+원인: AGV-1 home=W2(9), idle 시 `_get_idle_wait_node` → staging 노드 1로 향함. 동시에 AGV-2가 W2 진입하려고 staging 1에서 대기 중 → 한 칸 통로(9↔1)에서 head-on lock.
+
+```python
+# 수정 전: staging 노드 (1, 41) 반환 — 다른 AGV 진입 대기 노드와 충돌
+return corridor.staging_node
+
+# 수정 후: gateway 노드 (17, 25) 반환 — 진입/대기 노드와 분리
+return corridor.gateway_node
+```
+
+| WS | gateway (idle 주차) | staging (진입 대기) | trigger |
+|----|--------------------|--------------------|---------|
+| W1(33) | 25 | 41 | 34 |
+| W2(9)  | 17 | 1  | 10 |
+
+**변경 E — 선반 재픽업 실패 fix** (`isaac_simulation/step6_visual.py`):
+원인: `_find_nearby_shelf`가 `shelf_node_ids` (정적 home 노드)와 `nodes[nid]` (map 정적 좌표)로 검색. 선반이 W에 놓인 후 재픽업 시 → 정적 home 좌표와 AGV(W 위) 사이 거리 tolerance 초과 → None 반환 → `carrying_shelf=None` → 빈 채로 이동, 선반은 W에 남음.
+
+**영향 범위**: 포워딩 전용 아님. 일반 배달-반납에서도 W에서 재픽업 시 동일 트리거 (서버는 `shelf.status` 자체 관리라 워크플로우는 진행됨 → 시각상으로만 드러남).
+
+```python
+# 수정 전
+for nid in shelf_node_ids:
+    n = nodes[nid]                  # 정적 home 좌표
+    dist = norm(self.pos - [n["x"], n["y"]])
+
+# 수정 후
+for sid, (sx, sy) in shelf_origins.items():   # _place_shelf에서 갱신되는 actual 위치
+    dist = norm(self.pos - [sx, sy])
+```
+
+**검증**: pytest 21 passed 유지. Isaac Sim 런타임 — 포워딩 + 자동 체인 시나리오 사용자 검증 완료.
+
+**수정 파일**:
+- `server/request_handler.py` (상태 변수 2개 추가)
+- `server/_movement_mixin.py` (`_retry_blocked_robots`, `_resolve_deadlock`, `_check_goal_locked_robots` 추가, `_get_idle_wait_node` 변경)
+- `isaac_simulation/step6_visual.py` (`_find_nearby_shelf` 변경)
+
+**관련 시연 인프라 변경** (별도 항목):
+- `server/Database/사용자1/2주문.xlsx` 재구성 — 4 시나리오 (포워딩/인터셉트/staging/PICK차단)
+- `mqtt_test.py` — `OrderChain` 자동 체인 모드 + `order_id` CLI 인자
+- 상세는 메모리 `test_order_scenarios.md` 참조
+
+---
+
 ### 수정 29: request_handler 대분리 + 모듈 이름 정리 (2026-05-12)
 
 **배경**: `request_handler.py` 1602줄로 비대 + 일부 파일/클래스 이름이 실제 역할과 안 맞음 (task_scheduler vs task_manager 혼동, mqtt_publisher가 subscribe도 함 등)

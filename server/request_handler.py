@@ -81,6 +81,11 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # corridor 정상 해제 시 staging_node가 아닌 현재(yield) 위치에서 target_ws로 plan 필요
         self._yielded_staging_robots: Set[int] = set()
 
+        # goal 노드가 blocker로 점유된 경우 yield + 대기 (blocker가 goal 떠날 때까지)
+        # 무한 deadlock 루프 방지용. blocker 이탈 시 _deferred_goals로 재계획
+        self._goal_locked_robots: Set[int] = set()
+        self._deferred_goals: Dict[int, int] = {}
+
         # 이동 중인 로봇의 목적지 노드 예약
         # {node_id: rid} — forward 명령 전송 시 등록, 도착 시 해제
         self._reserved_nodes: Dict[int, int] = {}
