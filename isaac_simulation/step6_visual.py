@@ -244,6 +244,8 @@ class IsaacAGV:
         elif cmd == "lift_up":
             shelf_id = self._find_nearby_shelf()
             self.carrying_shelf = shelf_id
+            if shelf_id is not None:
+                shelf_origins.pop(shelf_id, None)
             self.lift_target_z  = self.LIFT_PLATE_UP
             self.lift_state     = "RAISING"
             # 픽업 순간: 선반의 현재 orient와 AGV heading의 offset 저장

@@ -38,7 +38,17 @@ class AGVServer:
         self.mqtt_publisher = MQTTClient(self.config)
         self.robot_manager = RobotManager(self.config)
         self.shelf_manager = ShelfManager(self.config.shelf_config_file)
-        self.staging_manager = StagingManager(self.shelf_manager.workstations)
+        self.staging_manager = StagingManager(
+            self.shelf_manager.workstations,
+            get_robot_node=lambda rid: (
+                self.robot_manager.get_robot(rid).current_node
+                if self.robot_manager.get_robot(rid) else None
+            ),
+            get_robot_planned_path=lambda rid: (
+                self.robot_manager.get_robot(rid).planned_path
+                if self.robot_manager.get_robot(rid) else None
+            ),
+        )
         self.task_manager = TaskManager(self.shelf_manager, self.path_planner)
         self.request_handler = RequestHandler(
             config=self.config,

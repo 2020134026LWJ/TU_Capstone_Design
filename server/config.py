@@ -33,9 +33,9 @@ class Config:
     shelf_config_file: str = ""
 
     # 경로 계획 설정
-    max_time: int = 50
-    stay_time_at_goal: int = 3
-    default_speed: float = 0.3
+    max_time: int = 50              # PARAM: A* 시간 horizon (step 수). 늘리면 더 먼 경로/대기 가능
+    stay_time_at_goal: int = 3      # PARAM: 도착 후 goal 노드 점유 유지 step 수 (충돌 회피용)
+    default_speed: float = 0.3      # PARAM: AGV 기본 속도 (시뮬레이션 보간용, m/s 또는 unit/s)
 
     def __post_init__(self):
         if not self.base_dir:

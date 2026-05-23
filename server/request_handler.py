@@ -38,7 +38,7 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
     #   False → 정상 동작 (공정 배정 + 스테이징 활성화)
     # 발표가 끝난 후에는 반드시 False로 되돌릴 것!
     # =========================================================================
-    DEMO_MODE = False
+    DEMO_MODE = False  # PARAM: 발표용 단순화 토글 (True=WS 전담+스테이징 비활성, False=정상)
 
     def __init__(
         self,
@@ -67,8 +67,9 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # ─── 상태 변수 (mixin들이 self 통해 공유 접근) ───
 
         # 포워딩으로 소스 회랑이 미리 해제됐으나 아직 스테이징 노드에 미도착한 로봇
-        # rid → target_ws (스테이징 노드 도착 시 이 WS로 이동 명령 발행)
-        self._staged_to_ws: Dict[int, int] = {}
+        # rid → (target_ws, expected_wait_node)
+        # expected_wait_node는 canonical staging_node(일반) 또는 gateway_node(포워딩)
+        self._staged_to_ws: Dict[int, tuple] = {}
 
         # 포워딩된 선반의 재픽업+반납을 담당하는 로봇
         # shelf_id → rid (pick_complete 후 re-pickup 시 사용)
@@ -89,6 +90,15 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # 이동 중인 로봇의 목적지 노드 예약
         # {node_id: rid} — forward 명령 전송 시 등록, 도착 시 해제
         self._reserved_nodes: Dict[int, int] = {}
+
+        # lift_up/lift_down 발행 후 cmd_ack 대기 중인 로봇 (수정 31)
+        # 리프트 동작 중에는 deadlock yield 등 이동 명령 발행 금지 (프로토콜: 명령 1개씩)
+        self._lifting_robots: Set[int] = set()
+
+        # Layer 1.3: in-flight 명령 추적 (수정 34)
+        # rid → 마지막 발행한 cmd 문자열. ack/marker 미수신 동안 다음 cmd 발행 보류.
+        # AGV의 _pending_cmd 단일 슬롯 덮어쓰기 방지 + back-to-back 발행으로 인한 명령 유실 차단.
+        self._in_flight_cmds: Dict[int, str] = {}
 
         # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
         self._broadcast_callback = None

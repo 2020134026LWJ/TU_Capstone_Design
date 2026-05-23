@@ -100,6 +100,7 @@ flowchart TB
 ## 서버 알고리즘 수정 이력
 
 ### 수정 1: Node U 구현 — 복귀 중 인터셉트 (`request_handler.py`)
+> **쉽게**: 선반 들고 돌아가는 길에 같은 선반 새 주문이 들어오면, 그 AGV가 방향 돌려서 새 작업대로 가도록.
 
 **플로우차트 노드 U**: "이동 중 새 주문? (같은 선반)"
 
@@ -134,6 +135,7 @@ if not robot:
 ---
 
 ### 수정 2: 피드백 3가지 반영
+> **쉽게**: 인터셉트 후 이전 작업대 자리가 안 풀려 다른 AGV가 못 들어오던 문제 + 이동 중인 선반이 작업대에 있는 것처럼 표시되던 문제 등 3가지 정리.
 
 #### 피드백 1 — 인터셉트 시 이전 WS 회랑 자동 해제
 
@@ -174,6 +176,7 @@ if not robot:
 ---
 
 ### 수정 3: 피드백 3가지 다이어그램 반영
+> **쉽게**: 코드 변경 없이 플로우차트 그림의 표시 라벨만 명확하게 정리.
 
 #### 피드백 1 — STG 점유 판단 기준 명확화
 - `F` 분기: `작업대 아님` → `작업대 아님 (이동 중 포함)` / `작업대에 있음` → `작업대에 정지 중`
@@ -194,6 +197,7 @@ if not robot:
 ---
 
 ### 수정 4: F 노드 "선반 현재 위치?" 체크 누락 → 수정 완료
+> **쉽게**: 새 주문이 들어오면 그 선반이 작업대에 있는지/이동 중인지 안 보고 무조건 원래 자리로 보내던 버그.
 
 **플로우차트 F 노드**:
 - `F -- "작업대에 정지 중" --> STG` (AT_WORKSTATION → WS로 직행)
@@ -224,6 +228,7 @@ if not robot:
 ---
 
 ### 수정 5: STG 타임아웃 해제 후 이동 명령 누락 버그 수정
+> **쉽게**: 대기 시간이 너무 길어 자동으로 풀린 AGV가 이동 명령을 못 받아 영원히 멈춰있던 버그.
 
 **버그**: `staging_manager._check_timeout()` 에서 30초 타임아웃으로 staged AGV를 해제할 때
 `occupying_rid`만 갱신하고 이동 명령을 주지 않아 해당 AGV가 staging 노드에서 영구 교착
@@ -247,6 +252,7 @@ if not robot:
 ---
 
 ### 수정 6: DELIVER_TO_WS 도착 후 PENDING 태스크 재배정 누락 버그 수정
+> **쉽게**: 선반이 작업대에 막 도착했을 때 그 선반을 기다리던 다른 주문에 즉시 재배정 안 되던 버그.
 
 **버그**: 선반이 CARRIED → AT_WORKSTATION 전환 시 `_try_assign_pending_tasks()` 미호출
 → CARRIED 때문에 PENDING으로 대기 중이던 다른 태스크가 재시도 안 됨
@@ -265,6 +271,7 @@ if not robot:
 ---
 
 ### 수정 7: FORWARD_SHELF putdown next_subtask 후 PENDING 재배정 누락 수정
+> **쉽게**: 다른 작업대로 옮긴 선반에 대해 대기 중이던 주문의 재배정이 안 되던 버그 (수정 6과 비슷한 누락).
 
 **버그**: FORWARD_SHELF putdown 후 해당 로봇에게 다음 선반이 있는 경우(next_subtask),
 `mark_shelf_at_workstation()` 호출 후 `_try_assign_pending_tasks()` 미호출
@@ -280,6 +287,7 @@ if not robot:
 ---
 
 ### 수정 8: F 노드 2가지 누락 케이스 추가 (동일 선반 동시 배정 버그)
+> **쉽게**: 두 사용자 동시 시작 시 같은 선반에 두 AGV가 동시 배정돼 서로 부딪치던 버그.
 
 **버그 재현**: `시작 1` + `시작 2`를 연달아 실행하면 T1_1, T2_1 모두 같은 선반(예: 선반11)을
 `GO_TO_SHELF` 타겟으로 배정받아 두 AGV가 동시에 같은 선반으로 이동 → 충돌
@@ -313,6 +321,7 @@ if not robot:
 ---
 
 ### 수정 9: Bug A (AGV 교착) + Bug B (STG 우회) 수정
+> **쉽게**: A — 첫 선반이 막혔을 때 다음 선반으로 순서 바꾸도록 (영구 정지 방지). B — AGV 집이 작업대일 때 대기 절차를 건너뛰어 다른 AGV와 부딪칠 위험.
 
 #### Bug A — 첫 선반 블록 시 AGV 교착 (선반 순서 회전)
 
@@ -361,6 +370,7 @@ F-node: `pending` → T2 PENDING으로 복귀 → 재배정 시도해도 선반 
 ---
 
 ### 수정 10: FORWARD_SHELF 후 다음 선반 가로채기 버그 수정
+> **쉽게**: 한 AGV가 다음 선반 가지러 가는 사이에 다른 AGV가 그 선반을 가로채서 두 AGV가 같이 가던 버그.
 
 **버그 증상**: Robot A가 FORWARD_SHELF 완료 후 다음 선반(shelf X)으로 이동 시도 시,
 Robot B(PENDING 상태)가 같은 shelf X를 동시에 배정받아 두 로봇이 동시에 이동 → 선반 뺏기 발생
@@ -398,6 +408,7 @@ _try_assign_pending_tasks()          ← 이제 B가 shelf X를 배정받지 못
 ---
 
 ### 수정 11: start_order 응답 shelf 순서 로테이션 미반영 버그 수정
+> **쉽게**: 선반 순서가 바뀌었는데 화면에는 원래 순서로 보여서 "완료" 눌렀을 때 다른 선반을 가리키게 되던 버그.
 
 **버그 증상**: `시작1`, `시작2` 후 `완료2` 입력 시 AGV-2가 움직이지 않음
 
@@ -450,6 +461,7 @@ if task_obj:
 ---
 
 ### 수정 12: 포워딩 시 소스 회랑 무한 스테이징 버그 수정
+> **쉽게**: 다른 작업대로 선반 옮길 때 원래 작업대 자리가 안 풀려 다른 AGV가 영원히 대기하던 버그.
 
 **문제**: 포워딩 로봇이 소스 WS 트리거 노드를 통과하지 못해 대기 AGV가 무한 스테이징
 
@@ -478,6 +490,7 @@ if task_obj:
 ---
 
 ### 수정 13: 동시 포워딩 시 횡방향 이동 중 충돌 방지
+> **쉽게**: 두 AGV가 서로 옆 방향으로 동시에 움직일 때 서로 못 알아채고 그대로 통과해서 부딪치던 버그.
 
 **문제**: 두 AGV가 동시에 포워딩 중 한 AGV가 횡방향으로 비키는 도중 다른 AGV가 기다리지 않아 충돌
 
@@ -510,6 +523,7 @@ if task_obj:
 ---
 
 ### 수정 14: F-노드 stale shelf_sequence 버그 수정
+> **쉽게**: 이미 완료된 선반 정보를 참조해 잘못된 장소로 보내서 순간이동/엉뚱한 곳에서 선반 내려놓는 현상 발생.
 
 **파일**: `server/request_handler.py`, `_try_assign_pending_tasks()`
 
@@ -552,6 +566,7 @@ if shelf_obj:
 ---
 
 ### 수정 15: FORWARD_SHELF 후 포워딩 로봇이 목적지 WS 전체 사이클 담당
+> **쉽게**: 다른 작업대로 옮긴 선반의 후속 처리(픽킹 대기/반납)를 옮긴 AGV가 끝까지 책임지도록 정리. 이전엔 옮기고 떠나서 선반이 방치됐음.
 
 **문제**: FORWARD_SHELF putdown 후 T1이 즉시 다음 선반으로 이동해 버림
 → 선반이 목적지 WS(WS2)에 방치됨
@@ -620,6 +635,7 @@ T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
 ---
 
 ### 수정 16: UI MQTT 연동 + 아이템 단위 → 선반 단위 간소화
+> **쉽게**: GUI를 MQTT로 연결하고, 물품 하나씩이 아니라 선반 한 번에 완료 신호 보내도록 단순화.
 
 **배경**:
 - 실제 작업대 UI(GUI_backend.py)가 MQTT(`agv/algorithm` 토픽)로 서버와 통신
@@ -662,6 +678,7 @@ T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
 ---
 
 ### 수정 17: AGV 중간 노드 위치 전송
+> **쉽게**: AGV가 도중 노드를 지날 때마다 위치를 알리도록 → 서버가 실시간 위치를 알게 됨 → 후속 AGV가 더 효율적인 경로 계획.
 
 **파일**: `controllers/agv_mqtt_controller/mqtt_handler.py`, `controllers/agv_mqtt_controller/agv_controller.py`, `server/main.py`, `server/request_handler.py`
 
@@ -683,6 +700,7 @@ T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
 ---
 
 ### 수정 18: 서버 기반 노드 단위 교착 방지 (NODE_WAIT + resume)
+> **쉽게**: 충돌 회피를 시뮬레이터 전용 기능 대신 서버가 중앙에서 관리하도록 → 실물 하드웨어에서도 동작.
 
 **파일**: `controllers/agv_mqtt_controller/navigation.py`, `controllers/agv_mqtt_controller/agv_controller.py`, `server/request_handler.py`, `server/config.py`, `server/mqtt_publisher.py`
 
@@ -722,6 +740,7 @@ T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
 ---
 
 ### 수정 19: 위치 기반 회랑 자동 해제 (position-based corridor release)
+> **쉽게**: AGV가 작업대 옆 정해진 마커를 안 지나도, 작업대 구역만 벗어나면 자리 자동으로 풀어주도록.
 
 **파일**: `server/staging_manager.py`, `server/request_handler.py`
 
@@ -759,6 +778,7 @@ T2: 해당 선반 서브태스크 스킵됨 → 다른 선반 계속 or 완료
 ---
 
 ### 수정 20: 다중 로봇 협업 배정 + 공정성 알고리즘
+> **쉽게**: 한 주문을 한 AGV가 혼자 처리하던 걸 선반 단위로 쪼개서 두 AGV가 나눠 처리하도록.
 
 **파일**: `server/request_handler.py`, `server/task_manager.py`
 
@@ -803,6 +823,7 @@ R1 → T1_1_0, R2 → T1_1_1 동시 출발 (T1_1_2 대기)
 ---
 
 ### 수정 21: 충돌 버그 수정 — `_is_safe_to_resume` 보수적 정책 적용
+> **쉽게**: 다른 AGV가 "곧 떠난다"고 가정해서 진입했다가 실제로 안 떠나서 부딪치던 버그 → 실제 떠날 때까지 무조건 기다리도록.
 
 **문제**: 다른 AGV가 next_node에 있어도 `_claimed_nodes`(이동 예약)가 있으면 "떠나는 중"으로 판단해 진입 허용 → 물리적으로 아직 그 노드에 있는 동안 다른 AGV가 진입 → 충돌
 
@@ -832,6 +853,7 @@ if other_current == next_node:
 ---
 
 ### 수정 22: 이동 중 plan 즉시 적용 버그 수정 (대각선 이동 + Node U 타이밍)
+> **쉽게**: AGV가 이동 중에 새 경로를 받으면 비스듬히 대각선으로 가던 버그 + 이동 중에 인터셉트가 잘못 발동되던 타이밍 문제.
 
 **문제 1 — Webots 대각선 이동**:
 - `agv_controller._handle_plan()`이 MQTT 스레드에서 직접 `nav.set_plan()` 호출
@@ -862,6 +884,7 @@ if other_current == next_node:
 ---
 
 ### 수정 23: 스테이징 해제 후 교착 버그 수정
+> **쉽게**: 자리가 풀리고 새 경로를 받았는데도 출발 신호가 안 와서 AGV가 영원히 멈춰있던 버그.
 
 **현상**: Robot 1이 staging node 9에서 영구 교착 — corridor 해제 후 새 plan을 받았지만 resume이 오지 않아 출발 불가.
 
@@ -912,6 +935,7 @@ elif st_type == SubTaskType.DELIVER_TO_WS:
 ---
 
 ### 수정 24: 스테이징 해제 시 실제 위치 기준 경로 계획
+> **쉽게**: 자리가 풀렸을 때 AGV가 아직 대기 노드에 도착하지도 못했는데 그 노드 기준으로 경로를 짜서 출발 못 하던 버그.
 
 **파일**: `server/request_handler.py`
 
@@ -947,6 +971,7 @@ self._plan_and_publish_move(released.rid, start, released.target_ws)
 ---
 
 ### 수정 25: idle 로봇 귀환 목적지 WS → staging 노드 대기
+> **쉽게**: 작업 끝난 AGV가 작업대로 돌아가 자리를 차지하던 걸, 작업대 옆 대기 자리에서 쉬도록.
 
 **파일**: `server/request_handler.py`
 
@@ -979,6 +1004,7 @@ def _get_idle_wait_node(self, rid: int) -> int:
 ---
 
 ### 수정 26: `_handle_shelf_complete` 포워딩 시 "No active task" 오류 수정
+> **쉽게**: 다른 작업대로 선반 옮긴 후 사용자가 완료 눌렀을 때 "활성 작업 없음" 오류가 나면서 작업대 자리가 영원히 잠기던 버그.
 
 **파일**: `server/request_handler.py`
 
@@ -1015,6 +1041,7 @@ ws_node = robot.home_node
 ---
 
 ### 수정 27: 인터셉트 inline corridor 해제 → 위임 호출로 통합 (2026-04-29)
+> **쉽게**: 인터셉트 시 자리 풀어주는 코드를 따로 짰던 부분에 누락된 처리가 있어서, 공통 함수로 통일.
 
 **파일**: `server/request_handler.py` (`_try_intercept_returning_shelf`)
 
@@ -1059,6 +1086,7 @@ for ws_node, corridor in self.staging_manager.corridors.items():
 ---
 
 ### 수정 28: Staging 노드 이동 + Staging blocker deadlock 안전망 (2026-05-12)
+> **쉽게**: 대기 자리가 입구와 겹쳐서 대기자가 입구를 막던 문제 → 대기 자리를 작업대 반대편으로 옮김 + 막혔을 때 자동으로 비키도록 안전망 추가.
 
 **문제**: 사용자 1의 4-선반 주문 처리 중 두 AGV가 W33으로 동시 배달하면서 deadlock 발생.
 
@@ -1112,7 +1140,54 @@ AGV-2: 27 → 26 → 25 (staging_wait)
 
 ---
 
+### 수정 29: request_handler 대분리 + 모듈 이름 정리 (2026-05-12)
+> **쉽게**: 1602줄짜리 큰 파일을 역할별 3개로 쪼개고 헷갈리던 모듈 이름 정리 (기능 변경 없는 청소 작업).
+
+**배경**: `request_handler.py` 1602줄로 비대 + 일부 파일/클래스 이름이 실제 역할과 안 맞음 (task_scheduler vs task_manager 혼동, mqtt_publisher가 subscribe도 함 등)
+
+**변경 A — Mixin 분리 (3개)**: `request_handler.py` 1602줄 → 195줄 베이스 + 3 Mixin
+
+| Mixin 파일 | 클래스 | 역할 |
+|-----------|-------|------|
+| `_movement_mixin.py` (507줄) | `MovementMixin` | 이동 명령 발행 + 충돌/교착 회피 + 경로 계획 |
+| `_marker_mixin.py` (220줄) | `MarkerMixin` | AGV 이벤트 수신 (marker, cmd_ack, marker_trigger) |
+| `_workflow_mixin.py` (789줄) | `WorkflowMixin` | 주문/태스크/F-노드/인터셉트 워크플로우 |
+
+```python
+class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
+    # 베이스: __init__ (상태 변수 + 매니저), handle_message 라우터, 상태 조회
+```
+
+**변경 B — 파일/클래스 이름 (4쌍)**:
+- `task_scheduler.py / TaskScheduler` → `order_optimizer.py / OrderOptimizer`
+- `mqtt_publisher.py / MQTTPublisher` → `mqtt_client.py / MQTTClient`
+- `_collision_mixin.py / CollisionMixin` → `_movement_mixin.py / MovementMixin`
+- `_task_mixin.py / TaskMixin` → `_workflow_mixin.py / WorkflowMixin`
+
+**변경 C — 로직 이동 (2개)**:
+- `_calc_heading` (`_marker_mixin`) → `path_planner.calc_heading_from_path()` — 좌표 계산은 path_planner 도메인
+- turn heading 갱신 inline (`_marker_mixin._handle_cmd_ack`, 9줄) → `robot_manager.apply_turn(rid, cmd)` (1줄 위임)
+
+**부수 수정**: 잘못된 import 정리
+- `tests/conftest.py:27`, `tests/test_intercept.py:16`, `tests/test_smoke.py:6` — `from TU_Capstone_Design.server.*` → `from server.*`
+
+**검증**: pytest 21 passed 유지 (작업 전후 동일). 매 단계마다 회귀 확인.
+
+**근거**: 코드 가독성/유지보수성 향상 + 향후 yield 로직 등 수정 시 진입 비용 절감. 외부 API 변경 0.
+
+**수정 파일**:
+- `server/request_handler.py` (전면 슬림화)
+- `server/_movement_mixin.py`, `_marker_mixin.py`, `_workflow_mixin.py` (신규)
+- `server/order_optimizer.py`, `mqtt_client.py` (rename)
+- `server/path_planner.py` (calc_heading_from_path 추가)
+- `server/robot_manager.py` (apply_turn 추가)
+- `server/__init__.py`, `server/main.py`, `server/task_manager.py` (참조 갱신)
+- `tests/conftest.py`, `tests/test_intercept.py`, `tests/test_smoke.py` (import 수정)
+
+---
+
 ### 수정 30: Deadlock 안전망 확장 + idle 주차지 분리 + 선반 재픽업 fix (2026-05-15)
+> **쉽게**: (1) 픽킹 중이거나 정지 중인 AGV가 길 막아도 자동 비킴 안 되던 문제 (2) idle AGV가 다른 AGV 진입로에 주차해 마주보기 정지 (3) 작업대에 놓인 선반 다시 들 때 AGV가 빈손으로 떠나던 버그.
 
 **배경**: 시연용 자동 체인 테스트 중 3가지 결함 발견 — (1) `WAITING_FOR_PICK`/`IDLE` 로봇이 차단해도 deadlock 감지 안 됨, (2) idle AGV가 staging 노드를 주차지로 써서 active AGV staging 진입 차단 → head-on deadlock, (3) 작업대에 놓인 선반을 재픽업 시 carrying_shelf=None (포워딩/일반 배달 모두 영향).
 
@@ -1213,48 +1288,323 @@ for sid, (sx, sy) in shelf_origins.items():   # _place_shelf에서 갱신되는 
 
 ---
 
-### 수정 29: request_handler 대분리 + 모듈 이름 정리 (2026-05-12)
+### 수정 31: 리프트 동작 중 deadlock yield 차단 + staging 도착 후 blocked 해제 (2026-05-17)
+> **쉽게**: 선반 들어올리거나 내려놓는 중인 AGV에게 비키라고 시켜서 선반을 길에 떨어뜨리던 버그 + 대기 AGV 도착해도 다른 막힌 AGV를 안 풀어주던 버그.
 
-**배경**: `request_handler.py` 1602줄로 비대 + 일부 파일/클래스 이름이 실제 역할과 안 맞음 (task_scheduler vs task_manager 혼동, mqtt_publisher가 subscribe도 함 등)
+**증상**: 포워딩 시나리오에서 두 AGV가 정지. AGV-2가 노드 9에서 `lift_down` 중인데
+선반이 노드 9~1 사이에 떨어지고, AGV-1은 노드 10에서 영구 대기.
 
-**변경 A — Mixin 분리 (3개)**: `request_handler.py` 1602줄 → 195줄 베이스 + 3 Mixin
+**원인 A — 리프트 중 로봇에 forward 발행 (프로토콜 위반)**:
+- cmd-based 규칙은 "명령 1개 → 완료 신호(marker/cmd_ack) 대기 → 다음 명령"
+- `_resolve_deadlock`의 staging yield 분기가 AGV-2의 `lift_down` cmd_ack를 안 기다리고
+  `command_queue`를 덮어쓴 뒤 `forward` 발행 → AGV-2가 선반 내리는 중에 출발
+- 결과: `_place_shelf`가 AGV 현재 위치(노드 9~1 사이)에 선반을 떨어뜨림
+- 실물 RPi/STM32에서도 동일 위험 — 시뮬만의 문제가 아니라 서버 버그
 
-| Mixin 파일 | 클래스 | 역할 |
-|-----------|-------|------|
-| `_movement_mixin.py` (507줄) | `MovementMixin` | 이동 명령 발행 + 충돌/교착 회피 + 경로 계획 |
-| `_marker_mixin.py` (220줄) | `MarkerMixin` | AGV 이벤트 수신 (marker, cmd_ack, marker_trigger) |
-| `_workflow_mixin.py` (789줄) | `WorkflowMixin` | 주문/태스크/F-노드/인터셉트 워크플로우 |
+**원인 B — staging 도착 시 blocked 로봇 해제 누락**:
+- `_handle_marker_report`의 `staging_wait` 분기가 조기 return → 함수 끝의
+  `_retry_blocked_robots()` 스킵 → staged AGV가 직전 노드를 비웠는데도 대기 로봇 미해제
 
-```python
-class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
-    # 베이스: __init__ (상태 변수 + 매니저), handle_message 라우터, 상태 조회
-```
+**수정 내용**:
+- `request_handler.py` — 상태 변수 `_lifting_robots: Set[int]` 추가 (lift cmd 발행 후 ack 대기 집합)
+- `_workflow_mixin.py` — lift_up/lift_down 발행 3곳에서 `_lifting_robots.add(rid)`
+- `_movement_mixin.py` `_resolve_deadlock` — 진입 시 deadlock 쌍 중 리프트 중 로봇이
+  있으면 보류 후 return
+- `_marker_mixin.py` `_handle_cmd_ack` — lift ack 시 `_lifting_robots.discard(rid)` +
+  `_retry_blocked_robots()` 호출 (보류된 deadlock 재해제)
+- `_marker_mixin.py` `_handle_marker_report` — `staging_wait` 조기 return 전
+  `_retry_blocked_robots()` 추가
 
-**변경 B — 파일/클래스 이름 (4쌍)**:
-- `task_scheduler.py / TaskScheduler` → `order_optimizer.py / OrderOptimizer`
-- `mqtt_publisher.py / MQTTPublisher` → `mqtt_client.py / MQTTClient`
-- `_collision_mixin.py / CollisionMixin` → `_movement_mixin.py / MovementMixin`
-- `_task_mixin.py / TaskMixin` → `_workflow_mixin.py / WorkflowMixin`
+**효과**: 리프트가 끝날 때까지 forward 보류 → 선반이 노드 9에 정상 안착,
+lift ack 시점에 deadlock 재해제 → AGV-2 정상 staging 이동 → AGV-1 해제.
 
-**변경 C — 로직 이동 (2개)**:
-- `_calc_heading` (`_marker_mixin`) → `path_planner.calc_heading_from_path()` — 좌표 계산은 path_planner 도메인
-- turn heading 갱신 inline (`_marker_mixin._handle_cmd_ack`, 9줄) → `robot_manager.apply_turn(rid, cmd)` (1줄 위임)
+**수정 파일**: `server/request_handler.py`, `server/_workflow_mixin.py`,
+`server/_movement_mixin.py`, `server/_marker_mixin.py`
 
-**부수 수정**: 잘못된 import 정리
-- `tests/conftest.py:27`, `tests/test_intercept.py:16`, `tests/test_smoke.py:6` — `from TU_Capstone_Design.server.*` → `from server.*`
+---
 
-**검증**: pytest 21 passed 유지 (작업 전후 동일). 매 단계마다 회귀 확인.
+### 수정 32: planned_path slide + IDLE 영구 장애물 (Layer 1, 2026-05-21)
+> **쉽게**: 계획된 경로가 실제 진행과 안 맞아 시간 계산이 어긋남 + 주차 중인 AGV 위로 다른 AGV 경로를 그리던 문제 → 매 노드마다 경로 보정 + 주차 차량을 장애물로 등록.
 
-**근거**: 코드 가독성/유지보수성 향상 + 향후 yield 로직 등 수정 시 진입 비용 절감. 외부 API 변경 0.
+**배경**: AGV-2가 idle 주차 중인 노드(예: 25) 위로 AGV-1의 경로가 plan되어
+충돌 → `Deadlock (alt-path)` → `Goal-locked` 왕복 cascade 발생.
+빈 차로 yield되어 움직이는 비정상 동작 + 그 과정에서 `_pending_cmd` 단일 슬롯
+덮어쓰기로 `turn_180` 유실까지 이어짐. 상세 분석은 `REDESIGN.md` 참고.
 
-**수정 파일**:
-- `server/request_handler.py` (전면 슬림화)
-- `server/_movement_mixin.py`, `_marker_mixin.py`, `_workflow_mixin.py` (신규)
-- `server/order_optimizer.py`, `mqtt_client.py` (rename)
-- `server/path_planner.py` (calc_heading_from_path 추가)
-- `server/robot_manager.py` (apply_turn 추가)
-- `server/__init__.py`, `server/main.py`, `server/task_manager.py` (참조 갱신)
-- `tests/conftest.py`, `tests/test_intercept.py`, `tests/test_smoke.py` (import 수정)
+**근본 원인 (2가지 갭)**:
+- **갭 3 (planned_path 박제)**: plan 발행 시 `planned_path`가 박제되고
+  AGV 이동 시 갱신 안 됨 → A*의 시간 예약 시간축이 stale → 부정확한 plan
+- **갭 4 (주차 차량 미등록)**: `planned_path`가 빈 IDLE 로봇은 현재 위치를
+  t=0~2만 예약 → A*가 t≥3 시점엔 그 노드를 빈 노드로 오판 → 주차 위 plan
+
+**수정 내용**:
+- `_marker_mixin.py` `_handle_marker_report` — 마커 도착 시 `planned_path`를
+  current_node 기준으로 앞에서 자르기 (heading 계산 후, staging 체크 전)
+  ```python
+  if node in robot.planned_path:
+      idx = robot.planned_path.index(node)
+      robot.planned_path = robot.planned_path[idx:]
+  ```
+- `_movement_mixin.py:531-534` — `planned_path` 빈 로봇의 t=0~2 예약을
+  `excluded_transit` 추가로 교체 (영구 장애물 등록)
+  ```python
+  if not other.planned_path:
+      excluded_transit.add(other.current_node)
+  ```
+
+**효과**:
+- 갭 3 해결 → 다른 AGV의 시간 예약이 실제 진행과 정합 → 포워딩 비효율 경로 감소
+- 갭 4 해결 → A*가 주차 차량 위로 경로 안 그림 → blocked/deadlock_resolve 발동 안 함
+- 부수 효과: deadlock cascade 빈도 급감 → `_pending_cmd` 덮어쓰기 노출 빈도도 감소
+  (단, 결함 자체는 Layer 1.3에서 별도 해결 예정)
+
+**수정 파일**: `server/_marker_mixin.py`, `server/_movement_mixin.py`
+**테스트**: `pytest` 21 passed (회귀 통과)
+**상태**: 코드 완료, 4 시나리오 런타임 검증 필요 🔲
+
+---
+
+### 수정 33: 매 노드 lookahead replan (Layer 2, 2026-05-21)
+> **쉽게**: 출발 후 다른 AGV 상태가 바뀌어 원래 경로가 안 맞게 되면, 매 노드 지날 때마다 미리 확인해서 우회.
+
+**배경**: 수정 32 적용 후에도 timing 케이스에서 deadlock 발생.
+시나리오: AGV-1이 plan 발행 시 AGV-2는 task 수행 중(IDLE 아님) →
+A*가 AGV-2 향후 주차 노드(25)를 정상 통과 경로로 채택 → 실행 중 AGV-2가
+task 완료 → 25에 IDLE 주차 → AGV-1은 stale plan으로 계속 25 향함 → blocked → yield 캐스케이드.
+
+**근본 원인**: plan 시점엔 정합했지만 실행 도중 다른 AGV 상태 변화로 stale 되는 경우,
+사후 deadlock_resolve만 동작 → yield 발생.
+
+**해결 — 매 노드 도착 시 사전 검사**:
+유저 의도 아키텍처(매 step lookahead + 사전 replan)를 구현.
+`_movement_mixin.py`에 `_lookahead_replan(rid)` 헬퍼 추가, `_marker_mixin.py`에서
+`_send_next_command` 직전에 호출.
+
+검사 항목:
+- (1) IDLE 로봇이 내 `planned_path[1:]`에 있나 → 영구 장애물
+- (2) 다른 AGV의 slide된 `planned_path[i]`와 내 `planned_path[i]` 동일 → 시간 교차
+
+충돌 예정 발견 시 즉시 `_plan_and_publish_move(rid, current, goal)` → 새 경로로 우회.
+replan 시 첫 cmd는 `_plan_and_publish_move`가 이미 발행하므로 `_send_next_command` 스킵.
+
+**효과**:
+- IDLE 전환으로 인한 stale plan 자동 감지 → blocked/yield 발동 안 함
+- 시간 교차도 사전 감지 → cooperative A*가 못 잡은 케이스도 보완
+- deadlock_resolve는 lookahead가 못 잡는 엣지 케이스용 안전망으로만 동작
+
+**Layer 구조 완성**:
+- Layer 1.1 (slide) — planned_path 시간축 정합 (수정 32)
+- Layer 1.2 (IDLE excluded) — A*가 주차 차량 위 plan 안 함 (수정 32)
+- Layer 2 (lookahead) — 매 step 사전 충돌 검사 (수정 33)
+- Layer 3 — 기존 deadlock_resolve 그대로 (안전망)
+
+**수정 파일**: `server/_movement_mixin.py`, `server/_marker_mixin.py`
+**테스트**: `pytest` 21 passed
+**상태**: 코드 완료, 시연 시나리오 런타임 검증 필요 🔲
+
+---
+
+### 수정 34: 포워딩 gateway-staging (Dynamic 분리) + Layer 1.3 in-flight cmd 추적 (2026-05-21)
+> **쉽게**: 선반 들고 멀리 우회 대기하던 걸 진입로 바로 앞에서 대기하도록 + 명령을 너무 빨리 보내서 AGV가 이전 명령 잊어버리던 문제 해결.
+
+**Part A — 이슈 G: 포워딩 시 gateway-staging (Dynamic 분리)**
+
+**배경**: 포워딩 AGV가 목적지 corridor 점유 중일 때 멀리 있는 staging_node(1, 41)로
+우회 → 선반 들고 9 nodes 이동하는 비효율.
+
+**해결 — Option A (Dynamic 분리)**:
+- `should_stage(..., is_forwarding=True)` → corridor 진입로 위 `gateway_node` 반환 (17, 25)
+- `should_stage(..., is_forwarding=False)` → 기존 `staging_node` 반환 (1, 41)
+- `_plan_and_publish_move(..., is_forwarding=)` 파라미터 추가, 포워딩 콜에서 `True` 전달
+- `is_staged_agv`, `get_ws_for_staging_node` 큐 기반 조회 (gateway에서도 staging 인식)
+- `excluded_transit`에 `_is_staging_robot(other_rid)` 추가 — outbound AGV가 staging
+  AGV를 영구 장애물로 보고 자동 우회
+
+**검토 결과**: Dynamic vs Strict 분리 비교 후 Dynamic 채택. Strict는 gateway가 IDLE
+주차지(수정 30)와 모순되어 보류. 시연 검증 후 부족하면 Strict로 보강 검토.
+
+**수정 파일**: `server/staging_manager.py`, `server/_movement_mixin.py`, `server/_workflow_mixin.py`
+
+**Part B — Layer 1.3: in-flight cmd 추적**
+
+**배경**: 서버가 turn_180 발행 직후 forward 발행 시, AGV `_pending_cmd` 단일 슬롯이
+덮어써져 turn_180 유실 → 엉뚱한 방향 이동 (REDESIGN.md 버그 C).
+
+**근본 원인**: 서버가 ack/marker를 기다리지 않고 다음 cmd 발행하는 케이스 존재.
+AGV의 single-slot 채널과 동기화 안 됨.
+
+**해결 — 서버 측 in-flight 추적**:
+- `_in_flight_cmds: Dict[int, str]` 신규 상태 (`request_handler.py`)
+- `_send_next_command` 진입 시: `rid in _in_flight_cmds` → `_blocked_robots.add` + return False
+- publish 직후: `_in_flight_cmds[rid] = next_cmd`
+- `_handle_marker_report` 진입 시: `_in_flight_cmds.pop(rid, None)` (forward 완료 응답)
+- `_handle_cmd_ack` 진입 시: `_in_flight_cmds.pop(rid, None)` (turn/lift 완료 응답)
+
+**효과**:
+- 명령 발행은 항상 직전 cmd 완료 후 (`서버 ↔ AGV` 명령 채널 1-슬롯 동기화)
+- back-to-back 발행으로 인한 명령 유실 차단 (실물 STM32 펌웨어 단순 유지에 유리)
+- in-flight 해제 시 `_retry_blocked_robots()`가 자동 재시도 → 보류된 cmd 재발행
+
+**수정 파일**: `server/request_handler.py`, `server/_movement_mixin.py`, `server/_marker_mixin.py`
+**테스트**: `pytest` 21 passed
+**상태**: 코드 완료, 시연 시나리오 런타임 검증 필요 🔲
+
+---
+
+### 수정 35: Isaac Sim — 선반 잘못 식별 (순간이동) (2026-05-23)
+> **쉽게**: 작업대에 선반 두 개가 동시에 놓였던 적이 있으면, 다음에 들어올릴 때 엉뚱한 선반을 들고 가버림.
+
+- **현상**: AGV-2가 W33에서 shelf 22를 재픽업하려고 lift_up 했는데, 이전에 AGV-1이
+  같은 W33에 놓았다가 들고 떠난 shelf 20이 갑자기 W33으로 순간이동
+- **원인**: `step6_visual.py:_find_nearby_shelf`가 `shelf_origins` 좌표로 가장 가까운
+  선반을 찾는데, 두 선반이 같은 W에 놓였던 적이 있으면 좌표 동일 → 동률에서 dict
+  삽입 순서상 먼저인 shelf 20이 매칭됨. AGV-2가 shelf 20을 들고 있다고 판단하고
+  `_sync_shelf`가 매 프레임 shelf 20의 USD translate를 AGV-2 위치로 강제 Set
+- **수정**: `execute_cmd("lift_up")`에서 `shelf_origins.pop(shelf_id)` — 들어올린
+  선반은 좌표 등록에서 제외. `_place_shelf`(lift_down)에서 다시 등록되므로 정합성 유지
+
+**수정 파일**: `isaac_simulation/step6_visual.py:244-247`
+
+---
+
+### 수정 36: 포워딩 release_early에서 gateway-staging 매칭 실패 (2026-05-23)
+> **쉽게**: 작업대 앞 진입로에서 대기 중일 때 길이 풀려도 출발 신호를 못 알아채고 그 자리에서 영원히 멈춤.
+
+- **현상**: AGV가 forwarding 모드로 gateway-staging(node 17) 향하던 중 다른 AGV의
+  corridor 해제로 released-early → `_staged_to_ws`에 등록 → AGV가 17 도착했는데도
+  진입 plan 발행 안 됨 → 영구 정지
+- **원인**: `_staged_to_ws[rid] = target_ws`만 저장. 도착 시 `get_ws_for_staging_node(17)`
+  역조회를 사용했는데, `_staging_to_ws` 정적 매핑은 canonical staging_node(1)만
+  등록돼있어 gateway(17)은 None 반환
+- **수정**: `_staged_to_ws[rid] = (target_ws, expected_node)` 튜플로 저장. 도착 시
+  `node == expected_node` 직접 비교 — 역조회 불필요
+
+**수정 파일**: `server/request_handler.py:71`, `server/_marker_mixin.py:81/89-95/121`
+
+---
+
+### 수정 37: Corridor 풀려도 staging까지 우회 진행 (2026-05-23)
+> **쉽게**: 길이 막혀서 멀리 돌아가던 중 길이 풀렸는데도, 끝까지 돌아간 뒤에야 작업대로 진입함.
+
+- **현상**: AGV-1이 W33 배달 plan 시점 corridor 점유 중 → staging=41로 redirect.
+  이동 중 다른 AGV가 corridor 해제했지만 AGV-1은 41 도착까지 진행. `34 → 33` 1칸이면
+  될 걸 `34 → 42 → 41 → 33` 3칸 우회
+- **원인**: `_marker_mixin._staged_to_ws` 분기가 `node == expected_node` 일 때만 즉시
+  replan. 이동 중 corridor 상태 재확인 없음
+- **수정**: 매 마커 도착 시 `corridor.state == FREE` 또는 `occupying_rid == rid` 이면
+  즉시 현재 위치에서 직진 replan (수정 36의 튜플 저장과 함께 가능해진 동작)
+
+**수정 파일**: `server/_marker_mixin.py:89-103`
+
+---
+
+### 수정 38: 출발 시점 corridor 점유로 우선순위 역전 (gateway 도착 시 선점) (2026-05-23)
+> **쉽게**: 멀리서 출발한 AGV가 작업대를 먼저 찜해놔서, 가까이서 빨리 도착한 AGV가 오히려 한참 기다림.
+
+- **현상**: AGV-2가 W9으로 8노드 긴 경로 plan 시 즉시 corridor 점유. AGV-1이
+  forwarding으로 gateway(17)에 더 빨리 도착해도 점유 못 빼앗고 AGV-2 도착·픽킹·
+  복귀까지 17에서 대기
+- **원인**: `should_stage`가 plan 시점에 corridor.state=OCCUPIED로 확정. 도착 순서
+  변화에 따라 재평가 없음
+- **수정**: `try_preempt_at_gateway` 신규. gateway 도착한 staged AGV가 corridor
+  owner가 corridor area({ws, gateway}) 밖에 있는지 확인 → 밖이면 점유 이전 + 이전
+  owner는 canonical staging으로 재라우팅. `PreemptResult` dataclass + `get_robot_node`
+  콜백 의존성 추가
+
+**수정 파일**: `server/staging_manager.py`, `server/_marker_mixin.py:104-122`,
+`server/main.py`, `tests/conftest.py`
+
+---
+
+### 수정 39: Staging yield 무한 turn 루프 (2026-05-23)
+> **쉽게**: 비켜주기 명령이 계속 새로 발행돼서 AGV가 앞으로는 안 가고 제자리에서 회전만 무한 반복.
+
+- **현상**: deadlock yield 발동 후 AGV가 turn_left → cmd_ack → turn_180 →
+  cmd_ack → turn_right → ... 무한 회전. forward 한 번도 발행 안 됨
+- **원인**: 매 cmd_ack마다 `_retry_blocked_robots → _resolve_deadlock`이 호출되며
+  staging-yield 분기에서 `yield_robot.command_queue`를 새 [turn, forward]로 덮어씀.
+  heading이 매번 바뀌어 회전 방향이 다름. `_yielded_staging_robots`에 들어있어도
+  중복 진입 가드 없음 (goal-locked 분기엔 같은 가드 있었으나 staging-yield 분기엔
+  빠져있었음)
+- **수정**: staging-yield 분기 진입 직후 `yield_rid in self._yielded_staging_robots`
+  이면 즉시 return
+
+**수정 파일**: `server/_movement_mixin.py:259-262` (가드 1줄 추가)
+
+---
+
+### 수정 40: Preempt race — owner가 corridor 향해 forward in-flight (2026-05-23)
+> **쉽게**: 다른 AGV가 작업대 코앞까지 다 와있는데 자리를 빼앗아서, 결국 작업대 들어갔다가 도로 끌려나옴.
+
+- **현상**: AGV-1 gateway(25) 도착 시 owner AGV-2가 trigger 노드(34)에 있어 preempt
+  허용. 하지만 AGV-2의 forward → 33 cmd는 이미 in-flight → AGV-2 그대로 W33 진입
+  후 wait_picking → AGV-1도 같은 노드 노림 → deadlock yield로 AGV-2를 다시 끌어냄
+  (작업대 진입 후 후퇴)
+- **원인**: 수정 38의 `try_preempt_at_gateway`가 owner의 **현재 노드**만 봄. 다음 노드가
+  corridor area 안에 있어도(cmd in-flight) 모름
+- **수정**: `staging_manager`에 `get_robot_planned_path` 콜백 추가. preempt 시 owner의
+  `planned_path[1]`이 corridor_area 안에 있으면 거부
+
+**수정 파일**: `server/staging_manager.py` (콜백 + 가드), `server/main.py`,
+`tests/conftest.py`
+
+---
+
+### 수정 41: Yield 안전 결함 — WAITING_FOR_PICK AGV 끌어내기 (2026-05-23)
+> **쉽게**: 작업대에서 사람이 픽킹 중인 AGV를, 뒤에 온 다른 AGV가 비키라고 강제로 끌어냄 (실물이면 부상 위험).
+
+- **현상**: AGV-2가 W에서 wait_picking 상태인데 AGV-1이 같은 W 노림 → deadlock yield
+  발동 → AGV-2가 turn_180 + forward로 W 밖으로 끌려나옴. 픽킹 시작도 못 함
+- **원인**: `_resolve_deadlock` staging-yield 분기에 로봇 상태 가드 없음. 실물에서
+  픽업자가 선반 위에서 작업 중일 때 AGV 이동하면 부상/선반 낙하 위험
+- **수정**: staging-yield 분기 진입 직후 `yield_robot.status in (WAITING_FOR_PICK,
+  PICKING_UP_SHELF)` 이면 yield 거부. blocker는 픽킹 완료(자연 corridor 해제)까지 대기
+
+**수정 파일**: `server/_movement_mixin.py:259-270` (안전 가드 추가)
+
+**테스트** (수정 35~41 전체): `pytest` 21 passed
+**상태**: 코드 완료, 런타임 시연 검증 진행 — 미해결 새 버그(시작 1+시작 2 동시
+입력 시 양쪽 staging yield deadlock) 별도 추적
+
+### 수정 42: Staging plan이 corridor 경유 → 우회 강제 (2026-05-23)
+> **쉽게**: staging으로 가는 경로가 corridor를 가로지르도록 짜여서 점유 중인 다른 AGV와 충돌 위험. corridor 통과 금지.
+
+- **현상**: AGV-1이 staging_node로 가는데 A*가 corridor 경유 경로를 선택 → corridor 점유자(AGV-2)와 충돌 직전
+- **원인**: staging redirect 시 `excluded_transit`에 corridor `ws_node`를 추가하지 않음 → A*가 W 노드를 통과해도 OK라고 판단
+- **수정**: `_plan_and_publish_move`에 `staging_excluded_node` 추적 → staging redirect 시 corridor ws_node를 `excluded_transit`에 강제 포함
+
+**수정 파일**: `server/_movement_mixin.py`
+
+### 수정 43: Preempt + turn cmd in-flight race (heading 예측) (2026-05-23)
+> **쉽게**: 회전 명령은 보냈지만 ack 안 온 상태에서 A*가 옛 heading으로 계획해서 잘못된 방향으로 가는 race condition.
+
+- **현상**: turn_left cmd 발행 → ack 도착 전에 다음 dispatch가 일어나면 robot.heading은 옛 값 → A*가 옛 heading 기준으로 turn_penalty 계산 → 비효율 경로 또는 잘못된 회전 방향
+- **원인**: `_in_flight_cmds`에 turn cmd가 있으면 ack 도착 후 heading이 바뀔 예정인데, A*는 현재 heading 사용
+- **수정**: `_predict_heading_after_inflight(rid)` 헬퍼 — in-flight turn cmd가 있으면 그 회전을 적용한 heading 반환. `_plan_and_publish_move` + `_path_to_commands` 양쪽에서 사용
+
+**수정 파일**: `server/_movement_mixin.py`
+
+### 수정 44: Dispatch 시점 ETA 비교 (staging 우회 회피) (2026-05-24)
+> **쉽게**: corridor 점유자가 곧 빠질 예정이면 staging까지 멀리 우회하지 말고 현재 자리에서 잠깐 기다리는 게 이득.
+
+- **현상**: AGV-1이 W2로 가는데 점유자(AGV-2)가 곧 forwarding으로 빠질 예정이었음에도 staging_node 1로 우회 → 13→5→4→3→2→1→9 row 1 detour. 중간에 점유자가 빠졌지만 row 1에 commit돼서 turn_penalty 때문에 변경해도 손해
+- **원인**: dispatch 시점에 corridor 점유 = 무조건 staging. 점유자의 ETA 무시
+- **수정** (`_movement_mixin.py`):
+  - `_estimate_exit_steps(occupant, corridor_area)`: planned_path 첫 corridor 밖 노드 인덱스 = 남은 step
+  - `_estimate_path_cost(start, goal)`: `plan_single_robot` 호출 → step 수 (heuristic)
+  - `_should_hold_for_eta(rid, start, ws_node)`: `max(eta+1, direct) < (start→staging + staging→ws)` 이면 hold
+  - dispatch 분기: should_stage가 staging_node 반환 시 ETA 비교 → hold 결정되면 `staging_node = start` override → 큐에 등록만 (이동 X) → 기존 release 흐름이 자동 wake-up
+- **한글 cheat sheet 신규**: `server/DISPATCH_FLOW.md` — 주문 수신 → cmd 발행 전체 흐름
+
+**Hotfix (2026-05-24)**:
+- **현상**: AGV-2가 W로 진입 시작했을 뿐(픽킹 전)인데 AGV-1이 hold됨 → AGV-2 픽킹 끝날 때까지 무한 대기
+- **원인**: `_estimate_exit_steps`가 occupant planned_path 첫 corridor 밖 노드 = 0 반환 (occupant가 밖에서 진입 중) → ETA=0 오판
+- **수정**: `_should_hold_for_eta` 시작에 `if not corridor.is_exiting: return False` 가드 추가. ETA hold는 퇴출 phase일 때만 유효
+
+**수정 파일**: `server/_movement_mixin.py`, `server/DISPATCH_FLOW.md` (신규), `CLAUDE.md`
+
+**테스트** (수정 42~44): `pytest` 21 passed
+**상태**: 코드 완료, 런타임 검증 — 수정 44 hotfix 적용 후 Isaac Sim 재실행 필요
 
 ---
 

@@ -108,9 +108,9 @@ class PathPlanner:
         goal: int,
         reserved_nodes: Set[Tuple[int, int]],
         reserved_edges: Set[Tuple[int, int, int]],
-        max_time: int = 50,
+        max_time: int = 50,           # PARAM: A* 시간 horizon (step). 길수록 우회/대기 옵션 ↑, 비용 ↑
         excluded_transit: Optional[Set[int]] = None,
-        turn_penalty: float = 0.3,
+        turn_penalty: float = 0.3,    # PARAM: 방향 전환 추가 비용 (0=무시). ↑하면 직선 선호, 회전 ↓
         start_heading: Optional[int] = None,  # 서버 기준 degree (0=N,90=E,180=S,270=W)
     ) -> Optional[List[Tuple[int, int]]]:
         """

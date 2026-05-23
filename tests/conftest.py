@@ -103,7 +103,17 @@ def handler(config: Config, mock_mqtt: MockMqttPublisher) -> RequestHandler:
     path_planner = PathPlanner(config.map_file)
     robot_manager = RobotManager(config)
     shelf_manager = ShelfManager(config.shelf_config_file)
-    staging_manager = StagingManager(shelf_manager.workstations)
+    staging_manager = StagingManager(
+        shelf_manager.workstations,
+        get_robot_node=lambda rid: (
+            robot_manager.get_robot(rid).current_node
+            if robot_manager.get_robot(rid) else None
+        ),
+        get_robot_planned_path=lambda rid: (
+            robot_manager.get_robot(rid).planned_path
+            if robot_manager.get_robot(rid) else None
+        ),
+    )
     task_manager = TaskManager(shelf_manager, path_planner)
 
     rh = RequestHandler(

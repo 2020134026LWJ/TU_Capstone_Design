@@ -335,6 +335,7 @@ class WorkflowMixin:
 
                 # lift_up 명령 발행 → AGV 리프트 올림 → cmd_ack 대기
                 self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
+                self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
                 return {
                     "type": "robot_arrived_ack",
                     "success": True,
@@ -373,6 +374,7 @@ class WorkflowMixin:
             # 선반 복귀/포워딩 목적지 도착 → lift_down 명령 발행 (cmd_ack 대기)
             shelf_id = current_st.shelf_id
             self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_down")
+            self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
             action = "waiting_shelf_putdown" if st_type == SubTaskType.RETURN_SHELF else "waiting_shelf_putdown_forward"
             return {
                 "type": "robot_arrived_ack",
@@ -621,7 +623,8 @@ class WorkflowMixin:
                 # 즉시 release_corridor_without_trigger 하면 gateway를 아직 못 빠져나간
                 # 포워딩 로봇과 스테이징 해제 로봇이 gateway에서 충돌함
                 self.staging_manager.mark_exiting(source_ws, robot.rid)
-                self._plan_and_publish_move(robot.rid, source_ws, forward_ws)
+                # is_forwarding=True → 목적지 corridor busy 시 staging_node 대신 gateway에서 대기
+                self._plan_and_publish_move(robot.rid, source_ws, forward_ws, is_forwarding=True)
                 return {"success": True, "action": "forwarding_shelf", "forward_to_ws": forward_ws}
 
         elif result.get("action") == "shelf_done_pickup_for_return":
@@ -634,6 +637,7 @@ class WorkflowMixin:
                 self.robot_manager.set_carrying_shelf(robot.rid, shelf_id_r)
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
                 self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
+                self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
                 self._forwarded_shelf_handlers.pop(shelf_id_r, None)
                 print(f"[RequestHandler] robot {robot.rid}: re-pickup shelf {shelf_id_r} for return")
                 return {"success": True, "action": "pickup_for_return", "shelf_id": shelf_id_r}

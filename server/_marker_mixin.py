@@ -40,6 +40,8 @@ class MarkerMixin:
         # 도착 노드 예약 해제 (이제 current_node로 갱신되므로 예약 불필요)
         if self._reserved_nodes.get(node) == rid:
             del self._reserved_nodes[node]
+        # Layer 1.3: forward 완료 → in-flight 해제 (다음 cmd 발행 가능)
+        self._in_flight_cmds.pop(rid, None)
         self.robot_manager.update_robot_position(rid, node)
 
         # heading 업데이트: 마커 메시지에 포함된 경우 우선 사용 (ArUco 포즈 기반)
@@ -56,6 +58,12 @@ class MarkerMixin:
                 robot.planned_path, node
             ) or robot.heading
 
+        # planned_path slide: 이미 지나친 노드 제거 → A* 시간 예약을 실제 진행과 정합
+        # (heading 계산이 prev_node를 보므로 위 fallback 뒤에서 실행)
+        if node in robot.planned_path:
+            idx = robot.planned_path.index(node)
+            robot.planned_path = robot.planned_path[idx:]
+
         # 위치 기반 회랑 자동 해제
         released = self.staging_manager.check_position_release(rid, node)
         if released is not None:
@@ -70,7 +78,7 @@ class MarkerMixin:
                 )
             # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
             elif released_robot and released_robot.current_node != released.staging_node:
-                self._staged_to_ws[released.rid] = released.target_ws
+                self._staged_to_ws[released.rid] = (released.target_ws, released.staging_node)
                 print(f"[RequestHandler] Robot {released.rid}: released early (at {released_robot.current_node}), "
                       f"waiting for staging_node {released.staging_node}")
             else:
@@ -78,17 +86,42 @@ class MarkerMixin:
                 self._plan_and_publish_move(released.rid, start, released.target_ws)
 
         # 포워딩으로 미리 해제된 로봇이 스테이징 노드 도착
+        # 또는 이동 중인데 corridor가 본인 owned/FREE 상태가 되면 즉시 직진 replan (우회 회피)
         if rid in self._staged_to_ws:
-            target_ws = self._staged_to_ws[rid]
-            staging_ws = self.staging_manager.get_ws_for_staging_node(node)
-            if staging_ws == target_ws:
+            target_ws, expected_node = self._staged_to_ws[rid]
+            corridor = self.staging_manager.corridors.get(target_ws)
+            can_proceed = (
+                node == expected_node
+                or (corridor is not None
+                    and (corridor.state == CorridorState.FREE
+                         or corridor.occupying_rid == rid))
+            )
+            if can_proceed:
                 del self._staged_to_ws[rid]
                 self._plan_and_publish_move(rid, node, target_ws)
                 return {"type": "marker_ack", "success": True, "action": "staging_released_proceed"}
 
-        # 스테이징 대기 중인 로봇은 명령 전송 보류
+        # 스테이징 대기 중인 로봇 처리
         if self.staging_manager.is_staged_agv(node, rid):
+            # gateway 도착 시 점유자가 아직 corridor area 밖이면 선점 시도
+            preempted = self.staging_manager.try_preempt_at_gateway(node, rid)
+            if preempted is not None:
+                target_ws = preempted.target_ws
+                # 선점한 본인 — 정상 진입 plan 발행
+                self._plan_and_publish_move(rid, node, target_ws)
+                # 이전 점유자 — 현재 위치에서 canonical staging으로 재라우팅
+                prev_robot = self.robot_manager.get_robot(preempted.previous_rid)
+                if prev_robot is not None:
+                    print(f"[RequestHandler] Robot {preempted.previous_rid}: preempted by "
+                          f"AGV-{rid} at W{target_ws}, re-routing from {prev_robot.current_node}")
+                    self._plan_and_publish_move(
+                        preempted.previous_rid, prev_robot.current_node, target_ws
+                    )
+                return {"type": "marker_ack", "success": True, "action": "corridor_preempted"}
+
             print(f"[RequestHandler] Robot {rid}: staging at node {node}, holding commands")
+            # 수정 31: staged AGV가 직전 노드를 비웠으므로 블록된 로봇 재시도
+            self._retry_blocked_robots()
             return {"type": "marker_ack", "success": True, "action": "staging_wait"}
 
         # 스테이징 트리거 마커 체크 (퇴출 중인 로봇만 — RETURNING_SHELF 상태)
@@ -108,7 +141,7 @@ class MarkerMixin:
                 )
             # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
             elif released_robot and released_robot.current_node != released_by_trigger.staging_node:
-                self._staged_to_ws[released_by_trigger.rid] = released_by_trigger.target_ws
+                self._staged_to_ws[released_by_trigger.rid] = (released_by_trigger.target_ws, released_by_trigger.staging_node)
                 print(f"[RequestHandler] Robot {released_by_trigger.rid}: trigger-released early "
                       f"(at {released_robot.current_node}), waiting for staging_node {released_by_trigger.staging_node}")
             else:
@@ -129,8 +162,10 @@ class MarkerMixin:
                     self._try_assign_pending_tasks()
                     return result
 
-        # 목표 노드가 아닌 중간 노드 → 다음 명령 전송
-        self._send_next_command(rid)
+        # 목표 노드가 아닌 중간 노드 → lookahead 검사 → 충돌 예정이면 사전 replan
+        # replan되면 _plan_and_publish_move가 이미 첫 cmd 발행했으므로 _send_next_command 스킵
+        if not self._lookahead_replan(rid):
+            self._send_next_command(rid)
 
         # 블록된 다른 로봇 재시도
         self._retry_blocked_robots()
@@ -159,6 +194,9 @@ class MarkerMixin:
         if not robot:
             return self._error_response(f"Robot {rid} not found")
 
+        # Layer 1.3: turn/lift 완료 → in-flight 해제 (다음 cmd 발행 가능)
+        self._in_flight_cmds.pop(rid, None)
+
         # 회전 완료는 태스크 유무와 무관하게 heading 갱신 + 다음 명령 전송
         # (return-home 등 태스크 없는 이동 중에도 heading을 정확히 유지해야 함)
         if cmd in ("turn_left", "turn_right", "turn_180"):
@@ -166,6 +204,10 @@ class MarkerMixin:
             self._send_next_command(robot.rid)
             self._retry_blocked_robots()
             return {"type": "cmd_ack_response", "success": True, "action": f"turned_{cmd}"}
+
+        # 수정 31: 리프트 완료 보고 → _lifting_robots 해제 (task 유무와 무관하게)
+        if cmd in ("lift_up", "lift_down"):
+            self._lifting_robots.discard(rid)
 
         task_id = robot.current_task_id
         task = self.task_manager.get_task(task_id) if task_id else None
@@ -177,11 +219,15 @@ class MarkerMixin:
             return {"type": "cmd_ack_response", "success": True, "action": "no_subtask"}
 
         if cmd == "lift_up":
-            return self._handle_pickup_ack(robot, task, current_st)
+            result = self._handle_pickup_ack(robot, task, current_st)
         elif cmd == "lift_down":
-            return self._handle_putdown_ack(robot, task, current_st)
+            result = self._handle_putdown_ack(robot, task, current_st)
+        else:
+            return {"type": "cmd_ack_response", "success": True, "action": "unknown_cmd"}
 
-        return {"type": "cmd_ack_response", "success": True, "action": "unknown_cmd"}
+        # 수정 31: 리프트 중이라 보류했던 deadlock yield를 이제 재해제
+        self._retry_blocked_robots()
+        return result
 
     # ─── 스테이징 마커 트리거 ───
 
