@@ -102,10 +102,11 @@ TU_Capstone_Design/
 +-- FLOWCHART.md                # 알고리즘 플로우차트 + 수정 이력
 |
 +-- warehouse_gui_server/       # 작업자 GUI + 재고 서버
-|   +-- warehouse_gui.py        # Kivy 터치스크린 GUI (Raspberry Pi 실행)
-|   +-- warehouse_server.py     # Flask HTTP 서버 + SQLite 재고 관리
-|   +-- excel_to_sqlite.py      # 엑셀 -> SQLite DB 변환 (최초 1회)
-|   +-- admin_gui.py            # 관리자 GUI
+|   +-- warehouse_gui_v2.py     # KivyMD 터치스크린 GUI (Raspberry Pi, IP 입력 팝업)
+|   +-- warehouse_server_v2.py  # Flask HTTP + MQTT + SQLite 재고 관리
+|   +-- excel_to_sqlite.py      # 데이터 베이스.xlsx -> warehouse.db (최초 1회)
+|   +-- 사용자{1,2}주문.xlsx    # 주문 데이터
+|   +-- 데이터 베이스.xlsx      # 재고 마스터
 |
 +-- archive/                    # 이전 버전 (v1~v3, 참조용)
 +-- README.md
@@ -668,10 +669,10 @@ python3 mqtt_test.py
 # 노트북 터미널 1: AGV 서버
 cd TU_Capstone_Design && python3 -m server.main
 
-# 노트북 터미널 2: 재고 서버 (최초 1회 DB 생성 필요)
+# 노트북 터미널 2: 재고 서버 (최초 1회만 DB 생성)
 cd TU_Capstone_Design/warehouse_gui_server
-python3 excel_to_sqlite.py   # 최초 1회만
-python3 warehouse_server.py
+python3 excel_to_sqlite.py     # 최초 1회 (또는 데이터 베이스.xlsx 변경 시)
+python3 warehouse_server_v2.py
 
 # 노트북 터미널 3: Isaac Sim
 ~/isaacsim/_build/linux-x86_64/release/python.sh \
@@ -679,8 +680,8 @@ python3 warehouse_server.py
 
 # Raspberry Pi: GUI
 cd TU_Capstone_Design/warehouse_gui_server
-python3 warehouse_gui.py
-# -> 시작 시 노트북 핫스팟 IP 입력 팝업 (hostname -I 로 확인)
+python3 warehouse_gui_v2.py
+# -> 시작 시 노트북 핫스팟 IP 입력 팝업 (hostname -I 로 확인). 입력 IP는 ~/.warehouse_gui_ip 에 캐시
 ```
 
 네트워크: 휴대폰 핫스팟에 노트북, Raspberry Pi, AGV 실물 모두 연결.

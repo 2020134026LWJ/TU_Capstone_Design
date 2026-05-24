@@ -355,12 +355,12 @@ class WorkflowMixin:
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
                 # 선반이 CARRIED → AT_WORKSTATION 전환 → PENDING 태스크 재배정 시도
                 self._try_assign_pending_tasks()
-                # GUI에 AGV 도착 알림 (warehouse/agv/at_ws)
+                # GUI에 AGV 도착 알림 (warehouse/shelf/arrived)
                 user_id = int(task.task_id.split("_")[0][1:])
                 shelf_label = self.shelf_manager.shelves[next_st.shelf_id].label
                 self.mqtt_publisher.client.publish(
-                    "warehouse/agv/at_ws",
-                    json.dumps({"사용자ID": user_id, "선반번호": shelf_label})
+                    "warehouse/shelf/arrived",
+                    json.dumps({"사용자ID": user_id, "선반번호": shelf_label}, ensure_ascii=False)
                 )
                 return {
                     "type": "robot_arrived_ack",

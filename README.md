@@ -143,8 +143,11 @@ TU_Capstone_Design/
 |   +-- stm32/                      # STM32 펌웨어 (C)
 |
 +-- warehouse_gui_server/           # 작업자 터치스크린 GUI + 재고 서버
-|   +-- warehouse_gui.py            # Kivy 작업자 UI
-|   +-- warehouse_server.py         # Flask 재고 API
+|   +-- warehouse_gui_v2.py         # KivyMD 작업자 UI (IP 입력 팝업 포함)
+|   +-- warehouse_server_v2.py      # Flask 재고 API + MQTT (SQLite)
+|   +-- excel_to_sqlite.py          # 데이터 베이스.xlsx → warehouse.db (최초 1회)
+|   +-- 사용자{1,2}주문.xlsx        # 주문 데이터
+|   +-- 데이터 베이스.xlsx          # 재고 마스터
 |
 +-- webots_simulation/              # Webots (레거시, 참조용)
 |
