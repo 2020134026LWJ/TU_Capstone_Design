@@ -104,9 +104,8 @@ def main():
     # 1. 데이터베이스 생성
     conn = create_database('warehouse.db')
     
-    # 2. Excel 데이터 임포트
-    # import_from_excel(conn, '데이터_베이스.xlsx')
-    import_from_excel(conn, '../webots_simulation/Database/데이터 베이스.xlsx')
+    # 2. Excel 데이터 임포트 (같은 폴더의 데이터 베이스.xlsx)
+    import_from_excel(conn, '데이터 베이스.xlsx')
     
     # 3. 데이터 검증
     verify_data(conn)
