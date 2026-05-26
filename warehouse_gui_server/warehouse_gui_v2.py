@@ -440,11 +440,14 @@ class WarehouseGUI(MDBoxLayout):
         except Exception as e:
             print(f"MQTT 전송 실패: {e}")
 
-    def send_mqtt_shelf_complete(self, cell):
+    def send_mqtt_shelf_complete(self, shelf_group, shelf_cells):
+        """선반 단위 발송 — 동일 shelf_group 셀 전체를 한 번에 묶어 전송.
+        (수정 이전: 셀 1개당 1회 발송 → 같은 선반 2회 발송되어 AGV 측 "No shelf at WS" 에러)
+        """
         if not self.mqtt_client:
             return
-        shelf_group = '-'.join(cell.shelf_number.split('-')[:2])
-        items = [{"물건": cell.item, "개수": cell.quantity, "선반번호": cell.shelf_number}]
+        items = [{"물건": c.item, "개수": c.quantity, "선반번호": c.shelf_number}
+                 for c in shelf_cells]
         msg = {
             "type": "shelf_complete",
             "사용자ID": self.selected_user_id,
@@ -540,9 +543,18 @@ class WarehouseGUI(MDBoxLayout):
             )
 
     def on_shelf_complete(self, cell):
-        # 셀(품목) 하나를 터치하는 즉시 해당 품목 차감/진행 저장 요청
-        self.send_mqtt_shelf_complete(cell)
-        print(f"품목 완료 전송: {cell.item} ({cell.shelf_number})")
+        # 셀(품목) 1개 터치 → 같은 선반의 모든 셀 완료 시점에 1회만 shelf_complete 발송
+        # (이전: 셀마다 즉시 발송 → AGV가 1번째 발송에 선반 반납 시작 → 2번째 발송 시 "No shelf at WS" 에러)
+        shelf_group = '-'.join(cell.shelf_number.split('-')[:2])
+        shelf_cells = [c for c in self.work_cells
+                       if not c.is_empty
+                       and '-'.join(c.shelf_number.split('-')[:2]) == shelf_group]
+        done_count = sum(1 for c in shelf_cells if c.is_completed)
+        if all(c.is_completed for c in shelf_cells):
+            self.send_mqtt_shelf_complete(shelf_group, shelf_cells)
+            print(f"선반 완료 전송: {shelf_group} ({len(shelf_cells)}개 품목)")
+        else:
+            print(f"품목 체크: {cell.item} ({cell.shelf_number}) — {done_count}/{len(shelf_cells)} (선반 {shelf_group})")
         # 현재 주문의 모든 셀을 완료하면 자동으로 다음 주문으로 진행
         remaining = [c for c in self.work_cells if not c.is_empty and not c.is_completed]
         if not remaining and not self._order_advancing:
