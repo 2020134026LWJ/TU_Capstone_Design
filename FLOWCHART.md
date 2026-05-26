@@ -1782,6 +1782,41 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 ---
 
+### 수정 50: `accepted` 토픽 롤백 — `start` 직구독 복귀 (DB 접근 제거는 유지) (2026-05-26)
+
+> **쉽게**: 수정 49의 두 변경 중 "DB 접근 제거"만 남기고 "`accepted` 신호 교체"는 되돌림. 사용자가 본 단일 사용자 self-contradiction 버그는 DB 접근 제거 한 줄로 영구 해결되며, `accepted` 신호는 실제 라파 GUI 시연(한 GUI = 한 사용자) 환경에서 race window가 사실상 안 열리므로 불필요로 판단.
+
+- **롤백 배경**:
+  - 실제 GUI 구조: `selected_user_id` 단일값 → 한 GUI 인스턴스가 동시 두 사용자 start 발사 불가
+  - 라파 시연: 한 GUI 한 사용자, 다른 사용자 시작은 사람이 손으로 전환 → 사이 간격이 ms 단위가 아니라 초 단위 → race window 닫힘
+  - 동시 발사 race는 `mqtt_test.py 시작` 자동 체인에서만 발생 — 졸업 시연 자체에서 보던 문제는 수정 47의 self-contradiction (단일 사용자)
+  - 협업자 코드 1줄 임의 추가 + 통지 부담 회피
+
+- **변경**:
+  - `server/main.py`: `warehouse/order/accepted` 구독 → `warehouse/order/start`로 복귀, 주석/로그 갱신
+  - `server/_workflow_mixin.py:_handle_start_order`: 주석을 "AGV는 DB 미접근"으로 갱신 (`validate_stock` 제거 상태는 그대로 유지)
+  - `warehouse_gui_server/warehouse_server_v2.py:reserve_inventory`: `warehouse/order/accepted` publish 4줄 제거
+
+- **유지된 것 (수정 49의 절반)**:
+  - `server/db_loader.py`: `validate_stock` 메서드 + `import sqlite3` + `self.sqlite_db` dead code 정리 그대로 유지
+  - `server/_workflow_mixin.py:_handle_start_order`: `validate_stock` 호출 블록 제거 그대로 유지
+  - → **AGV 자체 DB 검증 없음 = 수정 47의 self-contradiction 영구 차단**
+
+- **잔여 리스크 (수용)**:
+  - `mqtt_test.py 시작` 자동 체인에서 reservation ROLLBACK 발생 시 AGV가 헛걸음 가능. 단일 사용자 시연 + 손-페이스 다중 사용자 시연에선 발생 안 함
+  - 협업자 server crash / SQLite 락 충돌로 ROLLBACK 시 AGV가 영원히 WAITING. 시연 환경에선 빈도 매우 낮음
+
+- **수정 49와의 관계**:
+  - 49가 한 두 변경(① DB 접근 제거, ② accepted 신호) 중 ②만 롤백
+  - 49 메모/문서는 deprecated 표시 또는 50 추가로 컨텍스트 보존
+  - 협업자 통지 부담 해소 (이미 push된 4줄은 협업자가 자기 다음 push로 자연 제거되도록 통지)
+
+**수정 파일**: `server/main.py`, `server/_workflow_mixin.py`, `warehouse_gui_server/warehouse_server_v2.py`
+
+**상태**: 코드 완료, 31 pytest 통과. 협업자 통지 — push한 한 줄 자연 제거(되돌릴 필요 없음).
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.

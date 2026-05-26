@@ -47,9 +47,8 @@ class WorkflowMixin:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
-        # stock 검증은 GUI 서버(warehouse_server_v2)가 수행. 여기엔
-        # warehouse/order/accepted 경로로만 들어오므로 GUI가 이미 accept한 상태.
-        # → 독립 검증 race(수정 47) 제거.
+        # stock 검증은 GUI 서버(warehouse_server_v2)가 단독 수행. AGV는 DB 미접근.
+        # → AGV 자체 검증으로 인한 self-contradiction(수정 47) 영구 제거.
 
         schedule = self.task_scheduler.schedule_order(user_id=user_id, order_id=order_id)
         if not schedule:
