@@ -393,6 +393,10 @@ class WarehouseServer:
                 conn.commit()
                 self.pending_reservations[user_id] = reserved_items
                 print(f"✅ 사용자{user_id} 가상 차감 완료")
+                self.mqtt_client.publish(
+                    "warehouse/order/accepted",
+                    json.dumps({"사용자ID": user_id, "주문번호": order_number})
+                )
             except Exception as e:
                 cursor.execute("ROLLBACK")
                 print(f"❌ 가상 차감 실패: {e}")

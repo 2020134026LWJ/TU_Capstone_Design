@@ -1608,6 +1608,180 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 ---
 
+### 수정 46: 인터셉트/lift_down ACK race + staging 큐 잔류 cascade (2026-05-25)
+> **쉽게**: 선반 내려놓는 명령은 떠났는데 ACK가 도착하기 전 새 주문이 들어와서 서버가 "선반이 아직 AGV에 있다"고 오판 → 인터셉트가 잘못 발화 → 도미노로 두 AGV 멈춤.
+
+- **현상** (warehouse GUI 자동 체인 시):
+  - T1_3 마지막 선반(19) 반납 중 AGV-1이 노드 19 도착 → `lift_down` 발행 → ACK 대기
+  - ACK 도착 전 GUI가 `order_complete(3)` + `start_order(4)` 즉시 발행 (auto-chain)
+  - T1_4_0이 같은 선반 19 필요 → Node U 인터셉트 발화 → `RETURN_SHELF` → `FORWARD_SHELF`(target=33) + W33 staging 큐에 AGV-1 등록
+  - 늦게 도착한 lift_down ACK가 `FORWARD_SHELF` putdown으로 처리 → `mark_shelf_at_workstation(19, 33)` 거짓 갱신 (실제론 19에 있음)
+  - T1_4_0 F-node skip → AGV-1을 T1_4_1(shelf 22)로 재배정 → forward to 20
+  - **W33 staging 큐에 AGV-1 잔류** → AGV-2 corridor 이탈 시 stale dispatch 발화 → 노드 20에 있는 AGV-1에 19 기준 명령 발행 → 위치 1칸씩 어긋남 → AGV-1이 33이 아닌 34에 도착 → 멈춤 (AGV-2도 home에서 대기)
+
+- **원인** (3중 race):
+  1. lift_down 명령은 in-flight인데 인터셉트가 `status == RETURNING_SHELF`만 보고 진입 (carrying_shelf는 ACK 전까지 set 상태로 남음)
+  2. 인터셉트가 staging 큐에 등록한 뒤 무효화(task_complete/F-node skip)되어도 큐 엔트리 잔류
+  3. corridor release dispatch가 robot의 현재 task 목적지를 검증 안 함
+
+- **수정 (의미적 게이트 + 큐 정리 + sanity check)**:
+  1. `_workflow_mixin.py:_try_intercept_returning_shelf` — `rid in _lifting_robots` 체크 추가 (lift 명령 in-flight면 intercept 금지)
+  2. `staging_manager.py:remove_robot_from_queues(rid)` 헬퍼 신규 — robot rid를 모든 corridor 큐에서 제거
+  3. `_workflow_mixin.py` 3곳에서 호출:
+     - RETURN_SHELF task_complete 시 (`_handle_putdown_ack`)
+     - FORWARD_SHELF task_complete 시 (`_handle_putdown_ack`)
+     - F-node pending → robot IDLE 전환 시 (`_handle_fnode_next_shelf`)
+  4. `_marker_mixin.py:_is_corridor_dispatch_consistent` 헬퍼 신규 — release 시 robot의 current_task 목적지와 corridor target_ws 일치 검증. 두 곳(position_release dispatch, trigger_release dispatch)에서 호출.
+
+- **더 근본적인 해결책 (향후 과제)**:
+  현재 수정은 **의미적 게이트**(이 시스템에서 가능한 race 카테고리를 의미적으로 닫음)이지, **구조적 race 제거**는 아님. 흩어진 상태 변수들(`_lifting_robots`, `_blocked_robots`, `_reserved_nodes`, `_staged_to_ws`, `_goal_locked_robots`, `_in_flight_cmds`, staging queue 등)이 명시적 동기화 규칙 없이 공존하므로 새 기능 추가 시 race가 다시 열릴 수 있음. 구조적 근본 해결은 **ACK 기반 단일 명령 큐 시스템**으로 전환 — 서버가 명령 발행 후 ACK 받기 전까지는 해당 robot 관련 모든 상태 변경을 보류. 명령 큐 추상화는 1~2일 리팩토링 작업으로 추정, 졸업작품 일정상 향후 과제로 남김.
+
+**수정 파일**: `server/_workflow_mixin.py`, `server/staging_manager.py`, `server/_marker_mixin.py`
+
+**상태**: 코드 완료, 런타임 검증 — Isaac Sim + warehouse GUI 자동 체인으로 회귀 확인 필요
+
+---
+
+### 수정 46.1: 인터셉트 가드를 _in_flight_cmds로 확장 (2026-05-25)
+> **쉽게**: 수정 46이 lift 명령 race만 막았는데, 같은 race가 forward/turn 명령에서도 일어남. 모든 in-flight cmd에 대해 가드 확장.
+
+- **현상** (수정 46 적용 후 발견):
+  - T1_5_1(shelf 22) 주문 들어올 때 AGV-2가 W33 떠나는 중 — 노드 34→35로 `forward` 명령 in-flight
+  - 서버는 마지막 마커(34) 기준으로 robot.current_node=34라고 판단 → intercept 발화 (수정 46의 `_lifting_robots` 가드는 통과, forward는 lift가 아니므로)
+  - `_plan_and_publish_move(2, start=34, goal=33)` → 경로 [34, 33], commands=['turn_180', 'forward']
+  - AGV-2가 마커 35 발행 → `_in_flight_cmds` 해제 → 서버 turn_180 발행 (이미 35에 있음에도)
+  - AGV-2: 35에서 turn_180 (90°→270°, 동→서) → forward → 35-1=34 (33이 아닌!)
+  - command_queue 비어 더 이상 발행 없음 → AGV-2 노드 34에서 멈춤
+  - AGV-1은 W33 corridor 진입 대기 (staging at 41) → 양쪽 정지
+
+- **원인**: 수정 46의 가드는 lift_up/lift_down ACK race만 차단. forward/turn 명령 in-flight 시에도 동일하게 서버의 `robot.current_node`/`heading`이 stale 상태이므로, 같은 카테고리의 race가 다른 명령에서 일어남.
+
+- **수정 (1줄 확장)**:
+  ```python
+  # _workflow_mixin.py:_try_intercept_returning_shelf
+  if carrying_robot.rid in self._in_flight_cmds:   # 수정 46.1: _lifting_robots → _in_flight_cmds
+      return False
+  ```
+  `_in_flight_cmds`는 lift/turn/forward 모든 명령을 포함 (수정 34에서 추가). 서버 상태가 AGV 실제 상태와 정합인 순간(마커/ACK 직후)에만 intercept 발화하도록 강제.
+
+- **이번 수정의 의미**:
+  - **In-flight race 카테고리 완전 차단** — lift/turn/forward 어느 명령이든 ACK 받기 전엔 intercept 못함
+  - **수정 46과의 관계**: 수정 46이 1/3(lift gate), 수정 46.1이 그 확장. 수정 46의 나머지 2/3(staging 큐 정리, dispatch sanity check)는 별개 카테고리로 유효함
+  - **3단계와의 관계**: 3단계(ACK 기반 명령 큐)가 적용되면 수정 46.1의 가드는 redundant(중복)가 되어 제거 가능. 수정 46의 큐 정리/sanity check는 3단계 안에서도 유효.
+
+- **3단계 향후 과제 (재명시)**:
+  In-flight race를 의미적 가드로 막는 건 새 기능 추가 시 누락 가능성 존재. ACK 기반 단일 명령 큐 시스템으로 전환하면 race window 자체가 구조적으로 사라짐. 졸업 후 또는 포트폴리오 작업으로 미룸.
+
+**수정 파일**: `server/_workflow_mixin.py`
+
+**상태**: 코드 완료, 런타임 재검증 필요
+
+---
+
+### 수정 48: IDLE-but-parking race 차단 — get_available_robot 가드 (2026-05-25)
+> **쉽게**: parking 노드로 이동 중인 IDLE 로봇이 신규 task 받으면, 서버는 마커 위치를 보고 "이미 도착"이라 판단하고 lift_up 명령 발행. 그런데 AGV는 이미 다음 forward 받아서 다른 노드로 가는 중 → 엉뚱한 노드에서 빈 lift 실행.
+
+- **현상** (시연 도중 발견, "shelf None" 버그):
+  - Robot 2가 shelf 1-2 반납 후 IDLE → parking 노드 25로 이동 시작 (path=[20, 28, 27, 26, 25])
+  - AGV-2 마커 27 보고 → 서버: `current_node=27`, `_in_flight_cmds` 클리어
+  - 마커 핸들러가 `_send_next_command` 발행 → forward(→26) cmd + `_in_flight_cmds=forward` 설정
+  - **이 직후** order 10 `start_order` MQTT 도착 → `_try_assign_pending_tasks`
+  - `get_available_robot()` — status=IDLE인 로봇만 거름. Robot 2가 후보 (parking 중인데도 IDLE이라 가용)
+  - `_plan_and_publish_move(rid=2, start=27, goal=27)` → `start == actual_goal` → "already at goal 27, immediate arrival" → 즉시 lift_up 발행
+  - AGV-2는 큐에 쌓인 forward(→26) 먼저 실행, 그 다음 lift_up → 노드 26에서 빈 lift → bridge 로그: `[AGV 2] <- lift_up → shelf None`
+
+- **원인**: `get_available_robot()`가 `status == IDLE`만 봄. parking move 중에도 status는 IDLE 유지 (`complete_task` 호출 후 idle_wait로 plan만 발행). planned_path가 남아있어도 가용 분류 → 신규 task 받을 수 있음 → in-flight cmd와 race.
+
+- **수정 (1줄 가드)**:
+  ```python
+  # server/robot_manager.py:get_available_robot
+  idle_robots = [r for r in self.robots.values()
+                 if r.status == RobotStatus.IDLE and r.heading_initialized
+                 and not r.planned_path]   # 추가: parking 중인 로봇 제외
+  ```
+  dedicated_rid (DEMO_MODE) 분기에도 동일 가드.
+
+- **옵션 선택 이력** — 두 안 비교 후 (A) 채택:
+  - (A) `get_available_robot` 가드: 1줄, parking 끝나야 신규 받음 (3~4칸 detour)
+  - (B) `_plan_and_publish_move` immediate-arrival 가드: task/status 되돌리기 복잡, immediate-arrival 분기에만 한정 → 다른 race 못 잡음
+  - **(A) 채택 이유**:
+    1. "가용 = 정지" **invariant** 생성 — 이후 모든 코드가 invariant 가정 가능
+    2. 의미적 가드(B)는 새 기능 추가 시 누락 가능 — 수정 46.1 한계와 동일 패턴
+    3. 효율 손해(3~4칸 detour)는 시연/일반 동작에서 무시 가능
+
+- **이번 수정의 의미**:
+  - **구조적 차단**: invariant 도입으로 race 카테고리 차단. 의미적 가드 시리즈에 안 들어감
+  - **수정 46/46.1 패밀리와의 차이**: 46/46.1은 intercept 분기에만 가드 (의미적), 48은 가용 정의 자체 수정 (구조적)
+  - **3단계와의 관계**: ACK 기반 명령 큐(3단계) 도입되면 redundant 안 되고 오히려 강화됨 — 큐 비어있을 때만 가용으로 분류하는 정의와 동일
+
+**수정 파일**: `server/robot_manager.py`
+
+**상태**: 코드 완료, 21 pytest 통과, 런타임 시연 검증 필요
+
+---
+
+### 수정 49: Stock validation race 구조적 제거 — 옵션 A 정통 도입 (2026-05-26)
+> **쉽게**: 수정 47에서 시연 임박으로 미뤘던 "GUI가 accept한 주문만 AGV로 보내기"를 실제로 적용. GUI가 reserve 성공 시점에 `warehouse/order/accepted` 한 줄 발행 → AGV는 그것만 구독. GUI/AGV가 같은 DB를 따로 검증하던 race 자체가 사라짐. 수정 47/47.1은 deprecated.
+
+- **배경 (수정 47의 한계)**:
+  - 수정 47의 옵션 C(AGV 자체 검증)는 시연 직후 race 버그 발견 — 같은 토픽을 둘 다 받아서 GUI가 reserve commit 후 AGV가 SELECT하면 자기 주문 reservation을 부족분으로 카운트 (자기 모순)
+  - 47.1 fix(`effective_reserved = max(0, reserved - quantity)`) 검토는 됐으나 다중 사용자 동시 부족 시 잔존 risk → 미적용
+  - 근본 해결은 옵션 A뿐. 수정 47 작성 당시 "졸업 후 협업자와 토픽 분리 합의로 정리"라고 적었던 항목 — 이번에 임의 적용
+
+- **변경**:
+  - **협업자 코드 (1줄)** — `warehouse_gui_server/warehouse_server_v2.py:reserve_inventory` try 블록 `conn.commit()` 직후:
+    ```python
+    self.mqtt_client.publish(
+        "warehouse/order/accepted",
+        json.dumps({"사용자ID": user_id, "주문번호": order_number})
+    )
+    ```
+    ROLLBACK 경로(stock 부족)에선 발행 안 됨 → "성공 시에만 발행"이 의미적으로 보장
+  - **AGV 측**:
+    - `server/main.py`: `warehouse/order/start` 구독 → `warehouse/order/accepted`로 교체
+    - `server/_workflow_mixin.py:_handle_start_order`: `validate_stock` 호출 블록 제거
+    - `server/db_loader.py`: 사용처 사라진 `validate_stock` 메서드 + `import sqlite3` + `self.sqlite_db` dead code 정리
+
+- **race 시나리오 분석 (수정 후)**:
+  - GUI 받음 → reserve commit → accepted publish → AGV 처리 ✓
+  - GUI 받음 → ROLLBACK (stock 부족) → publish 없음 → AGV 대기 (영원) ✓
+  - 두 서버가 같은 DB를 독립 검증하던 구조 자체가 사라짐 → race 카테고리 소멸
+  - 다중 사용자 동시 부족 race도 자동 해결 (GUI 단일 진실)
+
+- **옵션 비교 (재정리)**:
+  - 옵션 A (정통, **이번 채택**): GUI가 validated 토픽 재발행. 협업자 1줄 + AGV ~10줄. **구조적 race 제거**
+  - 옵션 47.1 (effective_reserved fix): 비교 로직만 보정. 1:1 race 잡고 다중 부족 risk 잔존. 미적용
+  - 옵션 C (AGV 자체 검증, 수정 47): 협업자 무수정. race 신규 생성. **deprecated**
+
+- **AGV 단독 우회 검토 후 기각**:
+  - user_state 테이블 폴링: 1초 강제 지연 + GUI 죽으면 모든 주문 reject 판정 → 부적합
+  - inventory.reserved 변화 감지: 다중 사용자 동시 시 어느 reservation이 누구 것인지 구분 불가 → 부적합
+  - 결론: AGV-only 100% 근본 해결은 불가능 → 협업자 1줄이 최소 비용
+
+- **잔여 리스크**:
+  - **협업자 미통지** — `warehouse_server_v2.py`에 임의 한 줄 추가했음. 협업자가 자기 코드 덮어쓰면 AGV 작동 정지. 토픽 스펙·발행 시점·페이로드 합의 필요
+  - **토픽 스펙**:
+    - 토픽: `warehouse/order/accepted`
+    - 페이로드: `{"사용자ID": int, "주문번호": int}`
+    - 발행 시점: `reserve_inventory` commit 성공 직후. ROLLBACK 경로 발행 X
+  - 협업자가 stock 외 새 거부 사유 추가하면 publish 시점만 commit 뒤로 유지하면 됨 (수정 47이 우려했던 호환성 문제 자동 해결)
+
+- **수정 47과의 관계**:
+  - 47이 추가했던 코드(`validate_stock`, `import sqlite3`, `self.sqlite_db`) 전부 제거 → **47은 사실상 롤백**, 본 FLOWCHART에서도 섹션 삭제
+  - 47.1 fix 검토 결과(`revision_47_known_bug` 메모)도 무의미해짐 → 메모 삭제 완료
+
+- **이번 수정의 의미**:
+  - **구조적 race 제거** — 수정 47 시점에 "옵션 A는 졸업 후"로 미뤘던 항목을 실제로 갈아탐
+  - **단일 진실 원천(single source of truth) 확립** — stock 검증은 GUI가 유일
+  - **수정 48과 한 줄로 정렬** — 둘 다 invariant 도입형 구조적 수정 (의미적 가드 시리즈 아님)
+  - **3단계(ACK 기반 명령 큐)와 무관** — in-flight cmd race(수정 46/46.1)는 협업자와 무관, 별도 작업
+
+**수정 파일**: `server/main.py`, `server/_workflow_mixin.py`, `server/db_loader.py`, `warehouse_gui_server/warehouse_server_v2.py`
+
+**상태**: 코드 완료, 21 pytest 통과, **협업자 통지 필요** (구두 합의 후 협업자가 자기 push에서 publish 한 줄 보존하도록)
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.

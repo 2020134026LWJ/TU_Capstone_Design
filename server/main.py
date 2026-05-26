@@ -105,8 +105,11 @@ class AGVServer:
             self.config.mqtt_topic_cmd_ack,
             lambda data: self._handle_mqtt_cmd_ack(data),
         )
+        # GUI 서버가 stock 검증/예약(reserve_inventory) commit한 직후 발행하는 토픽.
+        # warehouse/order/start를 직접 받지 않음 → GUI accept한 주문만 처리되어
+        # AGV/GUI 독립 검증 race(수정 47) 구조적 제거.
         self.mqtt_publisher.subscribe(
-            "warehouse/order/start",
+            "warehouse/order/accepted",
             lambda data: self._handle_mqtt_gui({
                 "type": "start_order",
                 "사용자ID": data.get("사용자ID"),
@@ -130,7 +133,7 @@ class AGVServer:
         )
         print("[AGVServer] MQTT subscriptions ready "
               "(/agv/marker, /agv/cmd_ack, "
-              "warehouse/order/start, warehouse/shelf/complete, warehouse/order/complete)")
+              "warehouse/order/accepted, warehouse/shelf/complete, warehouse/order/complete)")
 
     def _handle_mqtt_marker(self, data):
         """AGV 마커 인식 → 위치 보고 + 다음 명령 결정"""

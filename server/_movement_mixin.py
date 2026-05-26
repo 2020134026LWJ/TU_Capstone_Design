@@ -3,8 +3,7 @@ RequestHandler — 이동/명령 발행 + 충돌 회피 + 교착 해제 Mixin
 
 이 모듈의 메서드들은 RequestHandler 인스턴스에 mixed-in 되어 동작합니다.
 self 상태 접근:
-  - self._reserved_nodes        : Dict[int, int]   (forward 목적지 예약)
-  - self._blocked_robots        : Set[int]         (충돌로 보류 중인 로봇)
+  - self.command_queues         : Dict[int, CommandQueue]  (REFACTOR E: cmd lifecycle, 노드 예약, blocked 추론)
   - self._yielded_staging_robots: Set[int]         (deadlock yield된 staging 로봇)
   - self.robot_manager, self.shelf_manager, self.staging_manager
   - self.path_planner, self.mqtt_publisher, self.config
@@ -14,23 +13,28 @@ self 상태 접근:
   - self._handle_marker_report (MarkerMixin)  ← _plan_and_publish_move 즉시 도착 케이스
 """
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .path_planner import PathPlanner
 from .robot_manager import RobotStatus
 from .shelf_manager import ShelfStatus
+from .command_queue import CommandEntry  # REFACTOR E 2.3
 
 
 class MovementMixin:
     """이동 명령 발행 + 충돌/교착 회피 로직"""
 
-    # ─── 예약 관리 ───
+    # ─── 예약 관리 (REFACTOR E 3.1) ───
 
     def _clear_robot_reservation(self, rid: int):
-        """특정 로봇의 노드 예약 모두 해제"""
-        to_clear = [n for n, r in self._reserved_nodes.items() if r == rid]
-        for n in to_clear:
-            del self._reserved_nodes[n]
+        """특정 로봇의 미발행 명령 폐기 (잔여 forward 예약 정리).
+
+        in_flight은 유지 — AGV가 이미 받아서 실행 중이므로 함부로 무효화 불가.
+        task complete 직후 idle 전환 + 새 path 계산 전 잔여 정리용.
+        """
+        queue = self.command_queues.get(rid)
+        if queue is not None:
+            queue.clear_pending()
 
     # ─── Blocked / Deadlock 감지 ───
 
@@ -47,35 +51,59 @@ class MovementMixin:
                     return True
         return False
 
-    def _retry_blocked_robots(self):
-        """블록 해제된 로봇들 명령 재시도 + 교착 감지/해제"""
+    def _is_blocked(self, rid: int) -> bool:
+        """REFACTOR E 3.3: rid가 보류 상태인지 큐 상태로 추론.
+
+        robot.command_queue에 명령 남았는데 큐 in_flight이 없음 = dispatch 보류 상태.
+        (정상 진행 중이면 in_flight 있거나 command_queue 비어있음)
+        """
+        robot = self.robot_manager.get_robot(rid)
+        if not robot or not robot.command_queue:
+            return False
+        queue = self.command_queues.get(rid)
+        return queue is not None and queue.in_flight is None
+
+    def _is_lifting(self, rid: int) -> bool:
+        """REFACTOR E 3.4: rid가 리프트 동작 중인지 큐 in_flight cmd로 판단.
+
+        _lifting_robots set 대체. lift cmd_ack 도착 시 큐 ack로 자동 해제.
+        """
+        queue = self.command_queues.get(rid)
+        return (queue is not None
+                and queue.in_flight is not None
+                and queue.in_flight.cmd in ("lift_up", "lift_down"))
+
+    def _try_dispatch_all(self):
+        """REFACTOR E 3.3: 모든 robot dispatch 재시도 + 교착 감지/해제.
+
+        기존 `_retry_blocked_robots`를 큐 기반으로 재작성. `_blocked_robots` set 불필요 —
+        `_is_blocked`가 큐 상태로 직접 추론. ACK 도착 시점마다 호출.
+        """
         # goal-locked 로봇 중 blocker가 떠난 경우 재계획
         self._check_goal_locked_robots()
-        for rid in sorted(self._blocked_robots.copy()):
-            if rid not in self._blocked_robots:
-                continue  # 앞 iteration에서 이미 해제됨
+        for rid in sorted(self.command_queues.keys()):
+            if not self._is_blocked(rid):
+                continue
             success = self._send_next_command(rid)
             if not success:
                 # 교착 감지: blocker가 또한 blocked / staging / 장기 정차(WAITING_FOR_PICK, IDLE)면 처리 발동
                 blocker_rid = self._get_blocker_of(rid)
                 blocker = self.robot_manager.get_robot(blocker_rid) if blocker_rid is not None else None
                 if blocker_rid is not None and (
-                    blocker_rid in self._blocked_robots
+                    self._is_blocked(blocker_rid)
                     or self._is_staging_robot(blocker_rid)
                     or (blocker and blocker.status in (RobotStatus.WAITING_FOR_PICK, RobotStatus.IDLE))
                 ):
                     self._resolve_deadlock(rid, blocker_rid)
 
     def _check_goal_locked_robots(self):
-        """Goal-locked 로봇들 중 blocker가 goal에서 떠난 경우 재계획"""
-        for rid in list(self._goal_locked_robots):
-            goal = self._deferred_goals.get(rid)
-            if goal is None:
-                self._goal_locked_robots.discard(rid)
-                continue
+        """Goal-locked 로봇들 중 blocker가 goal에서 떠난 경우 재계획
+
+        REFACTOR E 4.1: 멤버십 = `_deferred_goals` 키 존재. 별도 set 불필요.
+        """
+        for rid, goal in list(self._deferred_goals.items()):
             robot = self.robot_manager.get_robot(rid)
             if not robot:
-                self._goal_locked_robots.discard(rid)
                 self._deferred_goals.pop(rid, None)
                 continue
             blocker_still_at_goal = any(
@@ -85,7 +113,6 @@ class MovementMixin:
             )
             if not blocker_still_at_goal:
                 print(f"[RequestHandler] Goal-locked: Robot {rid} blocker left goal {goal}, replan")
-                self._goal_locked_robots.discard(rid)
                 self._deferred_goals.pop(rid, None)
                 self._plan_and_publish_move(rid, robot.current_node, goal)
 
@@ -102,9 +129,20 @@ class MovementMixin:
         for other_rid, other in self.robot_manager.robots.items():
             if other_rid == rid:
                 continue
-            if other.current_node == next_node or self._reserved_nodes.get(next_node) == other_rid:
+            if other.current_node == next_node or self._is_node_reserved_by(next_node, other_rid):
                 return other_rid
         return None
+
+    # ─── 큐 기반 노드 예약 조회 (REFACTOR E 3.1) ───
+
+    def _is_node_reserved_by(self, node: int, by_rid: int) -> bool:
+        """node가 by_rid의 in_flight 또는 pending head forward 목적지인가?
+
+        _reserved_nodes set/clear 대체. CommandQueue의 peek_expected_node가
+        같은 정보를 더 정확히 제공 (마커 도착 시 ack로 자동 clear).
+        """
+        queue = self.command_queues.get(by_rid)
+        return queue is not None and queue.peek_expected_node() == node
 
     # ─── Yield 노드 탐색 ───
 
@@ -136,7 +174,7 @@ class MovementMixin:
                 if r_id != rid
             )
             reserved = any(
-                self._reserved_nodes.get(neighbor_id) == r_id
+                self._is_node_reserved_by(neighbor_id, r_id)
                 for r_id in self.robot_manager.robots
                 if r_id != rid
             )
@@ -238,10 +276,9 @@ class MovementMixin:
               f"carry={robot_b.carrying_shelf},stg={b_stg}) "
               f"corridors=[{cdump}]")
 
-        # 수정 31: deadlock 쌍 중 리프트(lift_up/down) 동작 중인 로봇이 있으면 보류.
-        # 리프트 중 forward를 발행하면 선반이 노드 사이에 떨어지고 프로토콜이 깨짐.
-        # lift cmd_ack 수신 시 _retry_blocked_robots()가 재호출하여 재해제됨.
-        if rid_a in self._lifting_robots or rid_b in self._lifting_robots:
+        # REFACTOR E 3.4: 리프트 중 yield 차단 (수정 31 계승). _lifting_robots set 대신
+        # 큐 in_flight cmd가 lift_*인지로 직접 검사. lift cmd_ack 시 큐 ack가 자동 해제.
+        if self._is_lifting(rid_a) or self._is_lifting(rid_b):
             print(f"[RequestHandler] Deadlock 보류: Robot {rid_a}/{rid_b} 중 리프트 동작 중 "
                   f"→ lift 완료 후 재시도")
             return
@@ -312,7 +349,7 @@ class MovementMixin:
         # Strategy 1/2 모두 path가 goal에서 끝나서 또 막힘 → 1-step yield + 대기
         # blocker가 goal 떠나면 _check_goal_locked_robots()에서 재계획
         if block_robot.current_node == goal:
-            if yield_rid in self._goal_locked_robots:
+            if yield_rid in self._deferred_goals:
                 return  # 이미 yield 완료, 재시도 안 함 (loop 차단)
             yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
             if yield_node is None:
@@ -323,9 +360,7 @@ class MovementMixin:
             yield_robot.command_queue = self._path_to_commands(
                 yield_robot.planned_path, yield_robot.heading
             )
-            self._goal_locked_robots.add(yield_rid)
             self._deferred_goals[yield_rid] = goal
-            self._blocked_robots.discard(yield_rid)
             print(f"[RequestHandler] Goal-locked: Robot {yield_rid} → side {yield_node} "
                   f"(deferred goal {goal}, blocker {block_rid})")
             self._send_next_command(yield_rid)
@@ -353,7 +388,6 @@ class MovementMixin:
             node_path = PathPlanner.compress_to_node_path(timed_path)
             yield_robot.planned_path = node_path
             yield_robot.command_queue = self._path_to_commands(node_path, yield_robot.heading)
-            self._blocked_robots.discard(yield_rid)
             print(f"[RequestHandler] Deadlock (alt-path): Robot {yield_rid} → {node_path}")
             if self._send_next_command(yield_rid):
                 return
@@ -391,7 +425,6 @@ class MovementMixin:
         full_path = [yield_robot.current_node, yield_node] + path_from_yield[1:]
         yield_robot.planned_path = full_path
         yield_robot.command_queue = self._path_to_commands(full_path, yield_robot.heading)
-        self._blocked_robots.discard(yield_rid)
         print(f"[RequestHandler] Deadlock (yield): Robot {yield_rid} → side {yield_node} "
               f"→ then {path_from_yield}")
         self._send_next_command(yield_rid)
@@ -473,69 +506,77 @@ class MovementMixin:
         return commands
 
     def _send_next_command(self, rid: int) -> bool:
-        """로봇 명령 큐에서 다음 명령 전송
+        """로봇 명령 큐에서 다음 명령 전송 (REFACTOR E 3.2: 큐 단일 진실 원천).
 
-        충돌이 예상되면 명령을 보류하고 False 반환.
+        I1 (큐 단일성): 모든 publish는 이 함수만 호출. queue.dispatch() 직후 publish.
+        I3 (no stale): in_flight 점유 중이면 후속 cmd 발행 차단. ack 도착 후 자동 재시도.
+        충돌 예상 시 보류 + False 반환 (큐에서 빼지 않음).
         """
         robot = self.robot_manager.get_robot(rid)
         if not robot or not robot.command_queue:
             return False
 
-        # Layer 1.3 가드: 이전 cmd ack/marker 미수신 → 보류
-        # AGV _pending_cmd 단일 슬롯 덮어쓰기 방지. 마커/cmd_ack 핸들러에서 clear됨.
-        # blocked 등록 → in_flight 해제 시 _retry_blocked_robots()가 자동 재시도
-        if rid in self._in_flight_cmds:
-            self._blocked_robots.add(rid)
+        # I3: 이전 cmd ack/marker 미수신 → 보류 (AGV _pending_cmd 덮어쓰기 방지)
+        # REFACTOR E 3.3: _blocked_robots set 제거 — _is_blocked가 큐 상태로 추론
+        queue = self.command_queues.get(rid)
+        if queue is not None and queue.in_flight is not None:
             return False
 
         next_cmd = robot.command_queue[0]
+        next_node: Optional[int] = None
 
         # forward 명령일 때만 충돌 체크
         if next_cmd == "forward":
-            # 현재 노드에서 heading 방향의 다음 노드 계산
             next_node = self._get_next_node_by_heading(rid)
             if next_node is None:
-                # heading 방향 노드 없음 → 안전하게 차단 (체크 없이 보내면 충돌 위험)
-                self._blocked_robots.add(rid)
                 print(f"[RequestHandler] Robot {rid}: blocked → no forward target "
                       f"(heading={robot.heading}°, node={robot.current_node})")
                 return False
-            # 다른 로봇이 next_node에 있거나 이동 중(예약)인 경우 보류
             for other_rid, other in self.robot_manager.robots.items():
                 if other_rid == rid:
                     continue
                 occupied = other.current_node == next_node
-                reserved = self._reserved_nodes.get(next_node) == other_rid
+                reserved = self._is_node_reserved_by(next_node, other_rid)
                 if occupied or reserved:
-                    self._blocked_robots.add(rid)
                     reason = "있음" if occupied else "이동중"
                     print(f"[RequestHandler] Robot {rid}: blocked → node {next_node} "
                           f"(AGV-{other_rid} {reason})")
                     return False
-            # 충돌 없음 → 목적지 노드 예약
-            self._reserved_nodes[next_node] = rid
 
-        # 명령 전송
+        # 큐 entry 생성 + dispatch (in_flight 슬롯 채움)
+        if next_cmd == "forward":
+            entry = CommandEntry(cmd=next_cmd, target_node=next_node)
+        elif next_cmd in ("turn_left", "turn_right", "turn_180"):
+            delta = {"turn_right": 90, "turn_left": 270, "turn_180": 180}[next_cmd]
+            entry = CommandEntry(
+                cmd=next_cmd, expected_heading=(robot.heading + delta) % 360
+            )
+        else:
+            entry = CommandEntry(cmd=next_cmd)
+        if queue is not None:
+            queue.enqueue(entry)
+            queue.dispatch()
+
+        # 명령 전송 (큐 dispatch 후 publish — I1)
         robot.command_queue.pop(0)
-        self._blocked_robots.discard(rid)
         self.mqtt_publisher.publish_cmd(rid, next_cmd)
-        # Layer 1.3: in-flight 등록 — marker/cmd_ack 수신 전까진 추가 발행 차단
-        self._in_flight_cmds[rid] = next_cmd
         return True
 
     def _predict_heading_after_inflight(self, rid: int) -> Optional[int]:
-        """in-flight turn cmd의 효과를 미리 적용한 예측 heading 반환.
+        """in-flight turn cmd의 효과를 미리 적용한 예측 heading 반환 (REFACTOR E 3.2).
 
         turn cmd 발행 후 cmd_ack 도착 전에 새 경로를 만들면 robot.heading이 옛 값이라
-        path/commands 생성이 stale heading 기준으로 어긋남. 예측값으로 보정.
-        cmd_ack 또는 다음 marker 도착 시 ground truth로 자동 덮어쓰임.
+        path/commands 생성이 stale heading 기준으로 어긋남. CommandEntry.expected_heading
+        으로 보정. ack 도착 시 ground truth로 자동 덮어쓰임.
         """
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return None
-        cmd = self._in_flight_cmds.get(rid)
-        delta = {"turn_right": 90, "turn_left": 270, "turn_180": 180}.get(cmd, 0)
-        return (robot.heading + delta) % 360
+        queue = self.command_queues.get(rid)
+        if queue is not None and queue.in_flight is not None:
+            if queue.in_flight.expected_heading is not None:
+                return queue.in_flight.expected_heading
+        return robot.heading
 
     def _get_next_node_by_heading(self, rid: int) -> Optional[int]:
         """현재 heading 방향으로 한 칸 이동 시 도착할 노드"""

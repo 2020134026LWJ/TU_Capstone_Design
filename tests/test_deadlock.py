@@ -3,7 +3,7 @@
 
 대상 메커니즘: `_resolve_deadlock` (전략 1 우회 → 전략 2 yield-node)
 회귀 핵심:
-  - 두 로봇이 서로의 next_node를 점유하면 _retry_blocked_robots가 deadlock 감지
+  - 두 로봇이 서로의 next_node를 점유하면 _try_dispatch_all가 deadlock 감지
   - 우선순위 동급(둘 다 carrying 없음) 시 max(rid)가 yield
   - yield 로봇의 planned_path가 block 로봇 노드를 우회하도록 재계산되어야 함
 """
@@ -39,14 +39,14 @@ def test_head_on_deadlock_yield_robot_replans(handler, mock_mqtt):
     # 둘 다 forward 시도 → 서로의 노드 점유로 blocked
     assert handler._send_next_command(1) is False
     assert handler._send_next_command(2) is False
-    assert 1 in handler._blocked_robots
-    assert 2 in handler._blocked_robots
+    assert handler._is_blocked(1)
+    assert handler._is_blocked(2)
 
     # 두 로봇 모두 blocked → retry 시 _resolve_deadlock 발동
-    handler._retry_blocked_robots()
+    handler._try_dispatch_all()
 
     # B(yield)는 차단 해제되어야 함 + planned_path가 11 우회로 재계산
-    assert 2 not in handler._blocked_robots, "yield 로봇은 우회 또는 yield-node로 해제"
+    assert not handler._is_blocked(2), "yield 로봇은 우회 또는 yield-node로 해제"
     assert b.planned_path[0] == 12, "현재 위치에서 출발"
     assert 11 not in b.planned_path, \
         "차단된 노드(AGV-1의 current)를 우회해야 함"
@@ -65,7 +65,7 @@ def test_staging_blocker_forces_yield(handler, mock_mqtt):
       - AGV-2: staging_wait (corridor.queue에 등록, command_queue 비어있음, 노드 41)
 
     Expected:
-      - _retry_blocked_robots()에서 staging blocker(AGV-2) 감지
+      - _try_dispatch_all()에서 staging blocker(AGV-2) 감지
       - _resolve_deadlock에서 AGV-2 강제 yield (carrying 동급이어도)
       - AGV-2가 _yielded_staging_robots에 등록
       - AGV-2에 1-step 이동 명령(turn/forward) 발행됨
@@ -92,16 +92,16 @@ def test_staging_blocker_forces_yield(handler, mock_mqtt):
 
     # AGV-1 forward → 41 점유로 blocked
     assert handler._send_next_command(1) is False
-    assert 1 in handler._blocked_robots
+    assert handler._is_blocked(1)
 
-    # AGV-2는 staging이라 _blocked_robots에 없음
-    assert 2 not in handler._blocked_robots
+    # AGV-2는 staging이라 blocked 아님 (command_queue 비어있음)
+    assert not handler._is_blocked(2)
     assert handler._is_staging_robot(2) is True
 
     mock_mqtt.reset()
 
     # retry → staging blocker 감지 → resolve_deadlock → AGV-2 강제 yield
-    handler._retry_blocked_robots()
+    handler._try_dispatch_all()
 
     # AGV-2가 yielded set에 등록됨
     assert 2 in handler._yielded_staging_robots, "staging AGV가 yielded set에 등록되어야 함"
@@ -129,7 +129,7 @@ def test_carrying_robot_priority(handler, mock_mqtt):
 
     handler._send_next_command(1)
     handler._send_next_command(2)
-    handler._retry_blocked_robots()
+    handler._try_dispatch_all()
 
     # AGV-1(carrying)은 우회 불필요, AGV-2가 yield
     assert b.planned_path[0] == 12

@@ -47,6 +47,10 @@ class WorkflowMixin:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
+        # stock 검증은 GUI 서버(warehouse_server_v2)가 수행. 여기엔
+        # warehouse/order/accepted 경로로만 들어오므로 GUI가 이미 accept한 상태.
+        # → 독립 검증 race(수정 47) 제거.
+
         schedule = self.task_scheduler.schedule_order(user_id=user_id, order_id=order_id)
         if not schedule:
             return self._error_response(f"Order not found: user={user_id}, order={order_id}")
@@ -261,6 +265,10 @@ class WorkflowMixin:
         Returns:
             True: 인터셉트 성공
             False: 인터셉트 불가
+
+        in-flight cmd 가드: ACK 도착 전 robot 상태(carrying_shelf, current_node,
+        heading)가 stale → intercept가 stale 상태 기준으로 재계획 시 off-by-one
+        cascade 발생. carrying robot의 큐 in_flight 비었을 때만 발화.
         """
         first_shelf = task.shelf_sequence[0] if task.shelf_sequence else None
         if first_shelf is None:
@@ -273,6 +281,15 @@ class WorkflowMixin:
         if carrying_robot.status != RobotStatus.RETURNING_SHELF:
             return False
 
+        # ─── REFACTOR E 3.2: ANY 명령 in-flight면 intercept 금지 (수정 46.1 계승) ───
+        # 서버의 robot 상태(current_node, heading, carrying_shelf)가 AGV 실제 상태와
+        # 정합인 순간(ACK/마커 직후)에만 intercept를 발화시켜야 stale 재계획 방지.
+        carrying_queue = self.command_queues.get(carrying_robot.rid)
+        if carrying_queue is not None and carrying_queue.in_flight is not None:
+            in_flight_cmd = carrying_queue.in_flight.cmd
+            print(f"[RequestHandler] Node U: intercept skipped (Robot {carrying_robot.rid} "
+                  f"has '{in_flight_cmd}' in-flight) — task {task.task_id} stays PENDING")
+            return False
 
         task_id = carrying_robot.current_task_id
         if not task_id:
@@ -333,9 +350,10 @@ class WorkflowMixin:
                 self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)
 
-                # lift_up 명령 발행 → AGV 리프트 올림 → cmd_ack 대기
-                self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
-                self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
+                # REFACTOR E 3.4: lift_up도 큐를 거쳐 발행 (I1 단일 발행점).
+                # robot.command_queue에 push 후 _send_next_command가 큐 dispatch + publish.
+                robot.command_queue.append("lift_up")
+                self._send_next_command(robot.rid)
                 return {
                     "type": "robot_arrived_ack",
                     "success": True,
@@ -372,9 +390,10 @@ class WorkflowMixin:
 
         elif st_type in (SubTaskType.RETURN_SHELF, SubTaskType.FORWARD_SHELF):
             # 선반 복귀/포워딩 목적지 도착 → lift_down 명령 발행 (cmd_ack 대기)
+            # REFACTOR E 3.4: 큐 경유 (I1 단일 발행점)
             shelf_id = current_st.shelf_id
-            self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_down")
-            self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
+            robot.command_queue.append("lift_down")
+            self._send_next_command(robot.rid)
             action = "waiting_shelf_putdown" if st_type == SubTaskType.RETURN_SHELF else "waiting_shelf_putdown_forward"
             return {
                 "type": "robot_arrived_ack",
@@ -450,6 +469,8 @@ class WorkflowMixin:
 
             if result.get("action") == "task_complete":
                 self._clear_robot_reservation(robot.rid)
+                # 수정 46: task 완료 시 stale staging 큐 엔트리 제거
+                self.staging_manager.remove_robot_from_queues(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
                 self._try_assign_pending_tasks()
                 # 새 작업이 없으면 홈 staging 노드에서 대기
@@ -521,6 +542,8 @@ class WorkflowMixin:
 
             if result.get("action") == "task_complete":
                 self._clear_robot_reservation(robot.rid)
+                # 수정 46: task 완료 시 stale staging 큐 엔트리 제거
+                self.staging_manager.remove_robot_from_queues(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
                 self._try_assign_pending_tasks()
                 idle_wait = self._get_idle_wait_node(robot.rid)
@@ -579,12 +602,15 @@ class WorkflowMixin:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
-        # user_id → WS 노드: robot home 기준 (포워딩 시 해당 user의 task가 없을 수 있음)
-        robot = self.robot_manager.get_robot(user_id)
-        if not robot:
+        # user_id → WS 노드: shelf_config의 user_id 필드 기준
+        # (robot.home_node와 무관 — 교착 회피로 AGV home이 WS와 스왑돼 있을 수 있음)
+        ws_node = next(
+            (node for node, info in self.shelf_manager.workstations.items()
+             if info.get("user_id") == user_id),
+            None,
+        )
+        if ws_node is None:
             return self._error_response(f"Unknown user {user_id}")
-
-        ws_node = robot.home_node
 
         # 해당 WS에 AT_WORKSTATION인 선반 자동 탐색
         shelf_id = self.shelf_manager.get_shelf_at_ws(ws_node)
@@ -636,8 +662,9 @@ class WorkflowMixin:
                 self.shelf_manager.mark_shelf_picked_up(shelf_id_r, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, shelf_id_r)
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
-                self.mqtt_publisher.publish_cmd(rid=robot.rid, cmd="lift_up")
-                self._lifting_robots.add(robot.rid)   # 수정 31: 리프트 중 이동명령 차단
+                # REFACTOR E 3.4: 큐 경유
+                robot.command_queue.append("lift_up")
+                self._send_next_command(robot.rid)
                 self._forwarded_shelf_handlers.pop(shelf_id_r, None)
                 print(f"[RequestHandler] robot {robot.rid}: re-pickup shelf {shelf_id_r} for return")
                 return {"success": True, "action": "pickup_for_return", "shelf_id": shelf_id_r}
@@ -713,6 +740,8 @@ class WorkflowMixin:
             next_st.status = TaskStatus.PENDING
             self.robot_manager.set_robot_status(robot.rid, RobotStatus.IDLE)
             robot.current_task_id = None
+            # 수정 46: IDLE 전환 시 stale staging 큐 엔트리 제거
+            self.staging_manager.remove_robot_from_queues(robot.rid)
             print(f"[RequestHandler] F-node({context}): shelf {next_st.shelf_id} unavailable "
                   f"(status={next_shelf_obj.status.value}), "
                   f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")

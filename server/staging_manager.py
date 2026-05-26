@@ -157,6 +157,24 @@ class StagingManager:
                     return True
         return False
 
+    def remove_robot_from_queues(self, rid: int) -> int:
+        """모든 corridor 큐에서 해당 로봇 엔트리 제거 (수정 46)
+
+        Robot의 current_task가 바뀌거나 IDLE이 될 때 호출 — stale 큐 엔트리가
+        남아 있으면 corridor release 시점에 잘못된 dispatch가 발화함 (3중 race).
+
+        Returns:
+            제거된 엔트리 개수
+        """
+        removed = 0
+        for corridor in self.corridors.values():
+            before = len(corridor.queue)
+            corridor.queue = deque(s for s in corridor.queue if s.rid != rid)
+            removed += before - len(corridor.queue)
+        if removed > 0:
+            print(f"[StagingManager] AGV-{rid}: removed {removed} stale queue entries")
+        return removed
+
     def try_preempt_at_gateway(self, gateway_node: int, claimant_rid: int) -> Optional[PreemptResult]:
         """gateway에 도착한 staged AGV가 점유자보다 corridor에 가까우면 점유 이전.
 

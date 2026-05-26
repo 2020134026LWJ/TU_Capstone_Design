@@ -76,12 +76,10 @@
 
 | 변수 | 타입 | 용도 |
 |------|------|------|
-| `_reserved_nodes` | `Dict[int, int]` | forward 목적지 예약 (node → rid) |
-| `_blocked_robots` | `Set[int]` | 충돌로 보류 중인 로봇 |
+| `command_queues` | `Dict[int, CommandQueue]` | AGV별 cmd lifecycle (REFACTOR E). `peek_expected_node` = 예약 / `in_flight` = 발행대기 / `is_idle` = 가용 |
 | `_yielded_staging_robots` | `Set[int]` | deadlock yield된 staging 로봇 |
 | `_staged_to_ws` | `Dict[int, Tuple[int, int]]` | early-release 대기 (rid → (ws, staging)) |
-| `_goal_locked_robots` | `Set[int]` | blocker가 내 goal에 있어 대기 중 |
-| `_in_flight_cmds` | `Dict[int, str]` | AGV에 발행했지만 ack 안 온 cmd |
+| `_deferred_goals` | `Dict[int, int]` | blocker가 내 goal에 있어 대기 중 (rid → 원래 goal). 멤버십 = 키 존재 |
 
 ---
 
