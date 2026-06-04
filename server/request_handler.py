@@ -100,8 +100,9 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         }
 
         # REFACTOR F Phase 2: 시공간 예약 단일 진실 (Phase 3에서 path_planner와 연결)
-        # 현 단계에선 등록만, 아직 어디서도 commit/release 안 함 → 행동 변화 0
         self.reservation = ReservationService()
+        # REFACTOR F Phase 4.5.1: staging이 corridor 점유를 reservation에 이중기록
+        self.staging_manager.set_reservation(self.reservation)
 
         # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
         self._broadcast_callback = None

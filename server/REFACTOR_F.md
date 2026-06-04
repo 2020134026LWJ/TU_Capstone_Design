@@ -69,12 +69,34 @@
   - **유지(이월)**: `_find_yield_node`(staging 분기가 아직 씀 → 4.5), staging yield 분기(→4.5), `_resolve_deadlock` 트리거
   - **pytest 50 passed** (staging yield 테스트 유지·통과)
   - **시뮬 검증 대기**: goal 막힌 로봇이 제자리 대기 시 blocker 퇴로 막아 상호 교착 안 나는지 (baseline goal_lock=0이라 희귀)
-- [ ] 4.5 staging 큐 관리 삭제 (`staging_manager` 정적 헬퍼로 격하) — `_resolve_deadlock` staging yield 잔여 + `_find_yield_node` + `_yielded_staging_robots` 정리 포함
-  - [ ] `add_staged_agv` 삭제
-- [ ] 4.5 staging 큐 관리 삭제 (`staging_manager` 정적 헬퍼로 격하)
-  - [ ] `add_staged_agv` 삭제
-  - [ ] `release_corridor_without_trigger` 삭제
-  - [ ] `pop_next_in_queue` 삭제
+- [ ] **4.5 staging 큐 → 예약 재구현** (큰 공사, 별도 브랜치 권장 `refactor/staging-reservation`). 설계 ↓
+  - [x] 4.5.0 **토대** (2026-06-05) — `release(keep_indefinite=)` 추가. `commit` 내부 release + snapshot resync 2곳이 `keep_indefinite=True`. **행동 변화 0** (reserve_indefinite 호출자 아직 없음 → 분기 미실행). 테스트 3개(test_release_keep_indefinite_preserves_corridor / test_recommit_preserves_own_indefinite / test_full_release_clears_indefinite_for_wakeup). **pytest 53 passed**. 시뮬 불요(런타임 동작 불변)
+  - [x] 4.5.1 corridor 점유 = `reserve_indefinite(occupant, **ws_node**)` 이중기록 (2026-06-05) — 회랑=WS 노드 하나 (gateway는 통과 길목, 미포함). StagingManager에 `set_reservation` 주입 + `_sync_occupancy(ws_node)` 헬퍼를 점유변경 5곳(should_stage 진입/release_without_trigger 2분기/mark_exiting/preempt/timeout 2분기)에 호출. ReservationService에 `release_indefinite_node` + `reserve_indefinite` transfer 정리(`_drop_indef_entry`) 추가. **상태기계가 여전히 권위, reservation은 그림자**(fire_callbacks=False). 4.5.0 keep_indefinite가 resync에서 보존. **pytest 55**. **시뮬 검증 대기** (WS 차단이 excluded_transit와 중복이라 delta 작음 예상)
+  - [x] 4.5.2 **reader-flip #1** (2026-06-05) — `should_stage`의 "회랑 비었나?" 판단을 `corridor.state` → `reservation.is_corridor_held(ws_node)`로 전환. **새 장부로 내리는 첫 결정.** ReservationService에 `is_corridor_held(node, exclude_rid)` 추가 (indefinite만 보고 cell/edge 무시). reservation 미주입 시 corridor.state fallback. 이중기록(4.5.1) 덕에 동치 → **동작 불변 기대**. **pytest 57**. **시뮬 검증 대기**
+    > [순서 조정] 체크리스트 원래 4.5.2=wake-up이었으나, wake-up이 4갈래 분기로 제일 어려운 조각이라 strangler 정석대로 **쉬운 reader-flip부터**. wake-up은 4.5.4로 뒤로 미룸.
+  - [ ] 4.5.3 reader-flip #2 — 나머지 corridor 읽기(`occupying_rid` 체크, `is_staged_agv` 등)를 reservation으로
+  - [ ] 4.5.4 **대기큐 → `on_release` 깨우기** (제일 어려운 조각 — 4갈래 분기: yielded-staging/early-release desync/sanity dispatch/preempt)
+  - [ ] 4.5.5 preempt(`try_preempt_at_gateway`)·timeout 새 모델로
+  - [ ] 4.5.4 staging yield + `_find_yield_node` + `_yielded_staging_robots` 제거 (예약이 plan 시점에 corridor 막음 = staging 교착 예방)
+  - [ ] 4.5.5 `add_staged_agv`/`release_corridor_without_trigger`/`mark_exiting`/`check_position_release` 제거 → StagingManager 격하
+
+#### 4.5 설계 — corridor를 reservation으로
+
+> **왜 여기선 reserve_indefinite가 맞나** (4.4 goal-lock과 반대): corridor 점유는 "한 AGV가 회랑 노드 group을 픽킹 끝날 때까지 잡고 있다"는 **진짜 영구 점유**라 reserve_indefinite의 정의에 정확히 부합. goal-lock은 excluded_transit와 중복이었지만, corridor는 staging 게이팅의 본질이라 중복 아님 (I3).
+
+**상태 매핑**:
+```
+현재 (CorridorInfo)                  →  reservation
+state=OCCUPIED, occupying_rid=1       →  reserve_indefinite(1, corridor_nodes)
+queue=[AGV-2 staged]                  →  on_release 콜백 + (대기 dispatch 보류 목록)
+release_corridor_without_trigger      →  release(1, keep_indefinite=False) → 콜백 발화
+is_exiting / mark_exiting             →  (퇴출 = release 시점 명시) — 단순화
+```
+corridor_nodes = {gateway, ws} (+ 사이 경로 노드). staging_node는 corridor **밖**이라 대기 AGV는 거기서 자연 정차 (A*가 corridor 막힌 거 보고 staging까지만 plan).
+
+**깨우기(wake-up)**: 점유자 퇴출 → `release(occupant, keep_indefinite=False)` → `on_release(rid)` 콜백 → 보류된 staged AGV를 `_plan_and_publish_move`로 재dispatch (corridor 이제 비어 plan 성공).
+
+**전제조건 (4.5.0)**: snapshot resync(`_plan_and_publish_move`가 매 plan마다 모든 robot release+recommit)가 indefinite를 지워버림 → `keep_indefinite=True`로 보존해야 corridor 예약이 plan 간에 살아남음.
 
 ### Phase 5 — 도메인 SM 명시화 (1일)
 - [ ] 5.1 `Robot.set_status(new, reason)` 추가

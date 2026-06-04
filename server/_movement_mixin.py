@@ -497,11 +497,12 @@ class MovementMixin:
             excluded_transit |= self._get_occupied_shelf_nodes()
         # REFACTOR F Phase 3: self.reservation을 다른 로봇 상태로 snapshot 동기화
         # (Phase 4에서 incremental maintenance로 전환 예정)
-        self.reservation.release(rid, fire_callbacks=False)
+        # keep_indefinite=True: corridor 영구 점유(Phase 4.5)는 resync에도 살아남음
+        self.reservation.release(rid, fire_callbacks=False, keep_indefinite=True)
         for other_rid, other in self.robot_manager.robots.items():
             if other_rid == rid:
                 continue
-            self.reservation.release(other_rid, fire_callbacks=False)
+            self.reservation.release(other_rid, fire_callbacks=False, keep_indefinite=True)
             # 다른 로봇 planned_path 시공간 예약 (dwell=1: legacy +1 timing 버퍼)
             if other.planned_path:
                 self.reservation.commit(other_rid, other.planned_path, dwell=1)
