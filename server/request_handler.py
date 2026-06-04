@@ -24,6 +24,7 @@ from .staging_manager import StagingManager
 from .task_manager import TaskManager
 from .db_loader import DBLoader
 from .order_optimizer import OrderOptimizer
+from .reservation_service import ReservationService
 from ._movement_mixin import MovementMixin
 from ._marker_mixin import MarkerMixin
 from ._workflow_mixin import WorkflowMixin
@@ -100,8 +101,23 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
             rid: CommandQueue(rid) for rid in self.robot_manager.robots
         }
 
+        # REFACTOR F Phase 2: 시공간 예약 단일 진실 (Phase 3에서 path_planner와 연결)
+        # 현 단계에선 등록만, 아직 어디서도 commit/release 안 함 → 행동 변화 0
+        self.reservation = ReservationService()
+
         # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
         self._broadcast_callback = None
+
+        # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터
+        self._refactor_f_counters: Dict[str, int] = {
+            'lookahead_replan': 0,
+            'resolve_deadlock': 0,
+            'find_yield_node': 0,
+            'should_hold_for_eta': 0,
+            'staging_redirect': 0,
+            'goal_lock': 0,
+            'staging_cascade': 0,
+        }
 
     def set_broadcast_callback(self, callback):
         """WebSocket 브로드캐스트 콜백 설정"""

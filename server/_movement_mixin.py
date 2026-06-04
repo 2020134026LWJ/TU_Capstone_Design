@@ -154,6 +154,7 @@ class MovementMixin:
           - 선반 노드가 아닐 것 (물리적 충돌 방지)
           - 다른 로봇이 없을 것
         """
+        self._refactor_f_counters['find_yield_node'] += 1
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return None
@@ -204,45 +205,6 @@ class MovementMixin:
                       f"replanning Robot {rid} (was routing through that node)")
                 self._plan_and_publish_move(rid, robot.current_node, goal)
 
-    def _lookahead_replan(self, rid: int) -> bool:
-        """매 노드 도착마다 앞으로의 planned_path 전체를 검사 → 충돌 예정이면 사전 replan.
-
-        검사 항목:
-          (1) IDLE 로봇이 내 경로 위에 정차 — 영구 장애물
-          (2) 다른 AGV의 slide된 planned_path와 시간 교차 — 동시에 같은 노드 도착 예정
-
-        Returns:
-            True: replan 수행됨 (호출자는 _send_next_command 스킵해야 함 — 이미 새 cmd 발행됨)
-            False: 충돌 없음, 기존 plan 유지
-        """
-        robot = self.robot_manager.get_robot(rid)
-        if not robot or len(robot.planned_path) < 2:
-            return False
-
-        my_path = robot.planned_path  # [current_node, next, ..., goal] (slide 적용 상태)
-        goal = my_path[-1]
-
-        for other_rid, other in self.robot_manager.robots.items():
-            if other_rid == rid:
-                continue
-            # (1) IDLE 로봇이 내 경로 위에 있나 (현재 위치 제외)
-            if other.status == RobotStatus.IDLE and other.current_node in my_path[1:]:
-                print(f"[RequestHandler] Lookahead: Robot {rid} path blocked by "
-                      f"IDLE Robot {other_rid} at {other.current_node}, replanning to {goal}")
-                self._plan_and_publish_move(rid, robot.current_node, goal)
-                return True
-            # (2) 시간 교차 (양쪽 모두 path[i] = i step 후 위치)
-            if len(other.planned_path) >= 2:
-                limit = min(len(my_path), len(other.planned_path))
-                for i in range(1, limit):
-                    if my_path[i] == other.planned_path[i]:
-                        print(f"[RequestHandler] Lookahead: Robot {rid} will collide with "
-                              f"Robot {other_rid} at {my_path[i]} (t={i}), replanning")
-                        self._plan_and_publish_move(rid, robot.current_node, goal)
-                        return True
-
-        return False
-
     # ─── 교착 해제 ───
 
     def _resolve_deadlock(self, rid_a: int, rid_b: int):
@@ -256,6 +218,7 @@ class MovementMixin:
           2) 선반 운반 중 > 미운반
           3) 동급일 때 max(rid) yield
         """
+        self._refactor_f_counters['resolve_deadlock'] += 1
         robot_a = self.robot_manager.get_robot(rid_a)
         robot_b = self.robot_manager.get_robot(rid_b)
         if not robot_a or not robot_b:
@@ -361,6 +324,7 @@ class MovementMixin:
                 yield_robot.planned_path, yield_robot.heading
             )
             self._deferred_goals[yield_rid] = goal
+            self._refactor_f_counters['goal_lock'] += 1
             print(f"[RequestHandler] Goal-locked: Robot {yield_rid} → side {yield_node} "
                   f"(deferred goal {goal}, blocker {block_rid})")
             self._send_next_command(yield_rid)
@@ -438,21 +402,6 @@ class MovementMixin:
             if shelf.status == ShelfStatus.IN_PLACE:
                 occupied.add(shelf.current_node)
         return occupied
-
-    def _get_idle_wait_node(self, rid: int) -> int:
-        """idle 로봇의 대기 노드: 홈 WS의 gateway 노드 반환
-
-        staging 노드(1/41)는 다른 AGV가 W 진입 대기용으로 쓰므로 idle 주차지로 부적합 —
-        idle AGV가 staging 점유 시 active AGV staging 진입 차단 → head-on deadlock.
-        gateway 노드(17/25)는 corridor 점유 trigger와 분리되어 있어 idle 주차 가능.
-        """
-        robot = self.robot_manager.get_robot(rid)
-        if not robot:
-            return None
-        corridor = self.staging_manager.corridors.get(robot.home_node)
-        if corridor:
-            return corridor.gateway_node
-        return robot.home_node
 
     # ─── 명령 발행 (충돌 체크 포함) ───
 
@@ -605,83 +554,6 @@ class MovementMixin:
                 return neighbor_id
         return None
 
-    # ─── Dispatch ETA 비교 (점유자 곧 빠질 거면 staging 우회 대신 현재 위치 대기) ───
-
-    def _estimate_exit_steps(self, occupant, corridor_area: Set[int]) -> Optional[float]:
-        """점유자가 corridor area를 벗어나기까지 남은 step 수 추정.
-
-        [전제] 호출자가 corridor.is_exiting=True 임을 보장해야 함
-        (퇴출 phase일 때만 의미 있음 — 진입/픽킹 중이면 ETA 무한대).
-
-        planned_path의 첫 corridor 밖 노드 인덱스 = 남은 forward 수 (대략).
-        WAITING_FOR_PICK이거나 planned_path 없으면 None(=무한대) 반환해서
-        ETA 비교가 staging 쪽을 선택하도록 함.
-        """
-        if occupant.status == RobotStatus.WAITING_FOR_PICK:
-            return None
-        path = occupant.planned_path
-        if not path:
-            return None
-        for i, node in enumerate(path):
-            if node not in corridor_area:
-                return float(i)
-        return None
-
-    def _estimate_path_cost(self, start: int, goal: int) -> Optional[float]:
-        """대략적인 경로 비용 (step 수 — turn 무시). ETA 비교용 heuristic.
-
-        plan_single_robot은 예약/exclude 무시하므로 빠르지만 부정확.
-        ETA 비교는 staging 우회를 막을지 결정하는 보수적 heuristic이라 충분.
-        """
-        if start == goal:
-            return 0.0
-        timed = self.path_planner.plan_single_robot(start, goal)
-        if timed is None:
-            return None
-        return float(len(timed) - 1)
-
-    def _should_hold_for_eta(self, rid: int, start: int, ws_node: int) -> bool:
-        """점유자가 곧 corridor를 빠질 거라면 staging 우회 대신 현재 위치에서 대기할지 결정.
-
-        비교 식:
-          staging 경유 비용 = (start → staging_node) + (staging_node → ws_node)
-          현재 위치 hold 비용 = max(점유자_ETA + 1, start → ws_node 직진)
-                                (점유자 빠진 뒤에 직진 — 둘 중 큰 값이 도착시간)
-          hold 비용 < staging 경유 비용 → hold
-
-        Returns:
-            True: 현재 위치에서 대기 (staging 우회 안 함)
-            False: 기존대로 staging 우회 (점유자 ETA 미확정 / hold 비용이 더 큼)
-        """
-        corridor = self.staging_manager.corridors.get(ws_node)
-        if not corridor:
-            return False
-        # 점유자가 퇴출 phase가 아니면 ETA 무한대 (픽킹 전/중) → 기존 staging 사용
-        if not corridor.is_exiting:
-            return False
-        occupying_rid = corridor.occupying_rid
-        if occupying_rid is None or occupying_rid == rid:
-            return False
-        occupant = self.robot_manager.get_robot(occupying_rid)
-        if occupant is None:
-            return False
-
-        corridor_area = {corridor.ws_node, corridor.gateway_node}
-        eta_steps = self._estimate_exit_steps(occupant, corridor_area)
-        if eta_steps is None:
-            return False  # ETA 불명 → 보수적으로 staging
-
-        staging_node = corridor.staging_node
-        cost_to_staging = self._estimate_path_cost(start, staging_node)
-        cost_staging_to_ws = self._estimate_path_cost(staging_node, ws_node)
-        cost_direct = self._estimate_path_cost(start, ws_node)
-        if cost_to_staging is None or cost_staging_to_ws is None or cost_direct is None:
-            return False
-
-        detour_total = cost_to_staging + cost_staging_to_ws
-        hold_total = max(eta_steps + 1.0, cost_direct)  # +1 = handoff buffer
-        return hold_total < detour_total
-
     # ─── 경로 계획 + 명령 발행 + 스테이징 체크 ───
 
     def _plan_and_publish_move(
@@ -700,15 +572,9 @@ class MovementMixin:
         if not self.DEMO_MODE and goal in self.staging_manager.corridors:
             staging_node = self.staging_manager.should_stage(goal, rid, is_forwarding=is_forwarding)
             if staging_node is not None:
-                # Dispatch ETA 비교: 점유자가 곧 빠질 거면 staging 우회 대신 현재 위치 대기
-                # (staging_node = start로 override → 큐에 등록만 하고 이동 X)
-                if self._should_hold_for_eta(rid, start, goal):
-                    staging_node = start
-                    print(f"[RequestHandler] Robot {rid}: hold at {start} for W{goal} "
-                          f"(occupant ETA < staging detour)")
-                else:
-                    print(f"[RequestHandler] Robot {rid}: redirected to staging node {staging_node} "
-                          f"(target WS {goal})")
+                self._refactor_f_counters['staging_redirect'] += 1
+                print(f"[RequestHandler] Robot {rid}: redirected to staging node {staging_node} "
+                      f"(target WS {goal})")
                 actual_goal = staging_node
                 staging_excluded_node = goal
                 self.staging_manager.add_staged_agv(goal, rid, staging_node)
@@ -741,19 +607,18 @@ class MovementMixin:
         # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가
         if robot and robot.carrying_shelf is not None:
             excluded_transit |= self._get_occupied_shelf_nodes()
-        # 다른 로봇의 planned_path 기반 시간 예약 (Cooperative A*)
-        reserved_nodes: Set[Tuple[int, int]] = set()
+        # REFACTOR F Phase 3: self.reservation을 다른 로봇 상태로 snapshot 동기화
+        # (Phase 4에서 incremental maintenance로 전환 예정)
+        self.reservation.release(rid, fire_callbacks=False)
         for other_rid, other in self.robot_manager.robots.items():
             if other_rid == rid:
                 continue
-            # 다른 로봇의 planned_path 각 노드를 도착 예상 시각으로 예약
-            for t, node in enumerate(other.planned_path):
-                reserved_nodes.add((node, t))
-                reserved_nodes.add((node, t + 1))  # PARAM: 시간 예약 버퍼 (step). 회전/지연 보정용. ↑하면 안전 ↑, 경로 효율 ↓
-            # 정지 상태 → 영구 장애물로 등록 (이전엔 t=0~2만 예약해서 A*가 그 너머 시간엔
-            # 비어있다고 오인 → 주차/대기 차량 위로 plan). IDLE은 planned_path=[parking_node]가
-            # 남아있을 수 있으므로 status도 함께 체크. staging 대기 중 AGV도 영구 장애물 처리
-            # (특히 포워딩 시 gateway-staging 시 outbound가 그 노드 회피해야 함).
+            self.reservation.release(other_rid, fire_callbacks=False)
+            # 다른 로봇 planned_path 시공간 예약 (dwell=1: legacy +1 timing 버퍼)
+            if other.planned_path:
+                self.reservation.commit(other_rid, other.planned_path, dwell=1)
+            # 정지 상태 → 영구 장애물. IDLE은 planned_path=[parking_node]가 남을 수 있어 status도 체크.
+            # staging 대기 AGV도 영구 장애물 처리 (포워딩 시 gateway-staging 우회 위함).
             if (other.status == RobotStatus.IDLE
                     or not other.planned_path
                     or self._is_staging_robot(other_rid)):
@@ -766,14 +631,14 @@ class MovementMixin:
         if not excluded_transit:
             excluded_transit = None
 
-        # A* 경로 계획 (시간 기반 예약으로 상대 경로와 충돌 없는 최적 경로 계획)
+        # A* 경로 계획 (reservation 기반 시공간 충돌 회피)
         # in-flight turn cmd 효과 반영한 예측 heading 사용 (race 방지)
         planning_heading = self._predict_heading_after_inflight(rid) if robot else None
         timed_path = self.path_planner.astar_with_time(
             start=start,
             goal=actual_goal,
-            reserved_nodes=reserved_nodes,
-            reserved_edges=set(),
+            reservation=self.reservation,
+            rid=rid,
             max_time=self.config.max_time,
             excluded_transit=excluded_transit,
             start_heading=planning_heading,
@@ -788,6 +653,8 @@ class MovementMixin:
         # 명령 큐 생성 및 저장
         if robot:
             robot.planned_path = node_path
+            # REFACTOR F Phase 3: 자기 plan reservation 등록 (dwell=1 legacy 호환)
+            self.reservation.commit(rid, node_path, dwell=1)
             # commands 생성도 동일한 예측 heading 사용 (A*와 정합)
             robot.command_queue = self._path_to_commands(node_path, planning_heading)
             print(f"[RequestHandler] Robot {rid}: path={node_path}, "

@@ -162,6 +162,14 @@ class AGVServer:
         await self.websocket_handler.stop()
         self.mqtt_publisher.disconnect()
 
+        # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터 출력
+        counters = dict(self.request_handler._refactor_f_counters)
+        counters['staging_cascade'] = self.request_handler.staging_manager._cascade_count
+        print("\n[REFACTOR F Phase 1] Reactive-pattern trigger counts:")
+        for key, value in counters.items():
+            print(f"  {key:24s} : {value}")
+        print()
+
         print("[AGVServer] Server stopped")
 
     def handle_signal(self, signum, frame):

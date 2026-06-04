@@ -22,16 +22,17 @@ flowchart TB
     %% 2. 선반 상태 판단 (F 노드 - 6분기)
     E --> F{"선반 현재 위치?"}
     F -- "IN_PLACE<br>+ 다른 AGV GO_TO_SHELF 중" --> FSKIP{"다음 선반<br>있음?"}
-    FSKIP -- "있음" --> FREORDER["순서 변경<br>(blocked 선반 → 맨 뒤)"]
+    FSKIP -- "있음<br>+ rotation_count ≤ N" --> FREORDER["순서 변경<br>(blocked 선반 → 맨 뒤)<br>rotation_count++"]
     FREORDER --> F
     FSKIP -- "없음" --> PENDING["PENDING 대기<br>(선반 반납/도착 시 재배정)"]
+    FSKIP -- "rotation_count > N<br>(무한 루프 가드)" --> PENDING
     F -- "IN_PLACE<br>(예약 없음)" --> G(("선반으로 이동"))
     F -- "CARRIED<br>(이동 중)" --> FSKIP
     F -- "AT_WORKSTATION<br>+ carrier WAITING_FOR_PICK" --> PENDING
     F -- "AT_WORKSTATION<br>+ WS 회랑 점유 중" --> PENDING
     F -- "AT_WORKSTATION<br>+ 진입 가능" --> STG{"다른 AGV가 목표 작업대<br>점유 또는 점유 계획 중?"}
 
-    PENDING -. "상태 업데이트<br>(_try_assign_pending_tasks 재호출)" .-> F
+    PENDING -. "깨어남 트리거:<br>① corridor release (TRG/위치 이탈)<br>② shelf release (putdown / AT_WS 진입)<br>③ robot release (X 태스크 완료)<br>→ _try_assign_pending_tasks 재호출" .-> F
 
     G --> H["도착 -> 리프트 UP"]
     H --> STG
@@ -58,7 +59,8 @@ flowchart TB
     S -. "회랑 이탈 또는 마커 통과" .-> TRG
 
     %% 5. 복귀 중 서버 인터셉트 및 작업 종료
-    T --> U{"서버 인터셉트 수신?<br>(목적지 변경)"}
+    %% U 노드는 RETURNING_SHELF 상태에서만 적용 (DELIVERING_TO_WS / FORWARD_SHELF 중에는 인터셉트 불가)
+    T --> U{"서버 인터셉트 수신?<br>(RETURNING_SHELF 상태에서만)<br>(목적지 변경)"}
     U -- Yes --> STG
     U -- No --> V["도착 -> 리프트 DOWN"]
 
@@ -72,6 +74,9 @@ flowchart TB
     Y -- No --> ROBOT_IDLE(("staging 노드 대기<br>(home WS 앞 대기)"))
 
     ROBOT_IDLE -- "새 주문 대기 (무한 반복)" --> A
+    %% TASK_WAIT 잔여 시 ROBOT_IDLE 발생 자체가 깨어남 이벤트가 됨
+    %% (다른 AGV가 X에 도달해 IDLE로 풀리면 TASK_WAIT 큐를 C에서 재시도)
+    TASK_WAIT -. "ROBOT_IDLE 발생 시<br>_try_assign_pending_tasks 재호출" .-> C
 ```
 
 ## 핵심 로직 요약

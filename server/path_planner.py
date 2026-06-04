@@ -106,8 +106,10 @@ class PathPlanner:
         self,
         start: int,
         goal: int,
-        reserved_nodes: Set[Tuple[int, int]],
-        reserved_edges: Set[Tuple[int, int, int]],
+        reservation: Optional["ReservationService"] = None,  # REFACTOR F Phase 3: 신규
+        rid: Optional[int] = None,                            # reservation 사용 시 exclude_rid
+        reserved_nodes: Optional[Set[Tuple[int, int]]] = None,  # legacy 경로 (테스트/하위호환)
+        reserved_edges: Optional[Set[Tuple[int, int, int]]] = None,
         max_time: int = 50,           # PARAM: A* 시간 horizon (step). 길수록 우회/대기 옵션 ↑, 비용 ↑
         excluded_transit: Optional[Set[int]] = None,
         turn_penalty: float = 0.3,    # PARAM: 방향 전환 추가 비용 (0=무시). ↑하면 직선 선호, 회전 ↓
@@ -119,8 +121,10 @@ class PathPlanner:
         Args:
             start: 시작 노드
             goal: 목표 노드
-            reserved_nodes: 예약된 노드 집합 {(node_id, time), ...}
-            reserved_edges: 예약된 엣지 집합 {(from_node, to_node, time), ...}
+            reservation: 시공간 예약 서비스 (제공 시 reserved_nodes/edges 무시).
+            rid: reservation 사용 시 자기 자신 ID (exclude_rid).
+            reserved_nodes: legacy 노드 예약 집합 (reservation 없을 때 사용).
+            reserved_edges: legacy 엣지 예약 집합.
             max_time: 최대 시간
             excluded_transit: 통과 불가 노드 집합 (start/goal 제외)
             turn_penalty: 방향 전환 시 추가 비용 (0=페널티 없음, 기본 0.3)
@@ -129,6 +133,13 @@ class PathPlanner:
         Returns:
             시간 포함 경로 [(node, time), ...] 또는 None
         """
+        use_reservation = reservation is not None
+        if not use_reservation:
+            # legacy 경로: 기본 빈 set
+            if reserved_nodes is None:
+                reserved_nodes = set()
+            if reserved_edges is None:
+                reserved_edges = set()
         def heading_to_dir(h: int) -> int:
             return {0: 0, 90: 1, 180: 2, 270: 3}.get(h, -1)
 
@@ -171,13 +182,21 @@ class PathPlanner:
                         continue
 
                 # 노드 충돌 검사
-                if (nxt_node, nt) in reserved_nodes:
-                    continue
+                if use_reservation:
+                    if not reservation.is_free(nxt_node, nt, exclude_rid=rid):
+                        continue
+                else:
+                    if (nxt_node, nt) in reserved_nodes:
+                        continue
 
                 # 엣지 충돌 검사 (스왑 충돌)
                 if nxt_node != cur_node:
-                    if (nxt_node, cur_node, t) in reserved_edges:
-                        continue
+                    if use_reservation:
+                        if not reservation.is_edge_free(cur_node, nxt_node, t, exclude_rid=rid):
+                            continue
+                    else:
+                        if (nxt_node, cur_node, t) in reserved_edges:
+                            continue
 
                 # 방향 계산 및 회전 페널티
                 if nxt_node != cur_node:

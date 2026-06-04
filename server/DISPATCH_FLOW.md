@@ -28,12 +28,11 @@
 ```
 1. Staging 체크 (Point A)
    should_stage(goal, rid) → None 이면 corridor 비어있음, 진입 가능
-                          → staging_node 반환이면 corridor 점유 중
+                          → staging_node 반환이면 corridor 점유 중 → staging 우회
 
-   [수정 44 — Dispatch ETA] 점유자 곧 빠질 예정이면 staging 우회 대신 현재 위치 대기
-     _should_hold_for_eta() → True면 staging_node = start 로 override
-       → add_staged_agv(goal, rid, start) — 큐에 등록만 (실제 이동 X)
-       → start == actual_goal → 즉시 도착 처리 → is_staged_agv → "staging_wait"
+   [REFACTOR F Phase 4.2] 수정 44 ETA hold(_should_hold_for_eta) 삭제됨.
+     점유 중이면 항상 staging 우회. corridor 비는 타이밍은 ReservationService(I3)가
+     plan 시점에 처리하는 방향 (Phase 4.5 staging 큐 격하에서 통합 예정).
 
 2. A* 경로 계획 (start_heading + turn_penalty=0.3)
    - excluded_transit: 점유 선반, 다른 AGV planned_path, 정지 차량(IDLE/staging)
@@ -87,7 +86,7 @@
 
 | 증상 | 의심 메서드 |
 |------|-------------|
-| 쓸데없는 우회 (예: row 1 detour) | `_plan_and_publish_move` Point A → `should_stage` → `_should_hold_for_eta` |
+| 쓸데없는 우회 (예: row 1 detour) | `_plan_and_publish_move` Point A → `should_stage` (ETA hold은 Phase 4.2에서 삭제됨) |
 | 회랑 안 풀림 | `check_position_release` / `handle_marker_trigger` / `release_corridor_without_trigger` |
 | AGV 멈춤 (cmd 안 옴) | `_send_next_command` (`_reserved_nodes` 충돌) / `_blocked_robots` 미해제 |
 | 두 로봇 동시 진입 | `_is_safe_to_resume` / `_in_flight_cmds` |

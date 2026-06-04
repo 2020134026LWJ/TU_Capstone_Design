@@ -60,6 +60,9 @@ class StagingManager:
         self._get_robot_planned_path = get_robot_planned_path
         self.corridors: Dict[int, CorridorInfo] = {}
 
+        # REFACTOR F Phase 1 — staging cascade wake-up 카운터 (release_corridor_without_trigger 호출 수)
+        self._cascade_count: int = 0
+
         # ws_node(33,34) → gateway, staging, trigger 매핑
         for ws_node_str, ws_info in workstations.items():
             ws_node = int(ws_node_str)
@@ -256,6 +259,7 @@ class StagingManager:
         FORWARD_SHELF는 트리거 노드를 지나지 않을 수 있으므로 직접 해제.
         포워딩 경로를 _robot_planned_paths에 등록한 뒤 호출해야 함.
         """
+        self._cascade_count += 1
         corridor = self.corridors.get(ws_node)
         if not corridor:
             return None

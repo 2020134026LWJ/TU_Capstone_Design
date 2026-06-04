@@ -12,7 +12,7 @@ self 상태 접근:
 
 다른 mixin 호출:
   - MovementMixin: _plan_and_publish_move, _clear_robot_reservation,
-                    _replan_for_placed_shelf, _get_idle_wait_node
+                    _replan_for_placed_shelf
   - Base: _error_response
 """
 
@@ -472,10 +472,6 @@ class WorkflowMixin:
                 self.staging_manager.remove_robot_from_queues(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
                 self._try_assign_pending_tasks()
-                # 새 작업이 없으면 홈 staging 노드에서 대기
-                idle_wait = self._get_idle_wait_node(robot.rid)
-                if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
-                    self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
                     "type": "cmd_ack_response",
                     "success": True,
@@ -545,9 +541,6 @@ class WorkflowMixin:
                 self.staging_manager.remove_robot_from_queues(robot.rid)
                 self.robot_manager.complete_task(robot.rid)
                 self._try_assign_pending_tasks()
-                idle_wait = self._get_idle_wait_node(robot.rid)
-                if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
-                    self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
                 return {
                     "type": "cmd_ack_response",
                     "success": True,
@@ -745,9 +738,6 @@ class WorkflowMixin:
                   f"(status={next_shelf_obj.status.value}), "
                   f"task {task.task_id} → PENDING, robot {robot.rid} → IDLE")
             self._try_assign_pending_tasks()
-            idle_wait = self._get_idle_wait_node(robot.rid)
-            if robot.status == RobotStatus.IDLE and robot.current_node != idle_wait:
-                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
             return {
                 "type": "cmd_ack_response",
                 "success": True,
@@ -804,13 +794,10 @@ class WorkflowMixin:
             return
 
         if new_current_st is None:
-            # 작업 완료: 로봇 → IDLE → 홈 staging 노드 대기
+            # 작업 완료: 로봇 → IDLE (현재 위치 유지, 다음 작업 대기)
             self._clear_robot_reservation(robot.rid)
             self.robot_manager.complete_task(robot.rid)
-            idle_wait = self._get_idle_wait_node(robot.rid)
-            if robot.current_node != idle_wait:
-                self._plan_and_publish_move(robot.rid, robot.current_node, idle_wait)
-            print(f"[RequestHandler] T2(robot {robot.rid}): task complete after skip, → staging")
+            print(f"[RequestHandler] T2(robot {robot.rid}): task complete after skip, → IDLE")
             return
 
         if new_current_st.subtask_type == SubTaskType.GO_TO_SHELF:

@@ -202,10 +202,9 @@ class MarkerMixin:
                     self._try_assign_pending_tasks()
                     return result
 
-        # 목표 노드가 아닌 중간 노드 → lookahead 검사 → 충돌 예정이면 사전 replan
-        # replan되면 _plan_and_publish_move가 이미 첫 cmd 발행했으므로 _send_next_command 스킵
-        if not self._lookahead_replan(rid):
-            self._send_next_command(rid)
+        # 목표 노드가 아닌 중간 노드 → 다음 cmd 발행
+        # (REFACTOR F Phase 4.1: lookahead_replan 삭제 — reservation이 plan 시점에 차단)
+        self._send_next_command(rid)
 
         # 블록된 다른 로봇 재시도
         self._try_dispatch_all()
