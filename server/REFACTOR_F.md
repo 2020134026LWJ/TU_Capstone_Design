@@ -63,8 +63,14 @@
   - 이유: 대체재 있는 net만 제거. goal-lock 대체재(reserve_indefinite)는 4.4, staging은 4.5
   - 테스트: obsolete 2개 삭제(`test_head_on_deadlock_yield_robot_replans`/`test_carrying_robot_priority`) — 대체재는 `test_reservation.py::test_swap_collision_blocked`가 검증. staging yield 테스트 유지. **pytest 50 passed**
   - **시뮬 검증 대기**: edge 예약만으로 이동 교착 안 나는지 (동시 시작 head-on 시나리오)
-- [ ] 4.4 `_goal_locked_robots` + `_deferred_goals` 삭제 (goal-lock) — `_resolve_deadlock` 잔여(goal-lock+staging+IDLE-swap) 정리 포함
-  - [ ] `reserve_indefinite` + `on_release`로 대체
+- [x] 4.4 goal-lock 삭제 — 2026-06-05, **옵션 A (reserve_indefinite 안 씀)**
+  - 제거: `_deferred_goals`(init) + `_check_goal_locked_robots`(메서드+호출) + `_resolve_deadlock` goal-lock 분기 + IDLE-swap(goal-lock 전용 setup) + goal_lock 카운터 증가. `_resolve_deadlock`은 이제 **staging yield 전용**으로 축소
+  - **reserve_indefinite 미사용 결정**: (1) snapshot resync 모델이 매 plan마다 indefinite 예약을 release로 소멸 → 충돌, (2) 정차 로봇 회피는 `excluded_transit`(Layer 1.2)가 이미 함 = 중복, (3) goal 해제 후 재계획(wake-up)은 `_try_dispatch_all` 재시도가 이미 매 마커/ack마다 제공. → reserve_indefinite 신규 배선은 실익 없음. goal 막힌 로봇은 **제자리 대기 → blocker 이탈 시 자동 진행**
+  - **유지(이월)**: `_find_yield_node`(staging 분기가 아직 씀 → 4.5), staging yield 분기(→4.5), `_resolve_deadlock` 트리거
+  - **pytest 50 passed** (staging yield 테스트 유지·통과)
+  - **시뮬 검증 대기**: goal 막힌 로봇이 제자리 대기 시 blocker 퇴로 막아 상호 교착 안 나는지 (baseline goal_lock=0이라 희귀)
+- [ ] 4.5 staging 큐 관리 삭제 (`staging_manager` 정적 헬퍼로 격하) — `_resolve_deadlock` staging yield 잔여 + `_find_yield_node` + `_yielded_staging_robots` 정리 포함
+  - [ ] `add_staged_agv` 삭제
 - [ ] 4.5 staging 큐 관리 삭제 (`staging_manager` 정적 헬퍼로 격하)
   - [ ] `add_staged_agv` 삭제
   - [ ] `release_corridor_without_trigger` 삭제

@@ -85,10 +85,8 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # corridor 정상 해제 시 staging_node가 아닌 현재(yield) 위치에서 target_ws로 plan 필요
         self._yielded_staging_robots: Set[int] = set()
 
-        # goal 노드가 blocker로 점유된 경우 yield + 대기 (blocker가 goal 떠날 때까지)
-        # 무한 deadlock 루프 방지용. blocker 이탈 시 _check_goal_locked_robots에서 재계획
-        # REFACTOR E 4.1: _goal_locked_robots 제거 — _deferred_goals 키 존재로 멤버십 추론
-        self._deferred_goals: Dict[int, int] = {}
+        # REFACTOR F Phase 4.4: goal-lock(_deferred_goals + _check_goal_locked_robots) 제거.
+        # goal 막힘 = 제자리 대기 → blocker 이탈 시 _try_dispatch_all 재시도로 자연 진행.
 
         # REFACTOR E 3.1: _reserved_nodes 제거 — CommandQueue.peek_expected_node가 대체
 

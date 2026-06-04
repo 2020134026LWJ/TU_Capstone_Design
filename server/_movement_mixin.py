@@ -79,8 +79,6 @@ class MovementMixin:
         기존 `_retry_blocked_robots`를 큐 기반으로 재작성. `_blocked_robots` set 불필요 —
         `_is_blocked`가 큐 상태로 직접 추론. ACK 도착 시점마다 호출.
         """
-        # goal-locked 로봇 중 blocker가 떠난 경우 재계획
-        self._check_goal_locked_robots()
         for rid in sorted(self.command_queues.keys()):
             if not self._is_blocked(rid):
                 continue
@@ -95,26 +93,6 @@ class MovementMixin:
                     or (blocker and blocker.status in (RobotStatus.WAITING_FOR_PICK, RobotStatus.IDLE))
                 ):
                     self._resolve_deadlock(rid, blocker_rid)
-
-    def _check_goal_locked_robots(self):
-        """Goal-locked 로봇들 중 blocker가 goal에서 떠난 경우 재계획
-
-        REFACTOR E 4.1: 멤버십 = `_deferred_goals` 키 존재. 별도 set 불필요.
-        """
-        for rid, goal in list(self._deferred_goals.items()):
-            robot = self.robot_manager.get_robot(rid)
-            if not robot:
-                self._deferred_goals.pop(rid, None)
-                continue
-            blocker_still_at_goal = any(
-                other.current_node == goal
-                for other_rid, other in self.robot_manager.robots.items()
-                if other_rid != rid
-            )
-            if not blocker_still_at_goal:
-                print(f"[RequestHandler] Goal-locked: Robot {rid} blocker left goal {goal}, replan")
-                self._deferred_goals.pop(rid, None)
-                self._plan_and_publish_move(rid, robot.current_node, goal)
 
     def _get_blocker_of(self, rid: int) -> Optional[int]:
         """rid가 blocked된 원인 로봇 ID 반환 (없으면 None)"""
@@ -298,43 +276,9 @@ class MovementMixin:
             self._send_next_command(yield_rid)
             return
 
-        # yield 선정된 로봇이 plan 없으면 (IDLE 등 장기 정차) 역할 스왑 — 이동 중인 쪽이 우회
-        if not yield_robot.planned_path:
-            yield_rid, block_rid = block_rid, yield_rid
-            yield_robot = self.robot_manager.get_robot(yield_rid)
-            block_robot = self.robot_manager.get_robot(block_rid)
-            if not yield_robot or not yield_robot.planned_path:
-                return
-
-        goal = yield_robot.planned_path[-1]
-
-        # ─── goal-block 케이스: blocker가 goal에 있음 → alt-path 불가 ───────
-        # Strategy 1/2 모두 path가 goal에서 끝나서 또 막힘 → 1-step yield + 대기
-        # blocker가 goal 떠나면 _check_goal_locked_robots()에서 재계획
-        if block_robot.current_node == goal:
-            if yield_rid in self._deferred_goals:
-                return  # 이미 yield 완료, 재시도 안 함 (loop 차단)
-            yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
-            if yield_node is None:
-                print(f"[RequestHandler] Goal-locked: Robot {yield_rid} stuck "
-                      f"(blocker {block_rid} at goal {goal}, no yield node)")
-                return
-            yield_robot.planned_path = [yield_robot.current_node, yield_node]
-            yield_robot.command_queue = self._path_to_commands(
-                yield_robot.planned_path, yield_robot.heading
-            )
-            self._deferred_goals[yield_rid] = goal
-            self._refactor_f_counters['goal_lock'] += 1
-            print(f"[RequestHandler] Goal-locked: Robot {yield_rid} → side {yield_node} "
-                  f"(deferred goal {goal}, blocker {block_rid})")
-            self._send_next_command(yield_rid)
-            return
-
-        # [REFACTOR F Phase 4.3] 이동 중 로봇 정면 교착의 반응형 yield(전략 1 우회 /
-        # 전략 2 옆칸 비켜주기) 제거. edge 예약(is_edge_free, Phase 3)이 plan 시점에
-        # swap/정면충돌을 차단(I2)하므로 사후 yield가 불필요.
-        # 여기 도달 = 예약이 못 막은 잔여 케이스 → 다음 ACK의 _try_dispatch_all 재시도에 맡김.
-        # (staging yield / goal-lock 분기는 위에서 이미 처리·반환됨 → 4.4/4.5에서 정리)
+        # [REFACTOR F Phase 4.3+4.4] 비-staging 교착은 반응형 복구 없음 — 예방(예약)+대기에 위임.
+        #  · head-on: edge 예약(is_edge_free, I2)이 plan 시점 차단 (4.3 — 전략 1/2 제거)
+        #  · goal 막힘: 제자리 대기 → blocker 이탈 시 _try_dispatch_all 재시도로 진행 (4.4 — goal-lock 제거)
         return
 
     # ─── 헬퍼 (선반/대기 노드) ───
