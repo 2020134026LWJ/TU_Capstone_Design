@@ -330,68 +330,12 @@ class MovementMixin:
             self._send_next_command(yield_rid)
             return
 
-        # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가 (두 전략 모두 적용)
-        shelf_excluded: Optional[Set[int]] = None
-        if yield_robot.carrying_shelf is not None:
-            shelf_excluded = self._get_occupied_shelf_nodes()
-
-        # ─── 전략 1: 우회 경로 ─────────────────────────────────────────────
-        excluded1: Set[int] = {block_robot.current_node}
-        if shelf_excluded:
-            excluded1 |= shelf_excluded
-        timed_path = self.path_planner.astar_with_time(
-            start=yield_robot.current_node,
-            goal=goal,
-            reserved_nodes=set(),
-            reserved_edges=set(),
-            max_time=self.config.max_time,
-            excluded_transit=excluded1,
-            start_heading=yield_robot.heading,
-        )
-        if timed_path is not None:
-            node_path = PathPlanner.compress_to_node_path(timed_path)
-            yield_robot.planned_path = node_path
-            yield_robot.command_queue = self._path_to_commands(node_path, yield_robot.heading)
-            print(f"[RequestHandler] Deadlock (alt-path): Robot {yield_rid} → {node_path}")
-            if self._send_next_command(yield_rid):
-                return
-            # alt-path 첫 이동이 여전히 block_robot 위치(= goal)라 즉시 재차단됨
-            # → Strategy 2(옆 노드 비켜주기)로 fall-through
-            print(f"[RequestHandler] Deadlock (alt-path blocked immediately): "
-                  f"Robot {yield_rid} → falling back to yield-node strategy")
-
-        # ─── 전략 2: 옆 노드로 비켜주기 ───────────────────────────────────
-        yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
-        if yield_node is None:
-            print(f"[RequestHandler] Deadlock: Robot {yield_rid} vs Robot {block_rid}, "
-                  f"no yield node available — stuck")
-            return
-
-        # 비켜준 후 목표까지 전체 경로 재계획
-        # yield_node 도착 후 방향은 현재 노드→yield_node 방향
-        yield_dir = self.path_planner._node_direction(yield_robot.current_node, yield_node)
-        yield_heading = {0: 0, 1: 90, 2: 180, 3: 270}.get(yield_dir)
-        timed_path2 = self.path_planner.astar_with_time(
-            start=yield_node,
-            goal=goal,
-            reserved_nodes=set(),
-            reserved_edges=set(),
-            max_time=self.config.max_time,
-            excluded_transit=shelf_excluded,
-            start_heading=yield_heading,
-        )
-        if timed_path2 is None:
-            print(f"[RequestHandler] Deadlock: no path from yield_node {yield_node} to goal {goal}")
-            return
-
-        path_from_yield = PathPlanner.compress_to_node_path(timed_path2)
-        # 전체 경로: 현재 → yield_node → goal
-        full_path = [yield_robot.current_node, yield_node] + path_from_yield[1:]
-        yield_robot.planned_path = full_path
-        yield_robot.command_queue = self._path_to_commands(full_path, yield_robot.heading)
-        print(f"[RequestHandler] Deadlock (yield): Robot {yield_rid} → side {yield_node} "
-              f"→ then {path_from_yield}")
-        self._send_next_command(yield_rid)
+        # [REFACTOR F Phase 4.3] 이동 중 로봇 정면 교착의 반응형 yield(전략 1 우회 /
+        # 전략 2 옆칸 비켜주기) 제거. edge 예약(is_edge_free, Phase 3)이 plan 시점에
+        # swap/정면충돌을 차단(I2)하므로 사후 yield가 불필요.
+        # 여기 도달 = 예약이 못 막은 잔여 케이스 → 다음 ACK의 _try_dispatch_all 재시도에 맡김.
+        # (staging yield / goal-lock 분기는 위에서 이미 처리·반환됨 → 4.4/4.5에서 정리)
+        return
 
     # ─── 헬퍼 (선반/대기 노드) ───
 

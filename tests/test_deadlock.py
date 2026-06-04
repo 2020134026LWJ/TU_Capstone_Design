@@ -1,11 +1,13 @@
 """
 교착 회피 회귀 테스트.
 
-대상 메커니즘: `_resolve_deadlock` (전략 1 우회 → 전략 2 yield-node)
-회귀 핵심:
-  - 두 로봇이 서로의 next_node를 점유하면 _try_dispatch_all가 deadlock 감지
-  - 우선순위 동급(둘 다 carrying 없음) 시 max(rid)가 yield
-  - yield 로봇의 planned_path가 block 로봇 노드를 우회하도록 재계산되어야 함
+REFACTOR F Phase 4.3: 이동 중 로봇 정면 교착의 반응형 yield(`_resolve_deadlock`
+전략 1 우회 / 전략 2 yield-node) 제거됨. plan 시점 edge 예약(`is_edge_free`)이
+swap/정면충돌을 차단(I2)하므로 사후 yield 불필요.
+  → head-on yield / carrying-priority yield 테스트 삭제 (제거된 동작 검증이었음)
+  → 대체재(plan 시점 swap 차단)는 test_reservation.py::test_swap_collision_blocked 가 검증
+
+남은 검증: staging yield (corridor 대기 AGV 비켜주기 — 4.5 전까지 유지).
 """
 
 import pytest
@@ -22,36 +24,6 @@ def _ready(handler, rid: int, node: int, heading: int, planned_path):
     robot.planned_path = list(planned_path)
     robot.carrying_shelf = None
     return robot
-
-
-@pytest.mark.deadlock
-def test_head_on_deadlock_yield_robot_replans(handler, mock_mqtt):
-    """
-    정면 교착: AGV-1(11→12) ↔ AGV-2(12→11).
-    우선순위 동급 → max(rid)=2가 yield.
-    AGV-2의 새 planned_path는 차단 노드(11)를 우회해야 한다.
-    """
-    a = _ready(handler, rid=1, node=11, heading=90,
-               planned_path=[11, 12, 13, 14])  # A 목표: 14
-    b = _ready(handler, rid=2, node=12, heading=270,
-               planned_path=[12, 11, 10, 9])   # B 목표: 9
-
-    # 둘 다 forward 시도 → 서로의 노드 점유로 blocked
-    assert handler._send_next_command(1) is False
-    assert handler._send_next_command(2) is False
-    assert handler._is_blocked(1)
-    assert handler._is_blocked(2)
-
-    # 두 로봇 모두 blocked → retry 시 _resolve_deadlock 발동
-    handler._try_dispatch_all()
-
-    # B(yield)는 차단 해제되어야 함 + planned_path가 11 우회로 재계산
-    assert not handler._is_blocked(2), "yield 로봇은 우회 또는 yield-node로 해제"
-    assert b.planned_path[0] == 12, "현재 위치에서 출발"
-    assert 11 not in b.planned_path, \
-        "차단된 노드(AGV-1의 current)를 우회해야 함"
-    assert b.planned_path[-1] == 9, "원래 목적지 보존"
-    assert len(mock_mqtt.cmds_for(2)) > 0, "yield 로봇에 첫 명령 발행"
 
 
 @pytest.mark.deadlock
@@ -113,25 +85,3 @@ def test_staging_blocker_forces_yield(handler, mock_mqtt):
     # AGV-2의 새 planned_path는 1-step 길이 (current → yield_node)
     assert len(b.planned_path) == 2, \
         f"staging yield는 1-step (현재→yield_node), 실제: {b.planned_path}"
-
-
-@pytest.mark.deadlock
-def test_carrying_robot_priority(handler, mock_mqtt):
-    """
-    carrying_shelf > non-carrying 우선순위 검증.
-    AGV-1이 선반 운반 중이면 AGV-2가 yield 해야 함 (rid 무관).
-    """
-    a = _ready(handler, rid=1, node=11, heading=90,
-               planned_path=[11, 12, 13])
-    a.carrying_shelf = 19  # AGV-1이 선반 운반 중
-    b = _ready(handler, rid=2, node=12, heading=270,
-               planned_path=[12, 11, 10])
-
-    handler._send_next_command(1)
-    handler._send_next_command(2)
-    handler._try_dispatch_all()
-
-    # AGV-1(carrying)은 우회 불필요, AGV-2가 yield
-    assert b.planned_path[0] == 12
-    assert 11 not in b.planned_path, "AGV-2가 양보 → 11 우회"
-    assert a.planned_path == [11, 12, 13], "AGV-1의 경로는 보존"

@@ -57,8 +57,13 @@
 각 단계 후 회귀 + commit:
 - [x] 4.1 `_lookahead_replan` 삭제 (매 마커 사후 검사) — 본체 39줄 + 호출부 4→1줄. 카운터 dict 키는 유지(0 출력) — Phase 8.3 비교용
 - [x] 4.2 `_should_hold_for_eta` 삭제 (ETA hold) — 2026-06-04. 헬퍼 3종(`_should_hold_for_eta`/`_estimate_exit_steps`/`_estimate_path_cost`) + 호출부 ETA 분기 제거. 점유 중이면 항상 staging 우회로 복귀(baseline=1, correctness 영향 X). 카운터 키 유지(0 출력). pytest 52 passed. DISPATCH_FLOW.md 갱신
-- [ ] 4.3 `_resolve_deadlock` + `_find_yield_node` 삭제 (deadlock yield)
-- [ ] 4.4 `_goal_locked_robots` + `_deferred_goals` 삭제 (goal-lock)
+- [~] 4.3 `_resolve_deadlock` 전략 1/2 삭제 (이동 중 정면 교착 yield) — 2026-06-04, **옵션 A (부분)**
+  - 제거: `_resolve_deadlock` 전략 1(alt-path) + 전략 2(yield-node) → `return`으로 대체 (edge 예약 is_edge_free가 plan 시점 swap 차단, I2)
+  - **유지(이월)**: `_find_yield_node`(staging 285/goal-lock 317이 아직 씀), goal-lock 분기, staging yield 분기, `_resolve_deadlock` 트리거(`_try_dispatch_all` 88~97)
+  - 이유: 대체재 있는 net만 제거. goal-lock 대체재(reserve_indefinite)는 4.4, staging은 4.5
+  - 테스트: obsolete 2개 삭제(`test_head_on_deadlock_yield_robot_replans`/`test_carrying_robot_priority`) — 대체재는 `test_reservation.py::test_swap_collision_blocked`가 검증. staging yield 테스트 유지. **pytest 50 passed**
+  - **시뮬 검증 대기**: edge 예약만으로 이동 교착 안 나는지 (동시 시작 head-on 시나리오)
+- [ ] 4.4 `_goal_locked_robots` + `_deferred_goals` 삭제 (goal-lock) — `_resolve_deadlock` 잔여(goal-lock+staging+IDLE-swap) 정리 포함
   - [ ] `reserve_indefinite` + `on_release`로 대체
 - [ ] 4.5 staging 큐 관리 삭제 (`staging_manager` 정적 헬퍼로 격하)
   - [ ] `add_staged_agv` 삭제
