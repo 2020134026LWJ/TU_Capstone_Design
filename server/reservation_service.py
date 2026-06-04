@@ -82,8 +82,9 @@ class ReservationService:
             if owner is not None and owner != rid:
                 return False
 
-        # 2차 — 본 commit (기존 rid 예약 release 후 새로 박음)
-        self.release(rid, fire_callbacks=False)
+        # 2차 — 본 commit (기존 rid의 cell/edge release 후 새로 박음).
+        # indefinite(corridor 점유)는 replan 중에도 유지 (Phase 4.5.0).
+        self.release(rid, fire_callbacks=False, keep_indefinite=True)
 
         for i, node in enumerate(path):
             base_t = start_time + i
@@ -103,14 +104,20 @@ class ReservationService:
 
         return True
 
-    def release(self, rid: int, fire_callbacks: bool = True) -> None:
-        """rid의 모든 예약 (cell + edge + indefinite) 해제.
+    def release(
+        self, rid: int, fire_callbacks: bool = True, keep_indefinite: bool = False
+    ) -> None:
+        """rid의 cell + edge 예약 해제 (indefinite은 keep_indefinite로 선택).
 
         Args:
             fire_callbacks: True면 등록된 on_release 콜백 호출 (내부 commit 재실행
                             시에는 False로 중복 발화 방지).
+            keep_indefinite: True면 indefinite 예약은 유지하고 cell/edge만 해제.
+                             snapshot resync / replan이 corridor 영구 점유(Phase 4.5)를
+                             지우지 않도록 함. 기본 False = 전부 해제 (퇴출 시).
         """
         keys = self._by_rid.pop(rid, [])
+        kept: List[Tuple[str, tuple]] = []
         for kind, key in keys:
             if kind == "cell":
                 if self._cells.get(key) == rid:
@@ -119,8 +126,13 @@ class ReservationService:
                 if self._edges.get(key) == rid:
                     del self._edges[key]
             elif kind == "indef":
+                if keep_indefinite:
+                    kept.append((kind, key))
+                    continue
                 if self._indefinite_by_node.get(key) == rid:
                     del self._indefinite_by_node[key]
+        if kept:
+            self._by_rid[rid] = kept
 
         if fire_callbacks:
             for cb in self._release_callbacks:
@@ -173,14 +185,59 @@ class ReservationService:
         else:
             self._by_rid.pop(rid, None)
 
-    # ─── indefinite (goal-lock 대체) ───
+    # ─── indefinite (corridor 점유 / Phase 4.5) ───
+
+    def is_corridor_held(self, node: int, exclude_rid: Optional[int] = None) -> bool:
+        """node가 indefinite으로 점유됐는지 (= corridor 점유 여부).
+
+        is_free와 달리 cell/edge(경로 예약)는 무시하고 indefinite만 본다.
+        staging이 "회랑 비었나?"를 판단할 때 사용 (Phase 4.5.2).
+        """
+        owner = self._indefinite_by_node.get(node)
+        return owner is not None and owner != exclude_rid
+
+    def corridor_owner(self, node: int) -> Optional[int]:
+        """node를 indefinite으로 점유한 rid (없으면 None). corridor 주인 질의 (Phase 4.5.3)."""
+        return self._indefinite_by_node.get(node)
 
     def reserve_indefinite(self, rid: int, node: int) -> None:
-        """rid가 node에 시간 무관 점유. 같은 노드 재호출은 idempotent."""
-        if self._indefinite_by_node.get(node) == rid:
+        """rid가 node에 시간 무관 점유. 같은 노드 재호출은 idempotent.
+
+        다른 rid가 점유 중이면 이전 소유자 엔트리를 정리하고 이전 (corridor transfer).
+        """
+        cur = self._indefinite_by_node.get(node)
+        if cur == rid:
             return
+        if cur is not None:
+            self._drop_indef_entry(cur, node)  # 이전 소유자 정리 (transfer)
         self._indefinite_by_node[node] = rid
         self._by_rid.setdefault(rid, []).append(("indef", node))
+
+    def release_indefinite_node(self, node: int, fire_callbacks: bool = False) -> None:
+        """node의 indefinite 점유만 해제 (해당 rid의 cell/edge 예약은 보존).
+
+        corridor 점유자가 퇴출할 때 사용 — 점유 자원(WS 노드)만 풀고,
+        퇴출 경로 예약은 그대로 둠. fire_callbacks=True면 on_release 콜백 발화 (wake-up).
+        """
+        rid = self._indefinite_by_node.get(node)
+        if rid is None:
+            return
+        self._drop_indef_entry(rid, node)
+        if fire_callbacks:
+            for cb in self._release_callbacks:
+                cb(rid)
+
+    def _drop_indef_entry(self, rid: int, node: int) -> None:
+        """(rid, node) indefinite 엔트리를 _indefinite_by_node + _by_rid에서 제거."""
+        if self._indefinite_by_node.get(node) == rid:
+            del self._indefinite_by_node[node]
+        entries = self._by_rid.get(rid)
+        if entries:
+            kept = [e for e in entries if not (e[0] == "indef" and e[1] == node)]
+            if kept:
+                self._by_rid[rid] = kept
+            else:
+                self._by_rid.pop(rid, None)
 
     # ─── callbacks ───
 

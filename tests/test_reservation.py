@@ -163,6 +163,93 @@ def test_indefinite_idempotent():
     assert r.is_free(42, 0)
 
 
+# ─── keep_indefinite (Phase 4.5.0 — corridor 영구 점유 보존) ───
+
+def test_release_keep_indefinite_preserves_corridor():
+    """keep_indefinite=True면 cell/edge만 해제, indefinite은 유지."""
+    r = ReservationService()
+    r.reserve_indefinite(rid=1, node=42)
+    r.commit(rid=1, path=[10, 11])      # cell/edge도 같이
+    r.release(1, keep_indefinite=True)
+    assert not r.is_free(42, 0)          # corridor 점유 살아있음
+    assert r.is_free(10, 0)              # cell은 해제됨
+
+
+def test_recommit_preserves_own_indefinite():
+    """corridor 점유 중 replan(재commit)해도 자기 indefinite은 유지 (snapshot resync 시나리오)."""
+    r = ReservationService()
+    r.reserve_indefinite(rid=1, node=42)
+    r.commit(rid=1, path=[10, 11])
+    r.commit(rid=1, path=[11, 12])       # replan → 내부 release(keep_indefinite=True)
+    assert not r.is_free(42, 0)          # 여전히 corridor 점유
+    assert r.commit(rid=2, path=[41, 42]) is False  # 다른 AGV는 못 들어옴
+
+
+def test_full_release_clears_indefinite_for_wakeup():
+    """keep_indefinite=False(기본, 퇴출 시)면 indefinite 해제 → 다른 AGV 진입 가능 + 콜백."""
+    r = ReservationService()
+    seen = []
+    r.on_release(lambda rid: seen.append(rid))
+    r.reserve_indefinite(rid=1, node=42)
+    r.release(1)                         # 퇴출
+    assert r.is_free(42, 0)              # corridor FREE
+    assert seen == [1]                   # on_release 발화 (wake-up 트리거)
+
+
+def test_release_indefinite_node_keeps_path():
+    """release_indefinite_node는 그 노드 점유만 풀고 rid의 cell/edge는 보존 (퇴출 경로)."""
+    r = ReservationService()
+    r.reserve_indefinite(rid=1, node=33)
+    r.commit(rid=1, path=[33, 34, 35])   # 퇴출 경로
+    r.release_indefinite_node(33)
+    assert r.is_free(33, 100)            # corridor 점유 풀림 (먼 시점)
+    assert not r.is_free(34, 1)          # 퇴출 경로 cell은 유지
+
+
+def test_reserve_indefinite_transfer_cleans_old_owner():
+    """다른 rid로 점유 이전 시 이전 소유자 엔트리 정리 (corridor transfer, leak 방지)."""
+    r = ReservationService()
+    r.reserve_indefinite(rid=1, node=33)
+    r.reserve_indefinite(rid=2, node=33)  # AGV-1 → AGV-2 이전
+    assert not r.is_free(33, 0)           # 여전히 점유 (이제 2가)
+    assert r.is_free(33, 0, exclude_rid=2)
+    assert not r.is_free(33, 0, exclude_rid=1)  # 1은 더 이상 소유자 아님
+    r.release(1)                          # 옛 소유자 release → 33 영향 없어야
+    assert not r.is_free(33, 0)           # 2의 점유 유지
+
+
+def test_is_corridor_held():
+    """corridor 점유 질의 (Phase 4.5.2 — staging이 '회랑 비었나' 판단)."""
+    r = ReservationService()
+    assert not r.is_corridor_held(33)
+    r.reserve_indefinite(rid=1, node=33)
+    assert r.is_corridor_held(33)
+    assert not r.is_corridor_held(33, exclude_rid=1)  # 자기 자신은 점유로 안 봄
+    assert r.is_corridor_held(33, exclude_rid=2)       # 남이 보면 점유
+    r.release_indefinite_node(33)
+    assert not r.is_corridor_held(33)
+
+
+def test_is_corridor_held_ignores_cells():
+    """cell/edge(경로) 예약은 corridor 점유로 안 침 — is_free와 다른 점."""
+    r = ReservationService()
+    r.commit(rid=1, path=[33, 34])
+    assert not r.is_corridor_held(33)   # cell 있어도 indefinite 아니면 회랑은 빈 것
+    assert not r.is_free(33, 0)          # 대조: is_free는 cell도 막힌 것으로 봄
+
+
+def test_corridor_owner():
+    """corridor 주인 질의 (Phase 4.5.3)."""
+    r = ReservationService()
+    assert r.corridor_owner(33) is None
+    r.reserve_indefinite(rid=1, node=33)
+    assert r.corridor_owner(33) == 1
+    r.reserve_indefinite(rid=2, node=33)   # transfer
+    assert r.corridor_owner(33) == 2
+    r.release_indefinite_node(33)
+    assert r.corridor_owner(33) is None
+
+
 # ─── on_release 콜백 ───
 
 def test_on_release_fires_callbacks():

@@ -54,6 +54,33 @@ class MarkerMixin:
 
     # ─── 마커 인식 처리 (위치 보고 + 다음 명령 결정) ───
 
+    def _dispatch_released_agv(self, released) -> None:
+        """회랑 release로 깨어난 대기 AGV를 dispatch (Phase 4.5.4a — 깨우기 단일화).
+
+        check_position_release / handle_marker_trigger 두 경로의 복붙 dispatch를 통합.
+        3갈래:
+          A. yielded-staging (deadlock yield로 staging 떠남) → 현재 위치에서 plan
+          B. staging_node 미도착 (desync) → _staged_to_ws에 보류 (도착 후 처리)
+          C. sanity(수정 46) 통과 → dispatch
+        """
+        if released is None:
+            return
+        released_robot = self.robot_manager.get_robot(released.rid)
+        if released_robot and released.rid in self._yielded_staging_robots:
+            self._yielded_staging_robots.discard(released.rid)
+            print(f"[RequestHandler] Robot {released.rid}: yielded-staging released "
+                  f"(at {released_robot.current_node}) → {released.target_ws}")
+            self._plan_and_publish_move(
+                released.rid, released_robot.current_node, released.target_ws
+            )
+        elif released_robot and released_robot.current_node != released.staging_node:
+            self._staged_to_ws[released.rid] = (released.target_ws, released.staging_node)
+            print(f"[RequestHandler] Robot {released.rid}: released early "
+                  f"(at {released_robot.current_node}), waiting for staging_node {released.staging_node}")
+        elif self._is_corridor_dispatch_consistent(released.rid, released.target_ws):
+            start = released_robot.current_node if released_robot else released.staging_node
+            self._plan_and_publish_move(released.rid, start, released.target_ws)
+
     def _handle_marker_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """AGV 마커 인식 → 위치 갱신 + 스테이징 체크 + 다음 명령 결정"""
         rid = data.get("rid")
@@ -102,27 +129,9 @@ class MarkerMixin:
             if len(robot.planned_path) <= 1:
                 robot.planned_path = []
 
-        # 위치 기반 회랑 자동 해제
+        # 위치 기반 회랑 자동 해제 → 깨어난 대기 AGV dispatch (Phase 4.5.4a 단일화)
         released = self.staging_manager.check_position_release(rid, node)
-        if released is not None:
-            released_robot = self.robot_manager.get_robot(released.rid)
-            if released_robot and released.rid in self._yielded_staging_robots:
-                # deadlock yield로 staging_node 떠난 상태 → 현재 위치(yield_node)에서 직접 plan
-                self._yielded_staging_robots.discard(released.rid)
-                print(f"[RequestHandler] Robot {released.rid}: yielded-staging released "
-                      f"(at {released_robot.current_node}) → {released.target_ws}")
-                self._plan_and_publish_move(
-                    released.rid, released_robot.current_node, released.target_ws
-                )
-            # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
-            elif released_robot and released_robot.current_node != released.staging_node:
-                self._staged_to_ws[released.rid] = (released.target_ws, released.staging_node)
-                print(f"[RequestHandler] Robot {released.rid}: released early (at {released_robot.current_node}), "
-                      f"waiting for staging_node {released.staging_node}")
-            elif self._is_corridor_dispatch_consistent(released.rid, released.target_ws):
-                # 수정 46: sanity check 통과한 경우만 dispatch
-                start = released_robot.current_node if released_robot else released.staging_node
-                self._plan_and_publish_move(released.rid, start, released.target_ws)
+        self._dispatch_released_agv(released)
 
         # 포워딩으로 미리 해제된 로봇이 스테이징 노드 도착
         # 또는 이동 중인데 corridor가 본인 owned/FREE 상태가 되면 즉시 직진 replan (우회 회피)
@@ -168,25 +177,8 @@ class MarkerMixin:
         released_by_trigger = None
         if robot.status == RobotStatus.RETURNING_SHELF:
             released_by_trigger = self.staging_manager.handle_marker_trigger(rid, node)
-        if released_by_trigger:
-            released_robot = self.robot_manager.get_robot(released_by_trigger.rid)
-            if released_robot and released_by_trigger.rid in self._yielded_staging_robots:
-                # deadlock yield로 staging_node 떠난 상태 → 현재 위치(yield_node)에서 직접 plan
-                self._yielded_staging_robots.discard(released_by_trigger.rid)
-                print(f"[RequestHandler] Robot {released_by_trigger.rid}: yielded-staging trigger-released "
-                      f"(at {released_robot.current_node}) → {released_by_trigger.target_ws}")
-                self._plan_and_publish_move(
-                    released_by_trigger.rid, released_robot.current_node, released_by_trigger.target_ws
-                )
-            # staged robot이 아직 staging_node에 미도착이면 → 도착 후 처리 (desync 방지)
-            elif released_robot and released_robot.current_node != released_by_trigger.staging_node:
-                self._staged_to_ws[released_by_trigger.rid] = (released_by_trigger.target_ws, released_by_trigger.staging_node)
-                print(f"[RequestHandler] Robot {released_by_trigger.rid}: trigger-released early "
-                      f"(at {released_robot.current_node}), waiting for staging_node {released_by_trigger.staging_node}")
-            elif self._is_corridor_dispatch_consistent(released_by_trigger.rid, released_by_trigger.target_ws):
-                # 수정 46: sanity check 통과한 경우만 dispatch
-                start = released_robot.current_node if released_robot else released_by_trigger.staging_node
-                self._plan_and_publish_move(released_by_trigger.rid, start, released_by_trigger.target_ws)
+        # 트리거 release → 깨어난 대기 AGV dispatch (Phase 4.5.4a 단일화)
+        self._dispatch_released_agv(released_by_trigger)
 
         # 태스크 목표 노드 도착 여부 확인
         task_id = robot.current_task_id

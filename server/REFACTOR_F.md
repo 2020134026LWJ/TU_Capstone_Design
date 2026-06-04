@@ -75,28 +75,42 @@
   - [x] 4.5.2 **reader-flip #1** (2026-06-05) — `should_stage`의 "회랑 비었나?" 판단을 `corridor.state` → `reservation.is_corridor_held(ws_node)`로 전환. **새 장부로 내리는 첫 결정.** ReservationService에 `is_corridor_held(node, exclude_rid)` 추가 (indefinite만 보고 cell/edge 무시). reservation 미주입 시 corridor.state fallback. 이중기록(4.5.1) 덕에 동치 → **동작 불변 기대**. **pytest 57**. **시뮬 검증 대기**
     > [순서 조정] 체크리스트 원래 4.5.2=wake-up이었으나, wake-up이 4갈래 분기로 제일 어려운 조각이라 strangler 정석대로 **쉬운 reader-flip부터**. wake-up은 4.5.4로 뒤로 미룸.
   - [x] 4.5.3 **reader-flip #2** (2026-06-05) — "누가 회랑 주인?" 결정 읽기 3곳(`should_stage` already-authorized / `release_corridor_without_trigger` guard / `check_position_release`)을 `corridor.occupying_rid` → `self._owner(ws_node)`로. ReservationService `corridor_owner(node)` + StagingManager `_owner()`(reservation 우선, 미주입 fallback). preempt(239)는 4.5.5로 이월. **pytest 58**. **시뮬 검증 대기** (동작 불변 기대)
-  - [ ] 4.5.4 **대기큐 → `on_release` 깨우기** (제일 어려운 조각 — 4갈래 분기: yielded-staging/early-release desync/sanity dispatch/preempt)
-  - [ ] 4.5.5 preempt(`try_preempt_at_gateway`)·timeout 새 모델로
-  - [ ] 4.5.4 staging yield + `_find_yield_node` + `_yielded_staging_robots` 제거 (예약이 plan 시점에 corridor 막음 = staging 교착 예방)
-  - [ ] 4.5.5 `add_staged_agv`/`release_corridor_without_trigger`/`mark_exiting`/`check_position_release` 제거 → StagingManager 격하
+  - [x] 4.5.4a (2026-06-05) 깨우기 복붙 dispatch → `_dispatch_released_agv` 헬퍼 추출 (_marker_mixin). 순수 추출, 동작 0. pytest 58.
+  - [~] ~~4.5.4b/c (on_release 트리거 전환)~~ **폐기** — 하이브리드(아래)로 선회. 큐를 살리므로 on_release 콜백 불필요. 현 마커-기반 트리거 유지.
+  - [ ] **4.5.5 (하이브리드) 점유 중복 제거** — `CorridorInfo.state`/`occupying_rid` 삭제 → 점유는 reservation 단일 진실. **큐·is_exiting·timeout·깨우기 트리거 유지.**
+    - [x] 4.5.5a (2026-06-05) 남은 점유 *읽기* flip 4곳: preempt guard+owner / `check_position_release` state(중복이라 제거) / `_check_timeout` guard → 전부 `self._owner(ws_node)`. 남은 corridor.state 읽기 = 116(sync 소스, 4.5.5b서 쓰기로) + 165(fallback)뿐. **pytest 58**. 시뮬 검증 대기 (동작 불변 기대)
+    - [ ] 4.5.5b 점유 *쓰기*(`corridor.state=`/`occupying_rid=` 전부)를 reservation 호출로 → `_sync_occupancy`가 "거울"이 아니라 실 저장소. 그 후 `state`/`occupying_rid` 필드 + `CorridorState` enum 삭제
+    - [ ] 4.5.5c `get_status_summary` 등 표시도 reservation 파생
+  - [ ] 4.5.6 staging yield(`_resolve_deadlock` 잔여) + `_find_yield_node` + `_yielded_staging_robots` 제거 — **단, 4.3/4.4처럼 "reservation이 staging 교착을 plan 시점에 막나" 분석 먼저** (`test_staging_blocker_forces_yield`가 실 시나리오 → 자동 제거 X)
 
-#### 4.5 설계 — corridor를 reservation으로
+#### 4.5 설계 — 점유는 reservation, 큐는 유지 (하이브리드)
 
-> **왜 여기선 reserve_indefinite가 맞나** (4.4 goal-lock과 반대): corridor 점유는 "한 AGV가 회랑 노드 group을 픽킹 끝날 때까지 잡고 있다"는 **진짜 영구 점유**라 reserve_indefinite의 정의에 정확히 부합. goal-lock은 excluded_transit와 중복이었지만, corridor는 staging 게이팅의 본질이라 중복 아님 (I3).
+> **설계 결정 (2026-06-05, 사용자)**: corridor를 reservation으로 *완전* 흡수(큐까지 제거 = "방법 2")하려던 원안 **폐기**. 사용자 철학 **"플로우는 하나, 재료는 갖다쓰기"**로 재검토한 결과:
+> - **점유(`state`/`occupying_rid`)** = reservation에도 있는 정보의 *복사본* = 진짜 그림자. 두 장부가 엇갈려 cascade race(수정 46) 유발. → **제거, reservation 단일 진실에서 갖다쓰기.**
+> - **큐(대기 순서)** = reservation에 없는 *고유 재료*(그림자 아님). "다음 대기자를 큐에서 갖다쓰기"는 철학에 부합. → **유지.**
+> - **on_release 콜백** = 큐가 살아있으면 불필요(현 마커-기반 트리거가 이미 동작). 방법 2의 "위치 스캔"은 깨끗한 재료(큐) 두고 플로우가 매번 재계산 = 철학에 *덜* 맞음. → **폐기.**
 
-**상태 매핑**:
+**수용하는 작은 부담**: 큐는 robot task 변경 시 stale 엔트리 청소(`remove_robot_from_queues`) 필요. 점유 중복(매 변경 **2곳** 갱신)에 비하면 훨씬 작고 한 곳에 모임. 2대 환경에서 거의 무해.
+
+**상태 매핑 (수정판)**:
 ```
-현재 (CorridorInfo)                  →  reservation
-state=OCCUPIED, occupying_rid=1       →  reserve_indefinite(1, corridor_nodes)
-queue=[AGV-2 staged]                  →  on_release 콜백 + (대기 dispatch 보류 목록)
-release_corridor_without_trigger      →  release(1, keep_indefinite=False) → 콜백 발화
-is_exiting / mark_exiting             →  (퇴출 = release 시점 명시) — 단순화
+현재 (CorridorInfo)            →  하이브리드
+state / occupying_rid          →  삭제. reservation indefinite (is_corridor_held / corridor_owner에서 갖다씀)
+queue                          →  유지 (대기순서 = 고유 재료)
+occupied_at                    →  유지 (CorridorInfo 잔존, 타임아웃용)
+is_exiting / mark_exiting      →  유지 (퇴출 phase 플래그)
+깨우기 트리거                   →  유지 (마커-기반: check_position_release / handle_marker_trigger / 인터셉트)
 ```
-corridor_nodes = {gateway, ws} (+ 사이 경로 노드). staging_node는 corridor **밖**이라 대기 AGV는 거기서 자연 정차 (A*가 corridor 막힌 거 보고 staging까지만 plan).
+회랑 점유 노드 = **WS 노드 1개** (4.5.1 결정; gateway는 통과 길목). staging_node는 corridor 밖이라 대기 AGV는 거기서 자연 정차.
 
-**깨우기(wake-up)**: 점유자 퇴출 → `release(occupant, keep_indefinite=False)` → `on_release(rid)` 콜백 → 보류된 staged AGV를 `_plan_and_publish_move`로 재dispatch (corridor 이제 비어 plan 성공).
+**진행 (4.5.1~3 위에 쌓음)**:
+- 점유 *읽기*는 이미 reservation: `is_corridor_held`(4.5.2) / `corridor_owner`(4.5.3)
+- 남은 것 (4.5.5): preempt·timeout 읽기 flip → 점유 *쓰기*를 reservation 호출로 → `state`/`occupying_rid` 필드 + `CorridorState` enum 삭제
+- 깨우기는 4.5.4a로 헬퍼 단일화 완료 — 트리거는 그대로 (on_release 안 씀)
 
-**전제조건 (4.5.0)**: snapshot resync(`_plan_and_publish_move`가 매 plan마다 모든 robot release+recommit)가 indefinite를 지워버림 → `keep_indefinite=True`로 보존해야 corridor 예약이 plan 간에 살아남음.
+**전제조건 (4.5.0 완료)**: snapshot resync가 indefinite를 지움 → `keep_indefinite=True`로 보존. 점유가 reservation 단일 진실이 되면 이게 필수.
+
+**리스크**: cascade race 핫스팟(수정 23/37~44/46). 점유 쓰기를 옮길 때(4.5.5b) 매 단계 시뮬 필수.
 
 ### Phase 5 — 도메인 SM 명시화 (1일)
 - [ ] 5.1 `Robot.set_status(new, reason)` 추가
@@ -153,17 +167,20 @@ corridor_nodes = {gateway, ws} (+ 사이 경로 노드). staging_node는 corrido
 6. Staging redirect + corridor preempt
 7. Staging cascade wake-up
 
-### 흩어진 상태 10종 → ReservationService 대체 매핑
-| 변수 | 대체 |
-|------|------|
-| `_reserved_nodes` | `reservation.cells` 직접 |
-| `_blocked_robots`, `_lifting_robots`, `_in_flight_cmds` | REFACTOR E CommandQueue |
-| `_goal_locked_robots` | `reservation.reserve_indefinite` + `on_release` |
-| `_deferred_goals` | `reservation.on_release` 콜백 |
-| `_yielded_staging_robots` | 사라짐 (yield가 A*에 흡수) |
-| `_staged_to_ws` | 사라짐 (corridor가 예약의 일부) |
-| `staging_manager.queue` | `reservation.on_release` 이벤트 |
-| `robot.planned_path` "진실" | 격하 (캐시뷰) |
+### 흩어진 상태 → 대체 매핑 (2026-06-05 수정 — 원안의 "과잉 순수화" 교정)
+
+> [교훈] 원안은 *모든* 상태를 reservation으로 녹이려 했으나, **그림자(중복) ≠ 고유 재료**를 구분 안 함. 사용자 철학 "재료는 갖다쓰기"상 **중복만 제거, 고유 재료는 유지**가 맞음. 아래는 교정판.
+
+| 변수 | 성격 | 대체/처리 |
+|------|------|------|
+| `_reserved_nodes` | 중복(미래 점유) | `reservation.cells` 직접 ✅ |
+| `_blocked_robots`, `_lifting_robots`, `_in_flight_cmds` | — | REFACTOR E CommandQueue ✅ |
+| `_goal_locked_robots` | 반응형 net | **✅ 4.4 제거** — ~~reserve_indefinite+on_release~~ 안 씀. `_try_dispatch_all` 재시도로 충분 |
+| `_deferred_goals` | 반응형 net | **✅ 4.4 제거** (동상) |
+| `_yielded_staging_robots` | 반응형 net | 4.5.6에서 staging yield와 함께 — **단 "reservation이 staging 교착 막나" 분석 후** (자동 제거 X) |
+| `_staged_to_ws` | **고유**(early-release desync 보류) | ~~사라짐~~ **재검토 필요** — corridor 점유 복사본 아님. 큐 유지 시 사라질 근거 약함. case-by-case |
+| `staging_manager.queue` | **고유**(대기 순서) | ~~on_release~~ **유지** (그림자 아님). 점유만 reservation으로 (하이브리드) |
+| `robot.planned_path` "진실" | 중복(시간 점유) | 격하 (캐시뷰), reservation이 진실 |
 
 ### Real-world divergence — Marker = Ground Truth
 ```python
