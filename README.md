@@ -159,8 +159,7 @@ TU_Capstone_Design/
 |   +-- test_intercept.py           # Node U 인터셉트
 |   +-- test_stg.py                 # STG 게이팅
 |
-+-- FLOWCHART.md                    # 알고리즘 플로우차트 + 수정 이력 (수정 28까지)
-+-- 검증_체크리스트.md              # 정적 분석 체크리스트 + 진행 로그
++-- FLOWCHART.md                    # 알고리즘 플로우차트 + 수정 이력 (설계 단일 진실)
 +-- mqtt_test.py                    # CLI 테스트 도구 (MQTT 기반)
 +-- archive/                        # 이전 버전 (참조용, 수정 불필요)
     +-- v1_prototype/
@@ -214,9 +213,10 @@ TU_Capstone_Design/
 
 | 파일 | 내용 |
 |------|------|
-| [`FLOWCHART.md`](FLOWCHART.md) | 알고리즘 플로우차트 + 수정 이력 (수정 28까지) |
-| [`검증_체크리스트.md`](검증_체크리스트.md) | 정적 분석 + pytest 회귀 + 진행 로그 |
-| [`server/README.md`](server/README.md) | 서버 모듈 상세 + 통신 프로토콜 + API |
+| [`FLOWCHART.md`](FLOWCHART.md) | 알고리즘 플로우차트 + 수정 이력 (설계 단일 진실) |
+| [`server/README.md`](server/README.md) | 서버 진입점 안내 + 모듈 구조 |
+| [`server/DISPATCH_FLOW.md`](server/DISPATCH_FLOW.md) | 주문→cmd 발행 디스패치 흐름 (한글) |
+| [`server/REFACTOR_F.md`](server/REFACTOR_F.md) | 경로/예약 재설계(REFACTOR F) 내역 |
 | [`isaac_simulation/README.md`](isaac_simulation/README.md) | Isaac Sim 5.1.0 시뮬레이션 상세 |
 | [`hardware/README.md`](hardware/README.md) | Bridge + Camera ABC + UART 프로토콜 |
 | [`webots_simulation/README.md`](webots_simulation/README.md) | Webots (레거시) 참조 |

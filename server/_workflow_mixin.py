@@ -14,6 +14,27 @@ self 상태 접근:
   - MovementMixin: _plan_and_publish_move, _clear_robot_reservation,
                     _replan_for_placed_shelf
   - Base: _error_response
+
+섹션 맵 (메서드 → 역할 / 다이어그램 노드):
+  ── 주문 진입 ──
+  _handle_start_order        주문 수신 → 최적화 → 태스크 생성 → 배정
+  _handle_batch_task         배치 태스크 요청 (레거시 호환)
+  ── 배정 / 공정 ──
+  _count_active_robots_per_ws  WS별 활성 로봇 수 (공정 배정용)
+  _try_assign_pending_tasks    PENDING 태스크 재배정 시도 (회랑/선반 해제 시 깨어남)
+  _is_shelf_targeted_by_moving_robot  동일 선반 중복 배정 방지
+  ── 도착 후 단계 (마커 도착 → MarkerMixin이 호출) ──
+  _process_arrival           목표 노드 도착 분기 (GO_TO_SHELF/DELIVER 등)
+  _handle_pickup_ack         lift_up 완료 → 선반 픽업 처리
+  _handle_putdown_ack        lift_down 완료 → 선반 내려놓기/반납
+  ── 완료 신호 (GUI) ──
+  _handle_shelf_complete     [Point C] 선반 픽킹 완료 → RETURN/FORWARD 퇴출 분기
+  _handle_order_complete     주문 전체 종료
+  ── 인터셉트 / F-노드 ──
+  _try_intercept_returning_shelf  [Node U] 복귀중 동일선반 신규주문 → 우회
+  _get_shelf_availability    [F-node] 선반 가용성 6분기 (go/direct/pending)
+  _handle_fnode_next_shelf   F-노드 블록 시 다음 선반 처리
+  _reroute_robot_after_skip  선반 스킵 후 경로 재계획
 """
 
 import json
@@ -21,7 +42,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from .robot_manager import RobotStatus
 from .shelf_manager import ShelfStatus
-from .staging_manager import CorridorState
 from .task_manager import SubTaskType, TaskStatus
 
 
@@ -312,7 +332,7 @@ class WorkflowMixin:
         # 인터셉트는 트리거 노드를 통과하지 못하므로 회랑을 직접 해제
         # (release_corridor_without_trigger가 is_exiting=False 리셋과 큐 승계를 일관 처리)
         for ws_node, corridor in self.staging_manager.corridors.items():
-            if corridor.occupying_rid == carrying_robot.rid:
+            if self.staging_manager._owner(ws_node) == carrying_robot.rid:
                 released = self.staging_manager.release_corridor_without_trigger(
                     ws_node, carrying_robot.rid
                 )
@@ -766,8 +786,7 @@ class WorkflowMixin:
             # Bug B fix: WS 회랑이 다른 로봇에 의해 점유 중이면 진입 불가 → PENDING
             ws_node = shelf_obj.current_node
             corridor = self.staging_manager.corridors.get(ws_node)
-            if (corridor and corridor.state == CorridorState.OCCUPIED
-                    and corridor.occupying_rid != exclude_rid):
+            if (corridor and self.staging_manager._owner(ws_node) not in (None, exclude_rid)):
                 return "pending"
             return "direct"
 

@@ -76,7 +76,6 @@
 | 변수 | 타입 | 용도 |
 |------|------|------|
 | `command_queues` | `Dict[int, CommandQueue]` | AGV별 cmd lifecycle (REFACTOR E). `peek_expected_node` = 예약 / `in_flight` = 발행대기 / `is_idle` = 가용 |
-| `_yielded_staging_robots` | `Set[int]` | deadlock yield된 staging 로봇 |
 | `_staged_to_ws` | `Dict[int, Tuple[int, int]]` | early-release 대기 (rid → (ws, staging)) |
 | `_deferred_goals` | `Dict[int, int]` | blocker가 내 goal에 있어 대기 중 (rid → 원래 goal). 멤버십 = 키 존재 |
 

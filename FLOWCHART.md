@@ -1084,7 +1084,7 @@ for ws_node, corridor in self.staging_manager.corridors.items():
         break
 ```
 
-**근거**: 검증 체크리스트 영역 3 NG 1 항목 (검증_체크리스트.md, 2026-04-29 작성)
+**근거**: 검증 체크리스트 영역 3 NG 1 항목 (archive/docs_superseded/검증_체크리스트.md, 2026-04-29 작성)
 
 **수정 파일**: `server/request_handler.py`
 
@@ -1334,7 +1334,7 @@ lift ack 시점에 deadlock 재해제 → AGV-2 정상 staging 이동 → AGV-1 
 **배경**: AGV-2가 idle 주차 중인 노드(예: 25) 위로 AGV-1의 경로가 plan되어
 충돌 → `Deadlock (alt-path)` → `Goal-locked` 왕복 cascade 발생.
 빈 차로 yield되어 움직이는 비정상 동작 + 그 과정에서 `_pending_cmd` 단일 슬롯
-덮어쓰기로 `turn_180` 유실까지 이어짐. 상세 분석은 `REDESIGN.md` 참고.
+덮어쓰기로 `turn_180` 유실까지 이어짐. 상세 분석은 `archive/docs_superseded/REDESIGN.md` 참고.
 
 **근본 원인 (2가지 갭)**:
 - **갭 3 (planned_path 박제)**: plan 발행 시 `planned_path`가 박제되고
@@ -1433,7 +1433,7 @@ replan 시 첫 cmd는 `_plan_and_publish_move`가 이미 발행하므로 `_send_
 **Part B — Layer 1.3: in-flight cmd 추적**
 
 **배경**: 서버가 turn_180 발행 직후 forward 발행 시, AGV `_pending_cmd` 단일 슬롯이
-덮어써져 turn_180 유실 → 엉뚱한 방향 이동 (REDESIGN.md 버그 C).
+덮어써져 turn_180 유실 → 엉뚱한 방향 이동 (archive/docs_superseded/REDESIGN.md 버그 C).
 
 **근본 원인**: 서버가 ack/marker를 기다리지 않고 다음 cmd 발행하는 케이스 존재.
 AGV의 single-slot 채널과 동기화 안 됨.

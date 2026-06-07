@@ -4,7 +4,7 @@ RequestHandler — AGV 이벤트 수신 (마커, cmd_ack, marker_trigger) Mixin
 AGV → 서버 방향의 이벤트 진입점들. 위치 갱신, heading 갱신, 후속 명령 발행 트리거.
 
 self 상태 접근:
-  - self.command_queues (REFACTOR E), self._yielded_staging_robots, self._staged_to_ws
+  - self.command_queues (REFACTOR E), self._staged_to_ws
   - self.robot_manager, self.shelf_manager, self.staging_manager
   - self.path_planner, self.task_manager
 
@@ -12,12 +12,18 @@ self 상태 접근:
   - MovementMixin: _plan_and_publish_move, _send_next_command, _try_dispatch_all
   - WorkflowMixin: _try_assign_pending_tasks, _process_arrival, _handle_pickup_ack, _handle_putdown_ack
   - Base: _error_response
+
+섹션 맵 (메서드 → 역할 / 다이어그램 노드):
+  _handle_marker_report      [핵심] 마커 수신 → 위치갱신 → STG 체크 → 도착(_process_arrival)/다음 cmd
+  _handle_cmd_ack            turn/lift 완료 → heading 갱신 / 다음 단계 → _try_dispatch_all
+  handle_marker_trigger      [TRG] 트리거 노드 통과 → 대기 AGV 해제 (staging_manager 위임)
+  _dispatch_released_agv     회랑 해제로 깨어난 대기 AGV dispatch (도착 미스 시 _staged_to_ws 보류)
+  _is_corridor_dispatch_consistent  dispatch 직전 회랑 점유 일관성 sanity (수정 46)
 """
 
 from typing import Any, Dict
 
 from .robot_manager import RobotStatus
-from .staging_manager import CorridorState
 
 
 class MarkerMixin:
@@ -58,22 +64,14 @@ class MarkerMixin:
         """회랑 release로 깨어난 대기 AGV를 dispatch (Phase 4.5.4a — 깨우기 단일화).
 
         check_position_release / handle_marker_trigger 두 경로의 복붙 dispatch를 통합.
-        3갈래:
-          A. yielded-staging (deadlock yield로 staging 떠남) → 현재 위치에서 plan
-          B. staging_node 미도착 (desync) → _staged_to_ws에 보류 (도착 후 처리)
-          C. sanity(수정 46) 통과 → dispatch
+        2갈래:
+          A. staging_node 미도착 (desync) → _staged_to_ws에 보류 (도착 후 처리)
+          B. sanity(수정 46) 통과 → dispatch
         """
         if released is None:
             return
         released_robot = self.robot_manager.get_robot(released.rid)
-        if released_robot and released.rid in self._yielded_staging_robots:
-            self._yielded_staging_robots.discard(released.rid)
-            print(f"[RequestHandler] Robot {released.rid}: yielded-staging released "
-                  f"(at {released_robot.current_node}) → {released.target_ws}")
-            self._plan_and_publish_move(
-                released.rid, released_robot.current_node, released.target_ws
-            )
-        elif released_robot and released_robot.current_node != released.staging_node:
+        if released_robot and released_robot.current_node != released.staging_node:
             self._staged_to_ws[released.rid] = (released.target_ws, released.staging_node)
             print(f"[RequestHandler] Robot {released.rid}: released early "
                   f"(at {released_robot.current_node}), waiting for staging_node {released.staging_node}")
@@ -141,8 +139,7 @@ class MarkerMixin:
             can_proceed = (
                 node == expected_node
                 or (corridor is not None
-                    and (corridor.state == CorridorState.FREE
-                         or corridor.occupying_rid == rid))
+                    and self.staging_manager._owner(target_ws) in (None, rid))
             )
             if can_proceed:
                 del self._staged_to_ws[rid]
@@ -284,6 +281,6 @@ class MarkerMixin:
             ws_node = self.staging_manager._trigger_to_ws.get(marker_id)
             if ws_node:
                 corridor = self.staging_manager.corridors.get(ws_node)
-                if corridor and corridor.state == CorridorState.FREE:
+                if corridor and self.staging_manager._owner(ws_node) is None:
                     self._try_assign_pending_tasks()
         return released

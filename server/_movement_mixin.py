@@ -1,16 +1,35 @@
 """
-RequestHandler — 이동/명령 발행 + 충돌 회피 + 교착 해제 Mixin
+RequestHandler — 이동/명령 발행 + 충돌 회피(예방형) Mixin
 
 이 모듈의 메서드들은 RequestHandler 인스턴스에 mixed-in 되어 동작합니다.
+교착은 plan 시점 예약(I1/I2) + staging_node transit 제외(4.5.6)로 *예방* — 반응형 해제 없음.
 self 상태 접근:
   - self.command_queues         : Dict[int, CommandQueue]  (REFACTOR E: cmd lifecycle, 노드 예약, blocked 추론)
-  - self._yielded_staging_robots: Set[int]         (deadlock yield된 staging 로봇)
   - self.robot_manager, self.shelf_manager, self.staging_manager
   - self.path_planner, self.mqtt_publisher, self.config
   - self.DEMO_MODE
 
 다른 mixin 호출:
   - self._handle_marker_report (MarkerMixin)  ← _plan_and_publish_move 즉시 도착 케이스
+
+섹션 맵 (메서드 → 역할):
+  ── 핵심 발행 ──
+  _plan_and_publish_move     [핵심] should_stage(STG) → A*(reservation) → cmd 큐 생성 → 발행
+                             ★ staging_node transit 제외(4.5.6) = staging 교착 예방
+  _send_next_command         큐 head cmd 발행 (forward 전 충돌 체크 포함)
+  _try_dispatch_all          blocked 로봇 재시도 (blocker 이탈 시 진행 — 반응형 해제 없음)
+  ── 경로 / 명령 변환 ──
+  _path_to_commands          노드 경로 → forward/turn 명령 리스트 (turn 최소화)
+  _get_next_node_by_heading  현재 heading 기준 다음 노드
+  _predict_heading_after_inflight  in-flight turn 반영한 예측 heading (race 방지)
+  _replan_for_placed_shelf   선반 배치 후 그 노드 경유 로봇 재계획
+  ── 큐/예약/상태 추론 (REFACTOR E) ──
+  _is_blocked                cmd 남았는데 in_flight 없음 = dispatch 보류 추론
+  _is_lifting                in_flight cmd가 lift_* 인지
+  _is_node_reserved_by       노드가 특정 로봇의 예약 목적지인지 (peek_expected_node)
+  _is_staging_robot          corridor 큐 멤버십 (excluded_transit 영구장애물용)
+  _clear_robot_reservation   로봇 예약 해제
+  _get_occupied_shelf_nodes  IN_PLACE 선반 노드 집합 (운반 시 통과 금지)
 """
 
 from typing import Dict, List, Optional, Set, Tuple
@@ -74,42 +93,15 @@ class MovementMixin:
                 and queue.in_flight.cmd in ("lift_up", "lift_down"))
 
     def _try_dispatch_all(self):
-        """REFACTOR E 3.3: 모든 robot dispatch 재시도 + 교착 감지/해제.
+        """REFACTOR E 3.3 / F 4.5.6: blocked robot dispatch 재시도. ACK 도착 시점마다 호출.
 
-        기존 `_retry_blocked_robots`를 큐 기반으로 재작성. `_blocked_robots` set 불필요 —
-        `_is_blocked`가 큐 상태로 직접 추론. ACK 도착 시점마다 호출.
+        blocker가 떠나면 다음 호출에서 진행. 교착은 plan 시점 예약(I1/I2) +
+        staging_node transit 제외(4.5.6 Step 1)로 *예방*되므로 반응형 해제
+        (_resolve_deadlock)는 불필요 — 막히면 제자리 대기, blocker 이탈 시 자연 진행.
         """
         for rid in sorted(self.command_queues.keys()):
-            if not self._is_blocked(rid):
-                continue
-            success = self._send_next_command(rid)
-            if not success:
-                # 교착 감지: blocker가 또한 blocked / staging / 장기 정차(WAITING_FOR_PICK, IDLE)면 처리 발동
-                blocker_rid = self._get_blocker_of(rid)
-                blocker = self.robot_manager.get_robot(blocker_rid) if blocker_rid is not None else None
-                if blocker_rid is not None and (
-                    self._is_blocked(blocker_rid)
-                    or self._is_staging_robot(blocker_rid)
-                    or (blocker and blocker.status in (RobotStatus.WAITING_FOR_PICK, RobotStatus.IDLE))
-                ):
-                    self._resolve_deadlock(rid, blocker_rid)
-
-    def _get_blocker_of(self, rid: int) -> Optional[int]:
-        """rid가 blocked된 원인 로봇 ID 반환 (없으면 None)"""
-        robot = self.robot_manager.get_robot(rid)
-        if not robot or not robot.command_queue:
-            return None
-        if robot.command_queue[0] != "forward":
-            return None
-        next_node = self._get_next_node_by_heading(rid)
-        if next_node is None:
-            return None
-        for other_rid, other in self.robot_manager.robots.items():
-            if other_rid == rid:
-                continue
-            if other.current_node == next_node or self._is_node_reserved_by(next_node, other_rid):
-                return other_rid
-        return None
+            if self._is_blocked(rid):
+                self._send_next_command(rid)
 
     # ─── 큐 기반 노드 예약 조회 (REFACTOR E 3.1) ───
 
@@ -121,46 +113,6 @@ class MovementMixin:
         """
         queue = self.command_queues.get(by_rid)
         return queue is not None and queue.peek_expected_node() == node
-
-    # ─── Yield 노드 탐색 ───
-
-    def _find_yield_node(self, rid: int, contested_node: int) -> Optional[int]:
-        """비켜주기용 옆 노드 탐색
-
-        현재 노드의 인접 노드 중:
-          - contested_node가 아닐 것
-          - 선반 노드가 아닐 것 (물리적 충돌 방지)
-          - 다른 로봇이 없을 것
-        """
-        self._refactor_f_counters['find_yield_node'] += 1
-        robot = self.robot_manager.get_robot(rid)
-        if not robot:
-            return None
-
-        # shelf_manager.all_shelf_nodes 사용 (path_planner.shelf_nodes보다 확실)
-        shelf_nodes = self.shelf_manager.all_shelf_nodes
-
-        for neighbor_id, _ in self.path_planner.graph.get(robot.current_node, []):
-            if neighbor_id == contested_node:
-                continue
-            # 선반 노드는 항상 제외 (비켜주기 중간 정차용으로 부적합)
-            if neighbor_id in shelf_nodes:
-                continue
-            # 다른 로봇이 점유/예약 중인 노드 제외
-            occupied = any(
-                r.current_node == neighbor_id
-                for r_id, r in self.robot_manager.robots.items()
-                if r_id != rid
-            )
-            reserved = any(
-                self._is_node_reserved_by(neighbor_id, r_id)
-                for r_id in self.robot_manager.robots
-                if r_id != rid
-            )
-            if not occupied and not reserved:
-                return neighbor_id
-
-        return None
 
     # ─── 재계획 ───
 
@@ -182,104 +134,6 @@ class MovementMixin:
                 print(f"[RequestHandler] Shelf placed at {placed_node}: "
                       f"replanning Robot {rid} (was routing through that node)")
                 self._plan_and_publish_move(rid, robot.current_node, goal)
-
-    # ─── 교착 해제 ───
-
-    def _resolve_deadlock(self, rid_a: int, rid_b: int):
-        """교착 해제: 우선순위 낮은 로봇이 비켜줌
-
-        전략 1: 상대 노드를 제외한 우회 경로 계획
-        전략 2 (단일 통로): 옆 노드로 한 칸 비켜줌 → 상대방 통과 후 재계획
-
-        우선순위:
-          1) staging 상태인 AGV는 항상 yield (이미 대기 중이라 비키는 게 자연스러움)
-          2) 선반 운반 중 > 미운반
-          3) 동급일 때 max(rid) yield
-        """
-        self._refactor_f_counters['resolve_deadlock'] += 1
-        robot_a = self.robot_manager.get_robot(rid_a)
-        robot_b = self.robot_manager.get_robot(rid_b)
-        if not robot_a or not robot_b:
-            return
-
-        # ─── 진단 로그: deadlock 트리거 시점 양쪽 상태 + corridor dump ───
-        a_stg = self._is_staging_robot(rid_a)
-        b_stg = self._is_staging_robot(rid_b)
-        cdump = ", ".join(
-            f"W{ws}={c.state.value}:own={c.occupying_rid}:q={[s.rid for s in c.queue]}"
-            for ws, c in self.staging_manager.corridors.items()
-        )
-        print(f"[Deadlock-DIAG] A={rid_a}(st={robot_a.status.value},"
-              f"node={robot_a.current_node},hd={robot_a.heading},"
-              f"carry={robot_a.carrying_shelf},stg={a_stg}) "
-              f"B={rid_b}(st={robot_b.status.value},"
-              f"node={robot_b.current_node},hd={robot_b.heading},"
-              f"carry={robot_b.carrying_shelf},stg={b_stg}) "
-              f"corridors=[{cdump}]")
-
-        # REFACTOR E 3.4: 리프트 중 yield 차단 (수정 31 계승). _lifting_robots set 대신
-        # 큐 in_flight cmd가 lift_*인지로 직접 검사. lift cmd_ack 시 큐 ack가 자동 해제.
-        if self._is_lifting(rid_a) or self._is_lifting(rid_b):
-            print(f"[RequestHandler] Deadlock 보류: Robot {rid_a}/{rid_b} 중 리프트 동작 중 "
-                  f"→ lift 완료 후 재시도")
-            return
-
-        # staging 상태는 무조건 yield (carrying 비교 이전)
-        a_staging = self._is_staging_robot(rid_a)
-        b_staging = self._is_staging_robot(rid_b)
-        if a_staging and not b_staging:
-            yield_rid, block_rid = rid_a, rid_b
-        elif b_staging and not a_staging:
-            yield_rid, block_rid = rid_b, rid_a
-        else:
-            a_prio = 1 if robot_a.carrying_shelf else 0
-            b_prio = 1 if robot_b.carrying_shelf else 0
-            if a_prio > b_prio:
-                yield_rid, block_rid = rid_b, rid_a
-            elif b_prio > a_prio:
-                yield_rid, block_rid = rid_a, rid_b
-            else:
-                yield_rid = max(rid_a, rid_b)
-                block_rid = min(rid_a, rid_b)
-
-        yield_robot = self.robot_manager.get_robot(yield_rid)
-        block_robot = self.robot_manager.get_robot(block_rid)
-        if not yield_robot:
-            return
-
-        # ─── staging AGV 강제 yield: yield_node로 1-step만 이동 (재계획 안 함) ──
-        # corridor 정상 해제 시 yield_node에서 곧장 target_ws로 plan됨 (release 흐름 보정)
-        if self._is_staging_robot(yield_rid):
-            # 안전 가드: 픽킹 중 AGV는 yield 금지 (픽업자 안전 + 선반 낙하 방지)
-            if yield_robot.status in (
-                RobotStatus.WAITING_FOR_PICK,
-                RobotStatus.PICKING_UP_SHELF,
-            ):
-                print(f"[RequestHandler] Deadlock: Robot {yield_rid} in "
-                      f"{yield_robot.status.value}, yield refused (safety)")
-                return
-            if yield_rid in self._yielded_staging_robots:
-                return  # 이미 yield 명령 발행 — 큐 덮어쓰기 금지 (loop 차단)
-            yield_node = self._find_yield_node(yield_rid, block_robot.current_node)
-            if yield_node is None:
-                print(f"[RequestHandler] Deadlock: staging Robot {yield_rid} cannot yield "
-                      f"(no free adjacent node) — stuck")
-                return
-            commands = self._path_to_commands(
-                [yield_robot.current_node, yield_node], yield_robot.heading
-            )
-            yield_robot.planned_path = [yield_robot.current_node, yield_node]
-            yield_robot.command_queue = commands
-            self._yielded_staging_robots.add(yield_rid)
-            print(f"[RequestHandler] Deadlock (staging yield): Robot {yield_rid} → "
-                  f"side {yield_node} (waiting for corridor)")
-            self._send_next_command(yield_rid)
-            return
-
-        # [REFACTOR F Phase 4.3+4.4] 비-staging 교착은 반응형 복구 없음 — 예방(예약)+대기에 위임.
-        #  · head-on: edge 예약(is_edge_free, I2)이 plan 시점 차단 (4.3 — 전략 1/2 제거)
-        #  · goal 막힘: 제자리 대기 → blocker 이탈 시 _try_dispatch_all 재시도로 진행 (4.4 — goal-lock 제거)
-        return
 
     # ─── 헬퍼 (선반/대기 노드) ───
 
@@ -517,6 +371,14 @@ class MovementMixin:
                 shelf_obj = self.shelf_manager.shelves.get(other.carrying_shelf)
                 if shelf_obj:
                     excluded_transit.add(shelf_obj.home_node)
+        # REFACTOR F 4.5.6 Step 1: corridor staging_node는 전용 대기 지점 — 어떤 로봇도 경유 금지.
+        # 점유자가 staging_node 경유 경로를 선커밋한 뒤 대기 AGV가 거기 주차하는 시간차 교착을
+        # 구조적으로 차단 (staging yield 반응형 복구를 예방으로 대체 — Step 2에서 yield 제거).
+        # start/goal은 제외 안 함 (대기 AGV의 목적지가 staging_node이므로).
+        for corridor in self.staging_manager.corridors.values():
+            sn = corridor.staging_node
+            if sn != start and sn != actual_goal:
+                excluded_transit.add(sn)
         if not excluded_transit:
             excluded_transit = None
 

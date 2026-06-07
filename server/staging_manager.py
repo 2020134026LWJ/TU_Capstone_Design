@@ -6,16 +6,9 @@
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 STAGING_TIMEOUT = 30  # PARAM: 스테이징 corridor 점유 타임아웃 (초). 마커 인식 실패 시 강제 해제까지 대기
-
-
-class CorridorState(Enum):
-    """회랑 상태"""
-    FREE = "free"
-    OCCUPIED = "occupied"
 
 
 @dataclass
@@ -42,11 +35,10 @@ class CorridorInfo:
     gateway_node: int
     staging_node: int
     trigger_node: int
-    state: CorridorState = CorridorState.FREE
-    occupying_rid: Optional[int] = None
     occupied_at: float = 0.0
     queue: deque = field(default_factory=deque)
     is_exiting: bool = False  # mark_exiting() 호출 이후 퇴출 중 여부
+    # 점유(owner)는 더 이상 여기 없음 — ReservationService indefinite이 단일 진실 (Phase 4.5.5b)
 
 
 class StagingManager:
@@ -98,35 +90,35 @@ class StagingManager:
         print(f"[StagingManager] Initialized {len(self.corridors)} corridors")
 
     def set_reservation(self, reservation) -> None:
-        """ReservationService 주입 (Phase 4.5.1 이중기록). RequestHandler가 생성 후 호출."""
+        """ReservationService 주입. RequestHandler가 생성 후 호출.
+
+        Phase 4.5.5b부터 점유(owner)의 단일 진실 = reservation. 미주입(standalone) 시
+        점유는 추적되지 않음 (production/테스트는 항상 주입).
+        """
         self._reservation = reservation
 
-    def _sync_occupancy(self, ws_node: int) -> None:
-        """corridor 점유 상태를 reservation의 WS 노드 indefinite에 반영 (Phase 4.5.1).
+    def _set_owner(self, ws_node: int, rid: int) -> None:
+        """corridor 점유자 설정 — reservation indefinite에 직접 기록 (Phase 4.5.5b).
 
         점유 자원 = WS 노드 하나 (gateway는 통과 길목이라 미포함).
-        OCCUPIED → reserve_indefinite(점유자, ws_node) / FREE → release_indefinite_node.
-        아직 wake-up(콜백)은 4.5.2에서 — 여기선 fire_callbacks=False.
+        reserve_indefinite은 idempotent하며 다른 owner면 자동 transfer.
         """
-        if self._reservation is None:
-            return
-        corridor = self.corridors.get(ws_node)
-        if corridor is None:
-            return
-        if corridor.state == CorridorState.OCCUPIED and corridor.occupying_rid is not None:
-            self._reservation.reserve_indefinite(corridor.occupying_rid, ws_node)
-        else:
+        if self._reservation is not None:
+            self._reservation.reserve_indefinite(rid, ws_node)
+
+    def _clear_owner(self, ws_node: int) -> None:
+        """corridor 점유 해제 — reservation indefinite만 풀고 경로 예약은 보존 (Phase 4.5.5b)."""
+        if self._reservation is not None:
             self._reservation.release_indefinite_node(ws_node, fire_callbacks=False)
 
     def _owner(self, ws_node: int) -> Optional[int]:
-        """corridor 점유자 rid 질의 (Phase 4.5.3 — 새 장부 우선, 미주입 시 corridor.occupying_rid).
+        """corridor 점유자 rid 질의 — reservation 단일 진실 (Phase 4.5.5b).
 
-        "누가 회랑 주인이야?" 결정 읽기를 reservation으로 통일. 이중기록(4.5.1) 덕에 동치.
+        "누가 회랑 주인이야?" 결정 읽기를 reservation으로 통일.
         """
-        if self._reservation is not None:
-            return self._reservation.corridor_owner(ws_node)
-        corridor = self.corridors.get(ws_node)
-        return corridor.occupying_rid if corridor else None
+        if self._reservation is None:
+            return None
+        return self._reservation.corridor_owner(ws_node)
 
     def get_ws_for_staging_node(self, node: int) -> Optional[int]:
         """staging 노드 → 해당 작업대 노드 반환 (큐 기반 우선 — gateway-staging 포함)"""
@@ -157,19 +149,14 @@ class StagingManager:
         # 타임아웃 체크
         self._check_timeout(corridor)
 
-        # Phase 4.5.2: "회랑 비었나?"를 새 장부(reservation)에 질의 (이중기록 덕에 옛 장부와 동치).
-        # reservation 미주입(standalone) 시 옛 장부로 fallback.
-        if self._reservation is not None:
-            corridor_held = self._reservation.is_corridor_held(ws_node)
-        else:
-            corridor_held = (corridor.state == CorridorState.OCCUPIED)
+        # "회랑 비었나?"를 reservation에 질의 (Phase 4.5.5b — 점유 단일 진실).
+        corridor_held = (self._reservation is not None
+                         and self._reservation.is_corridor_held(ws_node))
 
         if not corridor_held:
             # 회랑 비어있음 → 바로 진입, 회랑 점유
-            corridor.state = CorridorState.OCCUPIED
-            corridor.occupying_rid = incoming_rid
+            self._set_owner(ws_node, incoming_rid)
             corridor.occupied_at = time.time()
-            self._sync_occupancy(ws_node)
             print(f"[StagingManager] W{ws_node}: corridor OCCUPIED by AGV-{incoming_rid} (entering)")
             return None
         elif self._owner(ws_node) == incoming_rid:
@@ -180,7 +167,7 @@ class StagingManager:
             # 회랑 점유 중 → 대기 노드 결정 (포워딩=gateway, 일반=staging)
             wait_node = corridor.gateway_node if is_forwarding else corridor.staging_node
             wait_label = "gateway-staging" if is_forwarding else "staging"
-            print(f"[StagingManager] W{ws_node}: corridor busy (AGV-{corridor.occupying_rid}), "
+            print(f"[StagingManager] W{ws_node}: corridor busy (AGV-{self._owner(ws_node)}), "
                   f"AGV-{incoming_rid} {wait_label} at node {wait_node}")
             return wait_node
 
@@ -261,11 +248,10 @@ class StagingManager:
 
         # 선점 가능 — 점유 이전
         previous_rid = owner_rid
-        corridor.occupying_rid = claimant_rid
+        self._set_owner(corridor.ws_node, claimant_rid)
         corridor.occupied_at = time.time()
         corridor.is_exiting = False
         corridor.queue = deque(s for s in corridor.queue if s.rid != claimant_rid)
-        self._sync_occupancy(corridor.ws_node)
         print(f"[StagingManager] W{corridor.ws_node}: corridor PREEMPTED — "
               f"AGV-{previous_rid} → AGV-{claimant_rid} (owner at node {owner_node})")
         return PreemptResult(target_ws=corridor.ws_node,
@@ -310,24 +296,20 @@ class StagingManager:
 
         if self._owner(ws_node) != rid:
             print(f"[StagingManager] W{ws_node}: release_without_trigger skip "
-                  f"(occupying={corridor.occupying_rid}, rid={rid})")
+                  f"(occupying={self._owner(ws_node)}, rid={rid})")
             return None
 
         if corridor.queue:
             released = corridor.queue.popleft()
-            corridor.state = CorridorState.OCCUPIED
-            corridor.occupying_rid = released.rid
+            self._set_owner(ws_node, released.rid)  # 점유 transfer (rid → released.rid)
             corridor.occupied_at = time.time()
             corridor.is_exiting = False
-            self._sync_occupancy(ws_node)
             print(f"[StagingManager] W{ws_node}: forwarding release → "
                   f"AGV-{released.rid} corridor transferred (queue remaining: {len(corridor.queue)})")
             return released
         else:
-            corridor.state = CorridorState.FREE
-            corridor.occupying_rid = None
+            self._clear_owner(ws_node)
             corridor.is_exiting = False
-            self._sync_occupancy(ws_node)
             print(f"[StagingManager] W{ws_node}: forwarding release → corridor FREE")
             return None
 
@@ -337,11 +319,9 @@ class StagingManager:
         if not corridor:
             return
 
-        corridor.state = CorridorState.OCCUPIED
-        corridor.occupying_rid = rid
+        self._set_owner(ws_node, rid)
         corridor.occupied_at = time.time()
         corridor.is_exiting = True
-        self._sync_occupancy(ws_node)
         print(f"[StagingManager] W{ws_node}: AGV-{rid} exiting")
 
     def check_position_release(self, rid: int, node: int) -> Optional["StagedAGV"]:
@@ -366,34 +346,33 @@ class StagingManager:
 
     def _check_timeout(self, corridor: CorridorInfo):
         """타임아웃 체크 - ArUco 인식 실패 시 강제 해제"""
-        if self._owner(corridor.ws_node) is None:
+        owner = self._owner(corridor.ws_node)
+        if owner is None:
             return
 
         elapsed = time.time() - corridor.occupied_at
         if elapsed > STAGING_TIMEOUT:
             print(f"[StagingManager] W{corridor.ws_node}: TIMEOUT ({elapsed:.0f}s), "
-                  f"forcing corridor FREE (was AGV-{corridor.occupying_rid})")
+                  f"forcing corridor FREE (was AGV-{owner})")
             if corridor.queue:
                 released = corridor.queue.popleft()
-                corridor.occupying_rid = released.rid
+                self._set_owner(corridor.ws_node, released.rid)  # 점유 transfer
                 corridor.occupied_at = time.time()
-                self._sync_occupancy(corridor.ws_node)
                 print(f"[StagingManager] W{corridor.ws_node}: timeout-releasing AGV-{released.rid}")
                 # 이동 명령은 pending_timeout_releases에 저장 → request_handler가 처리
                 self.pending_timeout_releases.append(released)
             else:
-                corridor.state = CorridorState.FREE
-                corridor.occupying_rid = None
-                self._sync_occupancy(corridor.ws_node)
+                self._clear_owner(corridor.ws_node)
 
     def get_status_summary(self) -> Dict[int, Dict[str, Any]]:
-        """스테이징 상태 요약"""
-        return {
-            ws_node: {
-                "state": corridor.state.value,
-                "occupying_rid": corridor.occupying_rid,
+        """스테이징 상태 요약 (점유는 reservation 파생 — Phase 4.5.5b)"""
+        result = {}
+        for ws_node, corridor in self.corridors.items():
+            owner = self._owner(ws_node)
+            result[ws_node] = {
+                "state": "occupied" if owner is not None else "free",
+                "occupying_rid": owner,
                 "queue_size": len(corridor.queue),
                 "queued_rids": [s.rid for s in corridor.queue],
             }
-            for ws_node, corridor in self.corridors.items()
-        }
+        return result

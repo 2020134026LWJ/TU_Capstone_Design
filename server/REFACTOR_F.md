@@ -8,6 +8,32 @@
 
 ---
 
+## ✅ 완료 요약 (2026-06-07)
+
+**핵심 목표 달성**: 미래 점유 = ReservationService 단일 진실. 충돌/교착의 반응형(사후) 코드 전부 제거 → plan 시점 예방으로 대체. 시뮬 검증 완료, pytest 59 통과.
+
+| Phase | 내용 | 상태 |
+|---|---|---|
+| 0~3 | 다이어그램 보강 + ReservationService 도입 + Planner를 예약 위로 | ✅ |
+| 4.1 | `_lookahead_replan` 삭제 (사후 충돌 검사) | ✅ |
+| 4.2 | `_should_hold_for_eta` 삭제 (staging 우회 최적화) | ✅ |
+| 4.3 | 이동 교착 yield(전략1/2) 삭제 → edge 예약 | ✅ |
+| 4.4 | goal-lock 삭제 → 제자리 대기+재dispatch | ✅ |
+| 4.5 | 회랑 점유를 reservation으로 (`state`/`occupying_rid`+`CorridorState` 삭제, 큐는 유지=하이브리드) | ✅ |
+| 4.6(4.5.6) | staging yield 삭제 + staging_node transit 제외(예방). gateway는 preempt가 처리 | ✅ |
+| 5 | 도메인 SM(status 전이 검증) | ⏸ 보류 (ROI 낮음+회귀위험) |
+| 6 | main.py docstring + 3 mixin 섹션 맵 | ✅ |
+| 7 | 실물 안전망 (marker/desync/reservation timeout, 모니터링) | ⬜ 미착수 (실물 전환 시) |
+| 8 | 풀스택 검증 | 🔄 매 단계 시뮬로 진행 |
+
+**제거된 코드**: `_resolve_deadlock`, `_find_yield_node`, `_get_blocker_of`, `_yielded_staging_robots`, `_lookahead_replan`, `_should_hold_for_eta`, goal-lock(`_deferred_goals`/`_check_goal_locked_robots`), `CorridorState` enum, `corridor.state`/`occupying_rid`, `_sync_occupancy`.
+
+**충돌/교착 처리 (현재, 예방형 단일 플로우)**: head-on/swap=edge 예약 · 노드=cell 예약+발행 직전 체크 · goal 막힘=대기+재시도 · staging=staging_node transit 제외 · gateway=preempt(수정 38) · 회랑 점유=reservation indefinite.
+
+> 실질 코드 작업은 종료. 남은 건 Phase 7(실물 시) + git 커밋/머지.
+
+---
+
 ## 진행 체크리스트 (세션 재진입 시 여기부터 확인)
 
 ### Phase 0 — 다이어그램 명세 보강 (반나절)
@@ -79,9 +105,18 @@
   - [~] ~~4.5.4b/c (on_release 트리거 전환)~~ **폐기** — 하이브리드(아래)로 선회. 큐를 살리므로 on_release 콜백 불필요. 현 마커-기반 트리거 유지.
   - [ ] **4.5.5 (하이브리드) 점유 중복 제거** — `CorridorInfo.state`/`occupying_rid` 삭제 → 점유는 reservation 단일 진실. **큐·is_exiting·timeout·깨우기 트리거 유지.**
     - [x] 4.5.5a (2026-06-05) 남은 점유 *읽기* flip 4곳: preempt guard+owner / `check_position_release` state(중복이라 제거) / `_check_timeout` guard → 전부 `self._owner(ws_node)`. 남은 corridor.state 읽기 = 116(sync 소스, 4.5.5b서 쓰기로) + 165(fallback)뿐. **pytest 58**. 시뮬 검증 대기 (동작 불변 기대)
-    - [ ] 4.5.5b 점유 *쓰기*(`corridor.state=`/`occupying_rid=` 전부)를 reservation 호출로 → `_sync_occupancy`가 "거울"이 아니라 실 저장소. 그 후 `state`/`occupying_rid` 필드 + `CorridorState` enum 삭제
-    - [ ] 4.5.5c `get_status_summary` 등 표시도 reservation 파생
-  - [ ] 4.5.6 staging yield(`_resolve_deadlock` 잔여) + `_find_yield_node` + `_yielded_staging_robots` 제거 — **단, 4.3/4.4처럼 "reservation이 staging 교착을 plan 시점에 막나" 분석 먼저** (`test_staging_blocker_forces_yield`가 실 시나리오 → 자동 제거 X)
+    - [x] 4.5.5b (2026-06-07, pytest 58) 점유 *쓰기* 전부 reservation 호출로 전환 + 필드/enum 삭제. **점유 단일 진실 = ReservationService indefinite.**
+      - `_sync_occupancy`(거울) 삭제 → `_set_owner`(reserve_indefinite) / `_clear_owner`(release_indefinite_node) 헬퍼로 대체. 점유 쓰기 5곳(should_stage 진입/preempt/release_without_trigger 2분기/mark_exiting/timeout 2분기) 전환.
+      - `CorridorInfo.state`/`occupying_rid` 필드 + `CorridorState` enum + `from enum import Enum` 삭제. `_owner` fallback 제거(미주입 시 None).
+      - **외부 reader flip (4.5.5a에서 누락분)**: `_marker_mixin`(can_proceed `_owner in (None,rid)` / PENDING재배정 `_owner is None`), `_workflow_mixin`(인터셉트 `_owner==rid` / F-노드 pending `_owner not in (None,exclude_rid)`), `_movement_mixin`(deadlock 덤프). import 2개 제거.
+      - **4.5.5c 흡수**: `get_status_summary`의 state/occupying_rid도 `_owner` 파생으로 (필드 삭제가 강제). dict 키 문자열 "occupied"/"free"는 동일 유지.
+      - 테스트 `test_stg.py`/`test_intercept.py` 점유 단언을 `sm._owner(ws)`로 전환, `CorridorState` import 제거. **시뮬 검증 완료 (2026-06-07, 사용자 육안 확인 — 4 시나리오 정상)**
+  - [~] 4.5.6 staging yield 제거 — **2단계 (분석 결과: 4.3/4.4와 달리 시간차 교착을 실제 커버 → 자동 제거 X)**
+    - **분석 (2026-06-07)**: plan 시점 `excluded_transit`(staged AGV current_node 포함, 511-514)이 *새 계획*은 막지만, "점유자가 staging_node 경유 경로 선커밋 → 대기 AGV가 거기 주차"의 **시간차 교착**은 못 막음 (`test_staging_blocker_forces_yield` = 이 케이스). per-step 충돌체크는 물리충돌은 막지만 둘 다 대기 = standstill. yield가 유일한 resolver. ⚠️ gateway-staging(포워딩, wait=gateway 25) 변종은 gateway가 통과 길목이라 같은 fix 불가 — Step 2에서 재검토.
+    - [x] **Step 1 (2026-06-07, pytest 58)**: 구조적 예방 — corridor `staging_node`를 모든 로봇 transit에서 항상 제외 (`_plan_and_publish_move`, start/goal 제외). 점유자가 staging_node 경유 경로를 애초에 커밋 못함 → 시간차 교착 원천 차단. **안전망 추가(제거 아님) → 저위험.** **시뮬 검증 대기.**
+    - [x] **Step 2 (2026-06-07, pytest 59)**: yield 본체 제거. `_resolve_deadlock`(메서드 전체) + `_find_yield_node` + `_get_blocker_of` + `_yielded_staging_robots`(init+clear) + `_try_dispatch_all`의 deadlock 트리거 블록 삭제. `_try_dispatch_all`은 단순 재시도 루프로 축소. `_dispatch_released_agv` branch A(yielded-staging) 제거. `_is_staging_robot`/`_is_node_reserved_by`는 유지(excluded_transit 513 / collision 376에서 사용). counter 2키 + Set import 정리. `test_staging_blocker_forces_yield` → 예방 검증 2테스트로 교체.
+      - **gateway-staging 변종 분석**: yield의 고유 역할은 staging_node(막다른 주차지) 케이스뿐 — Step 1이 대체. gateway(통과 길목) 변종은 원래 yield가 아니라 **preempt(수정 38)** 가 해소(점유자 밖이면 주인 교체) + 점유자 안에 있으면 33의 대체 출구(34/41) 사용 → yield 불필요. **단 시뮬 검증 필수 (포워딩 시나리오 집중).**
+      - **시뮬 검증 완료 (2026-06-07)**: mqtt_test 풀런에서 포워딩(27,31 W33↔W9) + staging redirect 2회 + corridor 승계가 yield 없이 교착 0으로 완주. 종료 카운터 lookahead=0/goal_lock=0/staging_redirect=2/cascade=10. **Phase 4 종료.**
 
 #### 4.5 설계 — 점유는 reservation, 큐는 유지 (하이브리드)
 
@@ -112,21 +147,22 @@ is_exiting / mark_exiting      →  유지 (퇴출 phase 플래그)
 
 **리스크**: cascade race 핫스팟(수정 23/37~44/46). 점유 쓰기를 옮길 때(4.5.5b) 매 단계 시뮬 필수.
 
-### Phase 5 — 도메인 SM 명시화 (1일)
+### Phase 5 — 도메인 SM 명시화 (1일) — **보류 (2026-06-07 사용자 결정)**
+> status는 이미 manager(set_robot_status / ShelfManager 메서드)에 캡슐화됨 + mixin에 직접대입 없음
+> → 이득 marginal. 5.5(InvalidTransitionError throw)는 비자명 전이(포워딩/인터셉트/재픽업) 누락 시
+> 회귀 위험 최고. ROI 낮아 Phase 6 우선. 하려면 5.1~5.4만 + 5.5는 warn 로그로.
 - [ ] 5.1 `Robot.set_status(new, reason)` 추가
 - [ ] 5.2 `Shelf.set_status(new, reason)` 추가
 - [ ] 5.3 `robot.status = X` 직접 대입 grep → 전수 변환
 - [ ] 5.4 `shelf.status = X` 직접 대입 grep → 전수 변환
 - [ ] 5.5 잘못된 전이 시 `InvalidTransitionError` 발생
 
-### Phase 6 — main.py docstring + mixin 섹션 주석 (반나절)
-- [ ] 6.1 `server/main.py` 상단 docstring
-  - [ ] 이벤트 ↔ 핸들러 ↔ 다이어그램 노드 매핑 표
-  - [ ] 재료 9종 목록 + 역할
-  - [ ] 대표 호출 시퀀스 (start_order 따라가기)
-- [ ] 6.2 `_workflow_mixin.py` 섹션 주석 (다이어그램 노드 매핑)
-- [ ] 6.3 `_marker_mixin.py` 섹션 주석
-- [ ] 6.4 `_movement_mixin.py` 섹션 주석
+### Phase 6 — main.py docstring + mixin 섹션 주석 — **완료 (2026-06-07)**
+- [x] 6.1 `server/main.py` 상단 docstring — 이벤트↔핸들러↔다이어그램 매핑표 + 재료 목록 + start_order 대표 시퀀스
+- [x] 6.2 `_workflow_mixin.py` 섹션 맵 (주문진입/배정/도착단계/완료/인터셉트·F-node)
+- [x] 6.3 `_marker_mixin.py` 섹션 맵 (marker_report/cmd_ack/TRG/dispatch)
+- [x] 6.4 `_movement_mixin.py` 섹션 맵 (핵심발행/경로변환/큐·예약 추론)
+- pytest 59 통과 (동작 변화 0)
 
 ### Phase 7 — Real-world 안전망 (1~1.5일)
 - [ ] 7.1 Marker timeout — 마지막 마커 후 N초 무응답 시 alert + AGV FAILED 마킹

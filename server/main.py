@@ -1,11 +1,52 @@
 """
-AGV 서버 메인 진입점
-TU Capstone Design - AGV 물류 피킹 시스템
+AGV 서버 메인 진입점 — TU Capstone Design AGV 물류 피킹 시스템
 
-모든 모듈 초기화 및 이벤트 루프 실행
+모든 모듈 초기화 + MQTT/WebSocket 이벤트 루프 실행.
+실행: python -m server.main
 
-실행 방법:
-    python -m server.main
+────────────────────────────────────────────────────────────────────────
+이벤트 → 핸들러 → 다이어그램(FLOWCHART.md) 매핑
+────────────────────────────────────────────────────────────────────────
+  MQTT 토픽                  type            핸들러 (mixin)                  다이어그램
+  ──────────────────────────────────────────────────────────────────────
+  /agv/marker             marker_report   MarkerMixin._handle_marker_report   위치갱신/STG/TRG/U
+  /agv/cmd_ack            cmd_ack         MarkerMixin._handle_cmd_ack         turn/lift 완료
+  warehouse/order/start   start_order     WorkflowMixin._handle_start_order   주문 진입
+  warehouse/shelf/complete shelf_complete WorkflowMixin._handle_shelf_complete Point C(퇴출)
+  warehouse/order/complete order_complete WorkflowMixin._handle_order_complete 주문 종료
+
+  서버 → 외부 발행: /agv/cmd (AGV 명령) / warehouse/shelf/arrived (GUI 도착알림)
+
+다이어그램 노드 ↔ 코드:
+  STG    회랑 점유 확인→진입/대기   staging_manager.should_stage
+  TRG    트리거 통과→대기AGV 해제   staging_manager.handle_marker_trigger
+  Node U 복귀중 동일선반 신규주문    WorkflowMixin._try_intercept_returning_shelf
+  Point C shelf_complete→퇴출 시작   WorkflowMixin._handle_shelf_complete
+  F-node 선반 가용성 6분기           WorkflowMixin._get_shelf_availability
+
+────────────────────────────────────────────────────────────────────────
+재료 (RequestHandler 상태 변수 — mixin들이 self로 공유)
+────────────────────────────────────────────────────────────────────────
+  reservation             ReservationService  미래 점유 단일 진실 (시공간 예약). 충돌/교착 예방의 핵심
+  command_queues          Dict[rid,CmdQueue]  AGV별 cmd lifecycle (in_flight/예약/blocked 추론)
+  staging_manager         StagingManager      회랑 점유(=reservation 파생) + 대기 큐 + 트리거
+  robot/shelf/task_manager                    도메인 상태 (로봇 6단계 / 선반 3상태 / 태스크)
+  _staged_to_ws           Dict[rid,tuple]     회랑 조기해제 후 staging 미도착 로봇
+  _forwarded_shelf_handlers Dict[shelf,rid]   포워딩 선반 재픽업 담당 로봇
+
+────────────────────────────────────────────────────────────────────────
+대표 흐름 — start_order 따라가기
+────────────────────────────────────────────────────────────────────────
+  1. (GUI/mqtt_test) warehouse/order/start {사용자ID, 주문번호} 발행
+  2. _handle_mqtt_gui → RequestHandler.handle_message → _handle_start_order
+  3. OrderOptimizer: xlsx에서 주문 로드 + NN으로 선반 방문순서 최적화
+  4. TaskManager: 선반당 태스크 1개 생성 (task_id = T{user}_{order}_{idx})
+  5. _try_assign_pending_tasks → get_available_robot → _plan_and_publish_move
+  6. _plan_and_publish_move: should_stage(STG) → A*(reservation 기반) → cmd 큐 → /agv/cmd
+  7. AGV가 마커 보고 → _handle_marker_report → 위치갱신 + 다음 cmd / 도착(_process_arrival)
+  8. WS 도착: 선반 AT_WORKSTATION + 로봇 WAITING_FOR_PICK → warehouse/shelf/arrived (GUI 셀 활성)
+  9. shelf_complete(Point C) → RETURN_SHELF / FORWARD_SHELF 분기 → 퇴출
+ 10. 홈 노드 복귀 → IDLE → 다음 태스크
 """
 
 import asyncio

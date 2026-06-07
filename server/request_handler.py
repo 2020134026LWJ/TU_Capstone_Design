@@ -13,7 +13,7 @@
 
 import json
 import os
-from typing import Any, Dict, Set
+from typing import Any, Dict
 
 from .config import Config
 from .path_planner import PathPlanner
@@ -81,10 +81,6 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
 
         # REFACTOR E 3.3: _blocked_robots 제거 — _is_blocked가 큐 상태로 추론
 
-        # Deadlock 해결을 위해 yield_node로 비킨 staging 로봇 (수정 28)
-        # corridor 정상 해제 시 staging_node가 아닌 현재(yield) 위치에서 target_ws로 plan 필요
-        self._yielded_staging_robots: Set[int] = set()
-
         # REFACTOR F Phase 4.4: goal-lock(_deferred_goals + _check_goal_locked_robots) 제거.
         # goal 막힘 = 제자리 대기 → blocker 이탈 시 _try_dispatch_all 재시도로 자연 진행.
 
@@ -110,8 +106,6 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터
         self._refactor_f_counters: Dict[str, int] = {
             'lookahead_replan': 0,
-            'resolve_deadlock': 0,
-            'find_yield_node': 0,
             'should_hold_for_eta': 0,
             'staging_redirect': 0,
             'goal_lock': 0,
