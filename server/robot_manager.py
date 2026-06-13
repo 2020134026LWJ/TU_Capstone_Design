@@ -111,16 +111,24 @@ class RobotManager:
         path_planner=None,
         dedicated_rid: int = None,  # [DEMO MODE] 지정 시 해당 로봇만 반환 (idle이면)
     ) -> Optional[Robot]:
-        """유휴 로봇 조회 (target_node 지정 시 가장 가까운 로봇 우선)"""
+        """유휴 로봇 조회 (target_node 지정 시 가장 가까운 로봇 우선).
+
+        가용 = status IDLE + heading 초기화 + planned_path 비어있음 (= 진짜 정지).
+        IDLE 상태로 parking 노드 이동 중인 로봇은 planned_path가 남아있음 → 제외.
+        (수정 48: in-flight forward 중인 IDLE 로봇에 lift_up 명령 발행되어 엉뚱한
+         노드에서 빈 lift 실행되는 race 차단)
+        """
         # [DEMO MODE] 특정 로봇 전담 배정
         if dedicated_rid is not None:
             robot = self.robots.get(dedicated_rid)
-            if robot and robot.status == RobotStatus.IDLE and robot.heading_initialized:
+            if (robot and robot.status == RobotStatus.IDLE
+                    and robot.heading_initialized and not robot.planned_path):
                 return robot
             return None  # 전담 로봇이 유휴가 아니면 대기
 
         idle_robots = [r for r in self.robots.values()
-                       if r.status == RobotStatus.IDLE and r.heading_initialized]
+                       if r.status == RobotStatus.IDLE and r.heading_initialized
+                       and not r.planned_path]
         if not idle_robots:
             return None
 

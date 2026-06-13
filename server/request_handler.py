@@ -13,20 +13,22 @@
 
 import json
 import os
-from typing import Any, Dict, Optional, List, Set, Tuple
+from typing import Any, Dict
 
 from .config import Config
 from .path_planner import PathPlanner
 from .mqtt_client import MQTTClient
 from .robot_manager import RobotManager, RobotStatus
-from .shelf_manager import ShelfManager, ShelfStatus
-from .staging_manager import StagingManager, CorridorState
-from .task_manager import TaskManager, SubTaskType, TaskStatus
+from .shelf_manager import ShelfManager
+from .staging_manager import StagingManager
+from .task_manager import TaskManager
 from .db_loader import DBLoader
 from .order_optimizer import OrderOptimizer
+from .reservation_service import ReservationService
 from ._movement_mixin import MovementMixin
 from ._marker_mixin import MarkerMixin
 from ._workflow_mixin import WorkflowMixin
+from .command_queue import CommandQueue
 
 
 class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
@@ -60,7 +62,9 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         self.task_manager = task_manager
 
         # DB 로더 + 작업 스케줄러
-        db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Database")
+        # 협업자 GUI/서버와 동일한 주문/재고 파일 참조 (warehouse_gui_server/)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_dir = os.path.join(project_root, "warehouse_gui_server")
         self.db_loader = DBLoader(db_dir)
         self.task_scheduler = OrderOptimizer(self.db_loader)
 
@@ -75,33 +79,38 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # shelf_id → rid (pick_complete 후 re-pickup 시 사용)
         self._forwarded_shelf_handlers: Dict[int, int] = {}
 
-        # 명령 전송 대기 중인 로봇 (충돌 예상으로 다음 명령 보류)
-        self._blocked_robots: Set[int] = set()
+        # REFACTOR E 3.3: _blocked_robots 제거 — _is_blocked가 큐 상태로 추론
 
-        # Deadlock 해결을 위해 yield_node로 비킨 staging 로봇 (수정 28)
-        # corridor 정상 해제 시 staging_node가 아닌 현재(yield) 위치에서 target_ws로 plan 필요
-        self._yielded_staging_robots: Set[int] = set()
+        # REFACTOR F Phase 4.4: goal-lock(_deferred_goals + _check_goal_locked_robots) 제거.
+        # goal 막힘 = 제자리 대기 → blocker 이탈 시 _try_dispatch_all 재시도로 자연 진행.
 
-        # goal 노드가 blocker로 점유된 경우 yield + 대기 (blocker가 goal 떠날 때까지)
-        # 무한 deadlock 루프 방지용. blocker 이탈 시 _deferred_goals로 재계획
-        self._goal_locked_robots: Set[int] = set()
-        self._deferred_goals: Dict[int, int] = {}
+        # REFACTOR E 3.1: _reserved_nodes 제거 — CommandQueue.peek_expected_node가 대체
 
-        # 이동 중인 로봇의 목적지 노드 예약
-        # {node_id: rid} — forward 명령 전송 시 등록, 도착 시 해제
-        self._reserved_nodes: Dict[int, int] = {}
+        # REFACTOR E 3.4: _lifting_robots 제거 — _is_lifting이 queue.in_flight.cmd로 추론
 
-        # lift_up/lift_down 발행 후 cmd_ack 대기 중인 로봇 (수정 31)
-        # 리프트 동작 중에는 deadlock yield 등 이동 명령 발행 금지 (프로토콜: 명령 1개씩)
-        self._lifting_robots: Set[int] = set()
+        # REFACTOR E 3.2: _in_flight_cmds 제거 — CommandQueue.in_flight가 대체
 
-        # Layer 1.3: in-flight 명령 추적 (수정 34)
-        # rid → 마지막 발행한 cmd 문자열. ack/marker 미수신 동안 다음 cmd 발행 보류.
-        # AGV의 _pending_cmd 단일 슬롯 덮어쓰기 방지 + back-to-back 발행으로 인한 명령 유실 차단.
-        self._in_flight_cmds: Dict[int, str] = {}
+        # REFACTOR E 2.2: AGV별 명령 큐 — cmd lifecycle 단일 진실 원천
+        self.command_queues: Dict[int, CommandQueue] = {
+            rid: CommandQueue(rid) for rid in self.robot_manager.robots
+        }
+
+        # REFACTOR F Phase 2: 시공간 예약 단일 진실 (Phase 3에서 path_planner와 연결)
+        self.reservation = ReservationService()
+        # REFACTOR F Phase 4.5.1: staging이 corridor 점유를 reservation에 이중기록
+        self.staging_manager.set_reservation(self.reservation)
 
         # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
         self._broadcast_callback = None
+
+        # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터
+        self._refactor_f_counters: Dict[str, int] = {
+            'lookahead_replan': 0,
+            'should_hold_for_eta': 0,
+            'staging_redirect': 0,
+            'goal_lock': 0,
+            'staging_cascade': 0,
+        }
 
     def set_broadcast_callback(self, callback):
         """WebSocket 브로드캐스트 콜백 설정"""

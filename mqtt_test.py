@@ -26,6 +26,13 @@ import sys
 import time
 import paho.mqtt.client as mqtt
 
+# paho-mqtt 2.x는 callback_api_version 필수 (없으면 ValueError). 서버(mqtt_client.py)와 동일 처리.
+try:
+    from paho.mqtt.client import CallbackAPIVersion
+    _HAS_CALLBACK_API = True
+except ImportError:
+    _HAS_CALLBACK_API = False
+
 # DB에서 주문 ID 목록 로드용
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server.db_loader import DBLoader
@@ -41,7 +48,10 @@ TOPIC_ORDER_COMPLETE = "warehouse/order/complete"
 class MQTTCLIClient:
 
     def __init__(self):
-        self.client = mqtt.Client()
+        if _HAS_CALLBACK_API:
+            self.client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
+        else:
+            self.client = mqtt.Client()
         self.connected = False
 
     def connect(self):
@@ -166,8 +176,8 @@ def main():
     if not client.connect():
         return
 
-    # DB에서 사용자별 주문 목록 로드
-    db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server", "Database")
+    # DB에서 사용자별 주문 목록 로드 (서버 request_handler와 동일 경로: warehouse_gui_server)
+    db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "warehouse_gui_server")
     chain = OrderChain(db_dir)
 
     print_help()

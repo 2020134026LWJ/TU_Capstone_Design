@@ -15,7 +15,6 @@ import pytest
 
 from server.robot_manager import RobotStatus
 from server.shelf_manager import ShelfStatus
-from server.staging_manager import CorridorState
 from server.task_manager import SubTaskType, TaskStatus
 
 
@@ -77,8 +76,7 @@ def test_intercept_clears_is_exiting(handler, mock_mqtt):
 
     src_corridor = handler.staging_manager.corridors[src_ws]
     assert src_corridor.is_exiting is True
-    assert src_corridor.state == CorridorState.OCCUPIED
-    assert src_corridor.occupying_rid == rid
+    assert handler.staging_manager._owner(src_ws) == rid
 
     # 새 task: 동일 선반을 다른 WS에서 요청
     item = next(iter(handler.shelf_manager.get_shelf(shelf_id).items))
@@ -97,9 +95,8 @@ def test_intercept_clears_is_exiting(handler, mock_mqtt):
     # ─── 핵심 검증: NG 1 회귀 방지 ───
     assert src_corridor.is_exiting is False, \
         "인터셉트 시 src corridor의 is_exiting이 False로 리셋되어야 함 (FLOWCHART 수정 27)"
-    assert src_corridor.state == CorridorState.FREE, \
+    assert handler.staging_manager._owner(src_ws) is None, \
         "큐가 비어있으므로 FREE로 전환되어야 함"
-    assert src_corridor.occupying_rid is None
 
     # 부가 검증: 서브태스크 mutation + 로봇 상태 전환
     robot = handler.robot_manager.get_robot(rid)

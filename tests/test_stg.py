@@ -16,10 +16,9 @@ staging_node를 corridor 진입 경로 밖으로 분리 → "대기자가 입구
 
 import pytest
 
-from server.staging_manager import CorridorState
-
 
 # ─── 4. STG gating basic ───
+# 점유(owner)는 reservation 단일 진실 (Phase 4.5.5b) → sm._owner(ws)로 질의.
 
 @pytest.mark.stg
 def test_stg_basic_first_enters_second_stages(handler):
@@ -29,12 +28,11 @@ def test_stg_basic_first_enters_second_stages(handler):
 
     first = sm.should_stage(ws, incoming_rid=1)
     assert first is None, "빈 corridor → 즉시 진입(None)"
-    assert sm.corridors[ws].state == CorridorState.OCCUPIED
-    assert sm.corridors[ws].occupying_rid == 1
+    assert sm._owner(ws) == 1
 
     second = sm.should_stage(ws, incoming_rid=2)
     assert second == 41, "이미 점유 → AGV-2는 staging_node(41)로 우회"
-    assert sm.corridors[ws].occupying_rid == 1, "점유자는 그대로"
+    assert sm._owner(ws) == 1, "점유자는 그대로"
 
     sm.add_staged_agv(ws, rid=2, staging_node=second)
     assert any(s.rid == 2 for s in sm.corridors[ws].queue)
@@ -76,8 +74,7 @@ def test_release_via_trigger_marker(handler):
 
     assert released is not None, "trigger 통과 시 큐의 다음 AGV가 release되어야 함"
     assert released.rid == 2
-    assert corridor.occupying_rid == 2, "다음 AGV가 점유 승계"
-    assert corridor.state == CorridorState.OCCUPIED
+    assert sm._owner(ws) == 2, "다음 AGV가 점유 승계"
     assert corridor.is_exiting is False, "승계 시 is_exiting 리셋 (수정 24 위임 패턴)"
     assert len(corridor.queue) == 0
 
@@ -97,8 +94,7 @@ def test_release_via_trigger_with_empty_queue(handler):
 
     assert released is None, "큐 비어있음 → release할 AGV 없음"
     corridor = sm.corridors[ws]
-    assert corridor.state == CorridorState.FREE
-    assert corridor.occupying_rid is None
+    assert sm._owner(ws) is None
     assert corridor.is_exiting is False
 
 
@@ -115,7 +111,7 @@ def test_release_skip_when_rid_mismatch(handler):
     # AGV-2가 trigger 통과 (W1 점유자가 아님) → release 거부
     released = sm.handle_marker_trigger(rid=2, marker_id=trigger_node)
     assert released is None
-    assert sm.corridors[ws].occupying_rid == 1, "점유 상태 변경 안 됨"
+    assert sm._owner(ws) == 1, "점유 상태 변경 안 됨"
     assert sm.corridors[ws].is_exiting is True, "is_exiting도 그대로"
 
 
@@ -145,8 +141,7 @@ def test_release_position_based_outside_corridor_area(handler):
 
     # 큐 비어있으니 released는 None, corridor는 FREE로 전환
     corridor = sm.corridors[ws]
-    assert corridor.state == CorridorState.FREE
-    assert corridor.occupying_rid is None
+    assert sm._owner(ws) is None
     assert corridor.is_exiting is False, "위치 기반 해제도 is_exiting 리셋"
 
 
@@ -162,5 +157,4 @@ def test_position_based_release_skips_when_not_exiting(handler):
     released = sm.check_position_release(rid=1, node=17)
     assert released is None
     # 점유 상태가 유지되어야 함 (입장 단계의 임시 위치 변경에 영향 받으면 안 됨)
-    assert sm.corridors[ws].state == CorridorState.OCCUPIED
-    assert sm.corridors[ws].occupying_rid == 1
+    assert sm._owner(ws) == 1
