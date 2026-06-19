@@ -8,15 +8,12 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDRaisedButton, MDFlatButton
 from kivymd.uix.card import MDCard
 from kivymd.uix.dialog import MDDialog
-from kivymd.uix.textfield import MDTextField
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.core.window import Window
 from kivy.core.text import LabelBase
 from kivy.clock import Clock
-from kivy.metrics import dp
 import os
-import re
 import json
 import threading
 import requests
@@ -28,30 +25,14 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '172.30.1.78'   # 시작 시 IP 입력 팝업에서 덮어씀
+SERVER_IP = '10.220.55.38'
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 
-# 마지막 입력 IP 캐시 (재실행 시 자동 채움)
-IP_CACHE_FILE = os.path.expanduser('~/.warehouse_gui_ip')
-IP_REGEX = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
-
-
-def load_cached_ip():
-    try:
-        with open(IP_CACHE_FILE, 'r') as f:
-            ip = f.read().strip()
-            return ip if IP_REGEX.match(ip) else ''
-    except Exception:
-        return ''
-
-
-def save_cached_ip(ip):
-    try:
-        with open(IP_CACHE_FILE, 'w') as f:
-            f.write(ip)
-    except Exception as e:
-        print(f"IP 캐시 저장 실패: {e}")
+# 이 파이가 설치된 작업대 번호 (작업대-파이 고정: 파이1=1, 파이2=2)
+# 사용자는 파이에서 1·2 모두 선택 가능하지만 작업대는 파이에 고정된다.
+# AGV가 선반을 어느 작업대로 보낼지 알 수 있도록 모든 발행 메시지에 실어 보낸다.
+WORKSTATION_ID = 2
 
 Window.size = (800, 448)
 Window.borderless = True
@@ -214,74 +195,13 @@ class WarehouseGUI(MDBoxLayout):
         self.picking_list = []
         self.user_buttons = {}
         self._order_advancing = False   # 주문 자동 진행 중복 방지 가드
+        self._pending_active_shelf = None  # 사용자 전환 시 복원할 활성 선반 그룹
 
         self.mqtt_client = None
-        self.ip_dialog = None
-        self.ip_input = None
+        self.init_mqtt()
 
         self.build_top_section()
         self.build_work_grid()
-        # IP 입력 팝업은 UI 빌드 직후 표시 → 확인 시 MQTT 연결
-        Clock.schedule_once(lambda dt: self.prompt_server_ip(), 0.2)
-
-    # ── IP 입력 팝업 ─────────────────────────────────────────────────
-
-    def prompt_server_ip(self):
-        """노트북 핫스팟 IP 입력 팝업. 확인 시 SERVER_IP 갱신 + MQTT 연결."""
-        cached = load_cached_ip() or SERVER_IP
-        self.ip_input = MDTextField(
-            text=cached,
-            hint_text='예: 192.168.43.1',
-            helper_text='노트북(서버 PC)의 핫스팟 IP',
-            helper_text_mode='persistent',
-            font_name=FONT_NAME,
-            size_hint_y=None,
-            height=dp(70),
-        )
-        content = MDBoxLayout(
-            orientation='vertical',
-            spacing=dp(8),
-            padding=[dp(4), dp(8), dp(4), dp(0)],
-            size_hint_y=None,
-            height=dp(90),
-        )
-        content.add_widget(self.ip_input)
-
-        self.ip_dialog = MDDialog(
-            title='서버 IP 입력',
-            type='custom',
-            content_cls=content,
-            buttons=[MDFlatButton(text='확인', font_name=FONT_NAME)],
-        )
-        self.ip_dialog.buttons[0].bind(on_release=lambda *a: self._on_ip_confirmed())
-        self.ip_dialog.open()
-        Clock.schedule_once(lambda dt: self._fix_dialog_fonts(self.ip_dialog), 0.1)
-
-    def _on_ip_confirmed(self):
-        ip = (self.ip_input.text or '').strip()
-        if not IP_REGEX.match(ip):
-            self.ip_input.error = True
-            self.ip_input.helper_text = '올바른 IP를 입력하세요 (예: 192.168.43.1)'
-            return
-        global SERVER_IP
-        SERVER_IP = ip
-        save_cached_ip(ip)
-        self.ip_dialog.dismiss()
-        self.status_label.text = f'서버 연결 중... ({ip})'
-        # MQTT 연결은 별도 스레드 (UI 멈춤 방지)
-        threading.Thread(target=self._connect_mqtt_after_ip, args=(ip,), daemon=True).start()
-
-    def _connect_mqtt_after_ip(self, ip):
-        self.init_mqtt()
-        connected = self.mqtt_client is not None
-        Clock.schedule_once(
-            lambda dt: setattr(
-                self.status_label, 'text',
-                f'사용자를 선택하세요  |  서버: {ip}' if connected
-                else f'서버 연결 실패: {ip}'
-            ),
-            0,
-        )
 
     def init_mqtt(self):
         if mqtt is None:
@@ -304,7 +224,12 @@ class WarehouseGUI(MDBoxLayout):
         try:
             payload = json.loads(msg.payload.decode())
             if msg.topic == "warehouse/shelf/arrived":
-                if payload.get('사용자ID') == self.selected_user_id:
+                # 작업대-파이 고정 → 내 작업대로 온 선반만 처리.
+                # (작업대 필드가 없는 옛 메시지는 사용자ID로 폴백)
+                ws = payload.get('작업대')
+                for_me = (ws == WORKSTATION_ID) if ws is not None \
+                    else (payload.get('사용자ID') == self.selected_user_id)
+                if for_me:
                     shelf_group = payload.get('선반번호')
                     Clock.schedule_once(
                         lambda dt: self.activate_shelf_cells(shelf_group), 0
@@ -343,7 +268,7 @@ class WarehouseGUI(MDBoxLayout):
         user_box.add_widget(user_btns)
         top.add_widget(user_box)
 
-        # 우(나머지): 상태 표시 (시작 버튼 제거 - 사용자 선택 시 자동 로드)
+        # 중앙: 상태 표시 (시작 버튼 제거 - 사용자 선택 시 자동 로드)
         self.status_label = Label(
             text='사용자를 선택하세요',
             font_size='19sp',
@@ -351,10 +276,23 @@ class WarehouseGUI(MDBoxLayout):
             bold=True,
             halign='center',
             valign='middle',
-            size_hint_x=0.68,
+            size_hint_x=0.48,
             color=(0.2, 0.2, 0.2, 1),
         )
         top.add_widget(self.status_label)
+
+        # 우측 끝: '다음 작업' 버튼 (주문의 모든 품목 완료 시에만 노출)
+        self.next_button = MDRaisedButton(
+            text='다음 작업',
+            font_size='18sp',
+            font_name=FONT_NAME,
+            md_bg_color=COLOR_BTN_NEXT,
+            size_hint=(0.20, 1),
+            disabled=True,
+            opacity=0,
+        )
+        self.next_button.bind(on_press=self.on_next_button)
+        top.add_widget(self.next_button)
 
         self.add_widget(top)
 
@@ -400,21 +338,38 @@ class WarehouseGUI(MDBoxLayout):
 
     def _load_user_state(self, user_id):
         order_number = 1
+        active_shelf = None
+        busy_ws = None
         try:
             url = f"http://{SERVER_IP}:{HTTP_PORT}/api/user/{user_id}/state"
             resp = requests.get(url, timeout=5)
             data = resp.json()
             if data.get('status') == 'success':
                 order_number = data.get('현재주문번호', 1)
+                active_shelf = data.get('활성선반')
+                busy_ws = data.get('점유작업대')
         except Exception as e:
             print(f"재개 상태 조회 실패(기본값 1): {e}")
-        Clock.schedule_once(lambda dt: self._apply_user_state(user_id, order_number), 0)
+        Clock.schedule_once(
+            lambda dt: self._apply_user_state(user_id, order_number, active_shelf, busy_ws), 0
+        )
 
-    def _apply_user_state(self, user_id, order_number):
+    def _apply_user_state(self, user_id, order_number, active_shelf=None, busy_ws=None):
         # 조회 중 사용자가 다른 버튼을 눌렀다면 무시
         if self.selected_user_id != user_id:
             return
+        # 다른 작업대가 점유 중인 사용자면 선택 거부
+        if busy_ws is not None and busy_ws != WORKSTATION_ID:
+            self.status_label.text = f'사용자{user_id}는 작업대{busy_ws}에서 사용 중'
+            self.grid_label.text = '다른 작업대 사용 중 — 선택할 수 없습니다'
+            self.selected_user_id = None
+            for btn in self.user_buttons.values():
+                btn.md_bg_color = COLOR_USER_DEFAULT
+            self.clear_grid()
+            return
         self.current_order_number = order_number
+        # 전환 시 놓친 shelf_arrived 보완용: 서버가 기억하는 활성 선반을 그리드 로드 후 복원
+        self._pending_active_shelf = active_shelf
         self.status_label.text = f'사용자{user_id}  |  주문 {order_number}번'
         # 자동 복원: 마지막 작업 주문을 즉시 불러와 완료 품목을 빨강으로 표시
         self.start_work(None)
@@ -434,23 +389,29 @@ class WarehouseGUI(MDBoxLayout):
             "type": "start_order",
             "사용자ID": self.selected_user_id,
             "주문번호": self.current_order_number,
+            "작업대": WORKSTATION_ID,
         }
         try:
             self.mqtt_client.publish("warehouse/order/start", json.dumps(msg, ensure_ascii=False))
         except Exception as e:
             print(f"MQTT 전송 실패: {e}")
 
-    def send_mqtt_shelf_complete(self, cell):
-        if not self.mqtt_client:
+    def send_mqtt_shelf_complete(self, cells):
+        # 같은 선반의 셀들을 묶어 '선반 완료'로 1번만 발행 (셀당 발행 금지)
+        if not self.mqtt_client or not cells:
             return
-        shelf_group = '-'.join(cell.shelf_number.split('-')[:2])
-        items = [{"물건": cell.item, "개수": cell.quantity, "선반번호": cell.shelf_number}]
+        shelf_group = '-'.join(cells[0].shelf_number.split('-')[:2])
+        items = [
+            {"물건": c.item, "개수": c.quantity, "선반번호": c.shelf_number}
+            for c in cells
+        ]
         msg = {
             "type": "shelf_complete",
             "사용자ID": self.selected_user_id,
             "주문번호": self.current_order_number,
             "선반번호": shelf_group,
             "품목목록": items,
+            "작업대": WORKSTATION_ID,
         }
         try:
             self.mqtt_client.publish("warehouse/shelf/complete", json.dumps(msg, ensure_ascii=False))
@@ -464,6 +425,7 @@ class WarehouseGUI(MDBoxLayout):
             "type": "order_complete",
             "사용자ID": self.selected_user_id,
             "주문번호": self.current_order_number,
+            "작업대": WORKSTATION_ID,
         }
         try:
             self.mqtt_client.publish("warehouse/order/complete", json.dumps(msg, ensure_ascii=False))
@@ -477,6 +439,7 @@ class WarehouseGUI(MDBoxLayout):
             "type": "all_orders_complete",
             "사용자ID": self.selected_user_id,
             "총주문수": self.total_orders,
+            "작업대": WORKSTATION_ID,
         }
         try:
             self.mqtt_client.publish("warehouse/order/all_complete", json.dumps(msg, ensure_ascii=False))
@@ -498,15 +461,21 @@ class WarehouseGUI(MDBoxLayout):
                     print(f"주문 {self.current_order_number}: 재고 없음, 다음 주문으로 자동 이동")
                     self._advance_or_complete()
                     return
-                # 재진입: 모든 품목이 이미 완료된 주문이면 자동으로 다음 주문으로 진행
+                # 재진입: 모든 품목이 이미 완료된 주문이면 자동 진행하지 않고
+                # 완료 화면 + '다음 작업' 버튼을 띄워 사용자가 직접 넘어가게 한다.
                 if all(p.get('완료') for p in self.picking_list):
-                    print(f"주문 {self.current_order_number}: 이미 완료됨, 다음 주문으로 자동 이동")
-                    self._finish_order_and_advance()
+                    print(f"주문 {self.current_order_number}: 이미 완료됨 → '다음 작업' 대기")
+                    self.load_picking_list_to_grid()
+                    self.grid_label.text = '주문 완료 | "다음 작업" 버튼을 누르세요'
+                    self._show_next_button()
+                    self._unlock_all_users()
                     return
                 # 피킹리스트 확인 후 MQTT 전송
                 self.send_mqtt_start_order()
                 self.load_picking_list_to_grid()
                 self.grid_label.text = '피킹 작업 | 선반 도착 대기 중...'
+                # 작업 진행 중 → 다른 사용자로 전환 잠금
+                self._lock_other_users(self.selected_user_id)
             else:
                 msg = data.get('message', '')
                 if any(k in msg for k in ['재고', '없', '품절']):
@@ -529,6 +498,7 @@ class WarehouseGUI(MDBoxLayout):
             self.move_to_next_order()
 
     def load_picking_list_to_grid(self):
+        self._hide_next_button()
         for cell in self.work_cells:
             cell.clear()
         for i, pick_item in enumerate(self.picking_list[:8]):
@@ -538,17 +508,58 @@ class WarehouseGUI(MDBoxLayout):
                 quantity=pick_item['개수'],
                 completed=pick_item.get('완료', False),
             )
+        # 사용자 전환으로 놓친 선반 도착 신호 복원 → 작업 중이던 선반 셀 재활성화
+        if self._pending_active_shelf:
+            self.activate_shelf_cells(self._pending_active_shelf)
+            self.grid_label.text = f'피킹 작업 | 선반 {self._pending_active_shelf} 작업 중'
+        self._pending_active_shelf = None
 
     def on_shelf_complete(self, cell):
-        # 셀(품목) 하나를 터치하는 즉시 해당 품목 차감/진행 저장 요청
-        self.send_mqtt_shelf_complete(cell)
-        print(f"품목 완료 전송: {cell.item} ({cell.shelf_number})")
-        # 현재 주문의 모든 셀을 완료하면 자동으로 다음 주문으로 진행
+        # 같은 선반의 셀이 전부 완료됐을 때만 '선반 완료'를 1번 발행한다.
+        # (1-1-1, 1-1-2가 한 주문에 있으면 둘 다 빨강이 된 뒤에만 서버로 전송)
+        group = '-'.join(cell.shelf_number.split('-')[:2])
+        group_cells = [
+            c for c in self.work_cells
+            if not c.is_empty and '-'.join(c.shelf_number.split('-')[:2]) == group
+        ]
+        if all(c.is_completed for c in group_cells):
+            self.send_mqtt_shelf_complete(group_cells)
+            print(f"선반 완료 전송: {group} ({len(group_cells)}품목)")
+        else:
+            done = sum(1 for c in group_cells if c.is_completed)
+            print(f"품목 완료(대기): {cell.item} ({cell.shelf_number}) "
+                  f"- 선반 {group} {done}/{len(group_cells)} 완료")
+        # 현재 주문의 모든 셀을 완료하면 '다음 작업' 버튼을 노출 (수동 진행)
         remaining = [c for c in self.work_cells if not c.is_empty and not c.is_completed]
         if not remaining and not self._order_advancing:
-            self._order_advancing = True
-            # 빨강 표시가 렌더링된 뒤 잠시 후 진행
-            Clock.schedule_once(lambda dt: self._finish_order_and_advance(), 0.4)
+            self.grid_label.text = '주문 완료 | "다음 작업" 버튼을 누르세요'
+            self._show_next_button()
+            # 주문 1건 완료 → 잠금 해제 (다른 사용자가 작업할 수 있음)
+            # '다음 작업'을 누르면 다음 주문이 로드되며 fetch_picking_list에서 다시 잠금
+            self._unlock_all_users()
+
+    def on_next_button(self, instance):
+        """'다음 작업' 버튼: 현재 주문 완료 처리 후 다음 주문으로 진행"""
+        self._hide_next_button()
+        self._finish_order_and_advance()
+
+    def _show_next_button(self):
+        self.next_button.disabled = False
+        self.next_button.opacity = 1
+
+    def _hide_next_button(self):
+        self.next_button.disabled = True
+        self.next_button.opacity = 0
+
+    def _lock_other_users(self, active_user_id):
+        """작업 진행 중 → 선택된 사용자 외 버튼을 잠가 전환을 막는다."""
+        for uid, btn in self.user_buttons.items():
+            btn.disabled = (uid != active_user_id)
+
+    def _unlock_all_users(self):
+        """전체 주문 완료 → 모든 사용자 버튼 잠금 해제."""
+        for btn in self.user_buttons.values():
+            btn.disabled = False
 
     def _finish_order_and_advance(self):
         """현재 주문 완료 처리 후 다음 주문으로 자동 진행"""
@@ -582,6 +593,8 @@ class WarehouseGUI(MDBoxLayout):
             pass
 
     def show_all_done_dialog(self):
+        self._hide_next_button()
+        self._unlock_all_users()
         self.clear_grid()
         self.grid_label.text = '모든 주문 완료!'
         self.status_label.text = f'사용자{self.selected_user_id}  |  작업 완료'

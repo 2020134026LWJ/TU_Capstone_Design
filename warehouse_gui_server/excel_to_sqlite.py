@@ -105,8 +105,9 @@ def main():
     conn = create_database('warehouse.db')
     
     # 2. Excel 데이터 임포트
-    # import_from_excel(conn, '데이터_베이스.xlsx')
-    import_from_excel(conn, '../webots_simulation/Database/데이터 베이스.xlsx')
+    # 재고 마스터 xlsx — 이 스크립트와 같은 폴더(warehouse_gui_server/)에 위치.
+    # (옛 ../webots_simulation/Database/ 경로는 archive/server_Database_old/ 로 이동됨)
+    import_from_excel(conn, '데이터 베이스.xlsx')
     
     # 3. 데이터 검증
     verify_data(conn)

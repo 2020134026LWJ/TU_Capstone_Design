@@ -47,6 +47,15 @@ class WarehouseServer:
         # {user_id: "1-1"} — 이 선반이 완료되기 전엔 다른 선반 호출 금지
         self.active_shelf = {}
 
+        # 사용자별 현재 작업대 번호 (order/start로 수신, shelf_arrived 전송 시 사용)
+        # {user_id: workstation_id} — 작업대-파이 고정, 사용자는 가변
+        self.user_workstation = {}
+
+        # 사용자별 점유 작업대 (다른 작업대에서 동일 사용자 동시 선택 방지)
+        # order/start에 등록, order/complete에 해제 (주문 1건 완료마다)
+        # {user_id: workstation_id}
+        self.user_busy = {}
+
         # DB 연결 풀 (스레드 안전)
         self.db_lock = threading.Lock()
 
@@ -119,6 +128,10 @@ class WarehouseServer:
                 'status': 'success',
                 '사용자ID': user_id,
                 '현재주문번호': current_order,
+                # 현재 작업 중(미완료)인 선반 — GUI 전환 시 활성 셀 복원용
+                '활성선반': self.active_shelf.get(user_id),
+                # 이 사용자를 점유 중인 작업대 (다른 작업대면 GUI가 선택 거부)
+                '점유작업대': self.user_busy.get(user_id),
             }), 200
 
         @self.app.route('/api/inventory/status', methods=['GET'])
@@ -182,8 +195,14 @@ class WarehouseServer:
         """주문 시작 처리 - 가상 차감(reserved)으로 이중 피킹 방지 + 선반 목록 준비"""
         user_id = data.get('사용자ID')
         order_number = data.get('주문번호')
+        workstation = data.get('작업대')
 
-        print(f"🚀 주문 시작: 사용자{user_id}, 주문번호{order_number}")
+        # 작업대 기억 (shelf_arrived 전송 시 어느 작업대로 보낼지에 사용)
+        if workstation is not None:
+            self.user_workstation[user_id] = workstation
+            self.user_busy[user_id] = workstation  # 점유 등록 (다른 작업대 동시 선택 차단)
+
+        print(f"🚀 주문 시작: 사용자{user_id}, 주문번호{order_number}, 작업대{workstation}")
 
         # 이전 주문의 남은 예약 해제 (정상 흐름에선 이미 0이지만 안전 처리)
         self.release_reservation(user_id)
@@ -425,7 +444,10 @@ class WarehouseServer:
         user_id = data.get('사용자ID')
         order_number = data.get('주문번호')
         print(f"🎉 주문 완료: 사용자{user_id}, 주문번호{order_number}")
-        
+
+        # 주문 1건 완료 → 점유 해제 (다른 작업대에서 이 사용자 선택 가능)
+        self.user_busy.pop(user_id, None)
+
         # 선반 목록/작업 중 선반 초기화
         if user_id in self.user_shelf_groups:
             del self.user_shelf_groups[user_id]
@@ -443,6 +465,7 @@ class WarehouseServer:
         if user_id in self.current_orders:
             del self.current_orders[user_id]
         self.active_shelf.pop(user_id, None)
+        self.user_busy.pop(user_id, None)  # 전체 완료 → 점유 해제(안전)
     
     def extract_shelf_groups(self, picking_list):
         """피킹리스트에서 중복 없는 선반 그룹(구역-열) 목록 추출
@@ -464,11 +487,18 @@ class WarehouseServer:
     
     def send_shelf_arrived(self, user_id, shelf_group):
         """
-        [테스트용] 선반 도착 신호 MQTT 전송
-        → 추후 알고리즘 코드가 직접 이 메시지를 전송함
+        선반 도착 신호 MQTT 전송 (서버 콘솔 's' 명령으로 수동 호출)
+        → 추후 알고리즘 코드가 직접 이 메시지를 전송하면 이 함수는 대체됨
         """
         if not self.mqtt_client:
             print("❌ MQTT 미연결")
+            return
+
+        # 이미 모든 품목이 완료된 선반은 재호출 금지
+        # (재호출하면 active_shelf가 다시 잠기는데 완료할 셀이 없어 데드락 발생)
+        order_number = self.current_orders.get(user_id)
+        if order_number is not None and self._shelf_group_completed(user_id, order_number, shelf_group):
+            print(f"⛔ 선반 {shelf_group} 호출 거부: 이미 모든 품목이 완료된 선반입니다.")
             return
 
         # 현재 작업 중(미완료)인 선반이 있으면 다른 선반 호출 거부
@@ -478,10 +508,12 @@ class WarehouseServer:
                   f"(완료 후 호출 가능)")
             return
 
+        workstation = self.user_workstation.get(user_id)
         msg = {
             "type": "shelf_arrived",
             "사용자ID": user_id,
-            "선반번호": shelf_group
+            "선반번호": shelf_group,
+            "작업대": workstation,
         }
 
         self.mqtt_client.publish(
@@ -490,7 +522,7 @@ class WarehouseServer:
         )
         # 이 선반을 작업 중으로 표시 (완료 전까지 다른 선반 호출 차단)
         self.active_shelf[user_id] = shelf_group
-        print(f"✅ shelf_arrived 전송: 사용자{user_id}, 선반{shelf_group}")
+        print(f"✅ shelf_arrived 전송: 사용자{user_id}, 선반{shelf_group}, 작업대{workstation}")
     
     def run_test_console(self):
         """
