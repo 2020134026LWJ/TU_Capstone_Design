@@ -3,7 +3,7 @@
 실제 알고리즘 동작 검증은 별도 test_*.py에서 수행.
 """
 
-from server.robot_manager import RobotStatus
+from server.managers.robot import RobotStatus
 
 
 def test_handler_fixture_constructs(handler):

@@ -1,5 +1,5 @@
 """ReservationService 단위 테스트 (REFACTOR F Phase 2.2)."""
-from server.reservation_service import ReservationService
+from server.planning.reservation_service import ReservationService
 
 
 # ─── commit / release / is_free 기본 ───

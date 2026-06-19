@@ -15,20 +15,20 @@ import json
 import os
 from typing import Any, Dict
 
-from .config import Config
-from .path_planner import PathPlanner
-from .mqtt_client import MQTTClient
-from .robot_manager import RobotManager, RobotStatus
-from .shelf_manager import ShelfManager
-from .staging_manager import StagingManager
-from .task_manager import TaskManager
-from .db_loader import DBLoader
-from .order_optimizer import OrderOptimizer
-from .reservation_service import ReservationService
+from ..config import Config
+from ..planning.path_planner import PathPlanner
+from ..comm.mqtt_client import MQTTClient
+from ..managers.robot import RobotManager, RobotStatus
+from ..managers.shelf import ShelfManager
+from ..managers.staging import StagingManager
+from ..managers.task import TaskManager
+from ..data.db_loader import DBLoader
+from ..planning.order_optimizer import OrderOptimizer
+from ..planning.reservation_service import ReservationService
 from ._movement_mixin import MovementMixin
 from ._marker_mixin import MarkerMixin
 from ._workflow_mixin import WorkflowMixin
-from .command_queue import CommandQueue
+from ..planning.command_queue import CommandQueue
 
 
 class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
@@ -63,7 +63,8 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
 
         # DB 로더 + 작업 스케줄러
         # 협업자 GUI/서버와 동일한 주문/재고 파일 참조 (warehouse_gui_server/)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # __file__ = server/core/request_handler.py → dirname 3번 = 프로젝트 루트
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         db_dir = os.path.join(project_root, "warehouse_gui_server")
         self.db_loader = DBLoader(db_dir)
         self.task_scheduler = OrderOptimizer(self.db_loader)
@@ -78,6 +79,12 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # 포워딩된 선반의 재픽업+반납을 담당하는 로봇
         # shelf_id → rid (pick_complete 후 re-pickup 시 사용)
         self._forwarded_shelf_handlers: Dict[int, int] = {}
+
+        # B-selfguard: 이동 중(in-flight)에 들어온 재계획 요청 보류 큐.
+        # rid → (goal, is_forwarding). _plan_and_publish_move가 in-flight면 여기 등록만 하고
+        # 즉시 계획 안 함 → 마커/cmd_ack로 상태가 fresh해진 직후 _flush_pending_replan이 실행.
+        # "옛 위치(stale current_node)로 계획" 상황 자체를 구조적으로 제거 (수정 51 클래스 근절).
+        self._pending_replan: Dict[int, tuple] = {}
 
         # REFACTOR E 3.3: _blocked_robots 제거 — _is_blocked가 큐 상태로 추론
 
@@ -100,9 +107,6 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # REFACTOR F Phase 4.5.1: staging이 corridor 점유를 reservation에 이중기록
         self.staging_manager.set_reservation(self.reservation)
 
-        # 브로드캐스트 콜백 (WebSocketHandler에서 설정)
-        self._broadcast_callback = None
-
         # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터
         self._refactor_f_counters: Dict[str, int] = {
             'lookahead_replan': 0,
@@ -111,15 +115,6 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
             'goal_lock': 0,
             'staging_cascade': 0,
         }
-
-    def set_broadcast_callback(self, callback):
-        """WebSocket 브로드캐스트 콜백 설정"""
-        self._broadcast_callback = callback
-
-    async def _broadcast(self, message: dict):
-        """브로드캐스트 헬퍼"""
-        if self._broadcast_callback:
-            await self._broadcast_callback(message)
 
     # ─── 메시지 라우터 ───
 

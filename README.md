@@ -215,8 +215,8 @@ TU_Capstone_Design/
 |------|------|
 | [`FLOWCHART.md`](FLOWCHART.md) | 알고리즘 플로우차트 + 수정 이력 (설계 단일 진실) |
 | [`server/README.md`](server/README.md) | 서버 진입점 안내 + 모듈 구조 |
-| [`server/DISPATCH_FLOW.md`](server/DISPATCH_FLOW.md) | 주문→cmd 발행 디스패치 흐름 (한글) |
-| [`server/REFACTOR_F.md`](server/REFACTOR_F.md) | 경로/예약 재설계(REFACTOR F) 내역 |
+| [`server/docs/DISPATCH_FLOW.md`](server/docs/DISPATCH_FLOW.md) | 주문→cmd 발행 디스패치 흐름 (한글) |
+| [`server/docs/REFACTOR_F.md`](server/docs/REFACTOR_F.md) | 경로/예약 재설계(REFACTOR F) 내역 |
 | [`isaac_simulation/README.md`](isaac_simulation/README.md) | Isaac Sim 5.1.0 시뮬레이션 상세 |
 | [`hardware/README.md`](hardware/README.md) | Bridge + Camera ABC + UART 프로토콜 |
 | [`webots_simulation/README.md`](webots_simulation/README.md) | Webots (레거시) 참조 |

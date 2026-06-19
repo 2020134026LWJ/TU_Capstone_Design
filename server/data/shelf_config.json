@@ -10,8 +10,8 @@
     "31": {"label": "2-4", "items": ["코튼 캔디", "팝핑 캔디", "껌"]}
   },
   "workstations": {
-    "33": {"label": "W1", "gateway_node": 25, "staging_node": 41, "trigger_node": 34, "user_id": 1},
-    "9":  {"label": "W2", "gateway_node": 17, "staging_node": 1,  "trigger_node": 10, "user_id": 2}
+    "33": {"label": "W1", "ws_id": 1, "gateway_node": 25, "staging_node": 41, "trigger_node": 34, "user_id": 1},
+    "9":  {"label": "W2", "ws_id": 2, "gateway_node": 17, "staging_node": 1,  "trigger_node": 10, "user_id": 2}
   },
   "shelf_node_map": {
     "1-1": 19, "1-2": 20, "1-3": 27, "1-4": 28,

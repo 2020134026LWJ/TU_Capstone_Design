@@ -17,7 +17,7 @@ try:
 except ImportError:
     PAHO_V2 = False
 
-from .config import Config
+from ..config import Config
 
 
 class MQTTClient:

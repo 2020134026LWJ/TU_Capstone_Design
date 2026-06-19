@@ -50,9 +50,9 @@ POSITION_TOLERANCE = 0.05   # m (노드 도착 판정 거리)
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 _HERE      = os.path.dirname(os.path.abspath(__file__))
 _ROOT      = os.path.join(_HERE, "..")
-MAP_PATH   = os.path.join(_ROOT, "server", "map.json")
-SHELF_PATH = os.path.join(_ROOT, "server", "shelf_config.json")
-ROBOT_PATH = os.path.join(_ROOT, "server", "robot_config.json")
+MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
+SHELF_PATH = os.path.join(_ROOT, "server", "data", "shelf_config.json")
+ROBOT_PATH = os.path.join(_ROOT, "server", "data", "robot_config.json")
 ARUCO_DIR  = os.path.join(_ROOT, "webots_simulation", "textures", "aruco_markers")
 
 with open(MAP_PATH)   as f: map_cfg   = json.load(f)

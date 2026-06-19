@@ -1,7 +1,7 @@
 """command_queue 모듈 단위 테스트 (REFACTOR E 단계 2.1)."""
 import pytest
 
-from server.command_queue import CommandEntry, CommandQueue
+from server.planning.command_queue import CommandEntry, CommandQueue
 
 
 def test_initial_state_is_idle():

@@ -13,9 +13,9 @@
 
 import pytest
 
-from server.robot_manager import RobotStatus
-from server.shelf_manager import ShelfStatus
-from server.task_manager import SubTaskType, TaskStatus
+from server.managers.robot import RobotStatus
+from server.managers.shelf import ShelfStatus
+from server.managers.task import SubTaskType, TaskStatus
 
 
 def _setup_returning_robot(handler, rid: int, shelf_id: int, src_ws: int,

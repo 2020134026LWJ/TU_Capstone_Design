@@ -1820,6 +1820,60 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 **상태**: 코드 완료, 31 pytest 통과. 협업자 통지 — push한 한 줄 자연 제거(되돌릴 필요 없음).
 
+### 수정 51: Preempt 재계획이 in-flight forward 구간 중복 → 명령 한 칸 밀림 (벽 박고 정지) (2026-06-18)
+
+> **쉽게**: forward 명령이 아직 실행 중(in-flight)인데 그 사이 preempt 재라우팅이 일어나면, 새 경로가 "이미 가고 있는 구간"의 forward를 또 큐에 넣어서 명령이 통째로 한 칸씩 밀린다. 직선 구간에선 안 보이다가 첫 회전 노드에서 turn이 유령 forward 뒤로 밀려 벽 방향 forward → 정지.
+
+- **현상**: AGV-1이 W9 corridor를 AGV-2에게 선점당해 node 29에서 staging node 1로 재라우팅. `path=[29,21,13,5,4,3,2,1]`을 받았으나 node 5(맨 윗줄)에서 `blocked → no forward target (heading=0°, node=5)` 무한 반복하며 정지.
+- **원인**: 재계획 시점에 forward(29→21)가 in-flight. `_plan_and_publish_move`가 `start=robot.current_node`(=29, 아직 출발 노드)로 계획 → 새 command_queue가 29→21 forward를 중복 포함. marker 도착마다 forward를 하나씩 당겨 쓰며 29→21→13→5 직선 구간(회전 없음)에선 어긋남이 숨다가, node 5에서 원래 나왔어야 할 `turn_left`가 유령 forward 뒤로 1칸 밀림 → 로봇이 row1에서 북쪽(벽)으로 forward 시도 → `_get_next_node_by_heading`=None → 정지. (수정 40/43이 막던 preempt-forward race의 사각지대 — `_predict_heading_after_inflight`는 in-flight **turn**만 보정, **forward**는 미처리.)
+- **수정** (`_movement_mixin.py:_plan_and_publish_move`):
+  - 함수 진입부에서 in-flight cmd가 `forward`면 그 `target_node`(로봇이 곧 실제 도착할 노드)를 `start`로 사용 → 중복 구간 제거, 명령 밀림 해소
+  - 즉시도착 단축경로(`start == actual_goal`)는 `inflight_fwd_target is None`일 때만 발화 → in-flight forward로 start를 덮은 경우 조기 도착 발화 차단(로봇이 아직 거기 없음, 곧 올 marker가 자연 처리)
+
+**수정 파일**: `server/core/_movement_mixin.py`
+
+**상태**: 51 자체는 (A)식 국소 패치(in-flight target에서 계획). 수정 52에서 이를 구조(B-selfguard)로 대체.
+
+### 수정 52: B-selfguard — "계획은 in_flight None일 때만" 단일 불변식으로 in-flight race 클래스 근절 (2026-06-18)
+
+> **쉽게**: 51을 "그때그때 막는 패치" 대신 **구조**로 바꿈. 계획·재계획은 *오직 AGV가 위치를 방금 보고한 순간(마커/cmd_ack 직후 = in_flight 비어있음)에만* 한다. 이동 중(in-flight)엔 stale한 current_node로 계획하는 일 자체가 일어나지 않게 만들어, 51 같은 "한 칸 밀림" 클래스를 통째로 제거.
+
+- **동기**: 수정 40/43/46/46.1/51이 전부 "in-flight 중 stale 상태로 결정/재계획" 같은 클래스. 매번 지점마다 가드를 *기억해서* 붙이는 방식 → 51은 preempt 지점에서 빠뜨려 터짐. "잊으면 재발"하는 규율 의존 = 구조 결함.
+- **구조 (B-selfguard)**:
+  - `_plan_and_publish_move` 진입부 self-guard: `queue.in_flight is not None`이면 계획 안 하고 `_pending_replan[rid]=(goal, is_forwarding)` 등록 후 즉시 return. → **이 함수를 *누가 직접 부르든* 자동 안전** (15개 호출지점 무수정으로 전부 커버)
+  - `_flush_pending_replan(rid)`: in_flight이 막 비워진 순간(마커 도착 / turn cmd_ack 직후)에 호출. 보류분 있으면 *지금* 계획 — 이 시점 current_node는 AGV가 방금 보고한 실제 위치라 stale 불가. 옛 plan 폐기, 호출자는 옛 경로 기반 후속 로직 skip.
+  - flush 지점 2곳: `_marker_mixin._handle_marker_report`(forward 완료, 위치 release 후) + `_handle_cmd_ack` turn 분기(heading fresh).
+  - **tripwire**: `_plan_and_publish_move` A* 직전 `assert queue.in_flight is None` — 미래에 가드를 제거/우회하면 즉시 실패(조용한 stale 계획 차단).
+- **정리**: 수정 51의 (A)식 `inflight_fwd_target` 블록 + immediate-arrival 가드 + `_predict_heading_after_inflight`(43) **모두 제거** — self-guard가 in_flight None을 보장해 in-flight heading/위치 예측이 불필요(dead). planning_heading = robot.heading 직접.
+- **경계 (정직)**: ① *이 클래스*(이동 중 stale 계획 → 명령 밀림)만 구조 제거. A* 로직/교착/GUI/마커 오보고/메시지 유실 멈춤은 별개. ② irreducible 잔여 = 누가 이 함수 안 거치고 raw 필드 읽는 *새 planner를 작정하고* 작성 → copy-paste 실수론 안 생기고 tripwire+테스트가 잡음. ③ 인터셉트(46.1)는 자체 가드(in-flight면 PENDING 유지+재시도)로 이미 "stale 결정 안 함" 충족 — 별 메커니즘이나 B-correct. 완전 단일통로 통합은 후속(cosmetic).
+
+**수정 파일**: `server/core/_movement_mixin.py`, `server/core/_marker_mixin.py`, `server/core/request_handler.py`, `tests/test_selfguard.py`(신규)
+
+**상태**: 코드 완료, 62 pytest 통과(신규 selfguard 3). ⚠️ **시뮬 재검증 필수** — W9 선점→AGV-1 staging 우회 + 포워딩/인터셉트 4 시나리오. 별도 브랜치 권장.
+
+---
+
+### 수정 53: 작업대-사용자 디커플링 — GUI `작업대` 필드를 진실로 사용 (2026-06-19)
+
+> **쉽게**: 지금까지 서버는 "사용자1=무조건 작업대1(W1/33), 사용자2=무조건 작업대2(W2/9)"로 **user_id에서 작업대를 역산**했다. 협업자 GUI가 작업대-파이 고정(파이1=작업대1) + 사용자 가변 구조로 바뀌어 모든 메시지에 `작업대` 필드를 실어 보내므로, 서버도 **그 필드를 작업대의 진실로** 사용하도록 디커플링. 사용자가 어느 파이에 앉든 선반이 정확한 작업대로 간다.
+
+- **동기**: 사용자가 작업대를 바꿔 앉을 수 있는데(파이는 고정, 사용자 가변) 서버가 user_id로 작업대를 역산하면 어긋남. GUI는 이미 `작업대`(1/2)로 `shelf/arrived`를 매칭(`warehouse_gui_v2.py:229-231`).
+- **번호 체계 차이**: GUI/협업자 메시지의 `작업대` = **1/2**(파이 번호), 서버 내부 `ws_node` = **33/9**(맵 노드). 양방향 변환 필요.
+- **변경**:
+  - `data/shelf_config.json`: workstations에 `"ws_id": 1`(33) / `"ws_id": 2`(9) 추가 — 변환 근거.
+  - `managers/shelf.py`: `_ws_id_to_node` 맵 빌드 + `ws_id_to_node(1/2→33/9)` / `node_to_ws_id(33/9→1/2)` 헬퍼.
+  - `main.py`: start_order·shelf_complete 콜백이 `작업대` 필드를 통과시킴(기존엔 입구에서 버림).
+  - `core/_workflow_mixin.py`:
+    - `_handle_start_order`: `workstation_id`를 `작업대`→node 우선, 없으면 schedule(user_id 역산) 폴백.
+    - `_handle_shelf_complete`: `작업대`→node 우선, 없으면 user_id 역산 폴백.
+    - `_enter_wait_picking`: `shelf/arrived`에 `작업대`(node→ws_id) 추가 — GUI primary 매칭 키. `사용자ID`는 폴백용 유지.
+- **폴백 유지**: `작업대` 없는 옛 메시지(mqtt_test.py 등)는 기존 user_id 역산으로 동작 → 회귀 0.
+- **남은 것**: `db_loader.py:98`의 `33 if user_id==1 else 9`는 폴백 경로에서만 쓰임(start_order가 작업대로 override). 정리 선택사항.
+
+**수정 파일**: `server/data/shelf_config.json`, `server/managers/shelf.py`, `server/main.py`, `server/core/_workflow_mixin.py`
+
+**상태**: 코드 완료, 62 pytest 통과(회귀 0). ⚠️ **시뮬 검증 필요** — 사용자를 반대 작업대 파이에 앉혀 선반이 그 작업대로 가는지 + 일반 동작 회귀.
+
 ---
 
 ## Isaac Sim 이전 이력

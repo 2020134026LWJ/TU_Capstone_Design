@@ -52,6 +52,7 @@ class ShelfManager:
         self.item_to_shelf: Dict[str, int] = {}      # item_name -> shelf_id
         self.all_shelf_nodes: Set[int] = set()        # 모든 선반 노드 ID
         self.workstations: Dict[int, Dict] = {}       # ws_node -> config
+        self._ws_id_to_node: Dict[int, int] = {}      # 작업대번호(1/2) -> ws_node(33/9)
         self._load_config()
 
     def _load_config(self) -> None:
@@ -76,7 +77,11 @@ class ShelfManager:
                     self.item_to_shelf[item] = shelf_id
 
             for ws_id_str, ws_info in data.get("workstations", {}).items():
-                self.workstations[int(ws_id_str)] = ws_info
+                ws_node = int(ws_id_str)
+                self.workstations[ws_node] = ws_info
+                # 작업대번호(1/2) -> 노드(33/9): GUI 메시지의 '작업대' 필드 변환용
+                if "ws_id" in ws_info:
+                    self._ws_id_to_node[int(ws_info["ws_id"])] = ws_node
 
             print(f"[ShelfManager] Loaded {len(self.shelves)} shelves, "
                   f"{len(self.item_to_shelf)} items, "
@@ -147,6 +152,16 @@ class ShelfManager:
         shelf.carried_by = None
         print(f"[ShelfManager] Shelf {shelf.label} returned to node {return_node}")
         return True
+
+    def ws_id_to_node(self, ws_id) -> Optional[int]:
+        """GUI 메시지의 작업대번호(1/2) → 맵 노드(33/9). 미지정/미존재 시 None."""
+        if ws_id is None:
+            return None
+        return self._ws_id_to_node.get(int(ws_id))
+
+    def node_to_ws_id(self, ws_node: int) -> Optional[int]:
+        """맵 노드(33/9) → GUI 작업대번호(1/2). GUI 도착 통지(arrived) 발행용."""
+        return self.workstations.get(ws_node, {}).get("ws_id")
 
     def get_shelf_at_ws(self, ws_node: int) -> Optional[int]:
         """해당 작업대 노드에 AT_WORKSTATION 상태인 선반 ID 반환"""

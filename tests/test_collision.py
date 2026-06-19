@@ -10,7 +10,7 @@ cmd-based 충돌 회피 회귀 테스트.
 
 import pytest
 
-from server.command_queue import CommandEntry
+from server.planning.command_queue import CommandEntry
 
 
 def _ready_robot(handler, rid: int, node: int, heading: int):

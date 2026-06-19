@@ -16,12 +16,14 @@ self 상태 접근:
   ── 핵심 발행 ──
   _plan_and_publish_move     [핵심] should_stage(STG) → A*(reservation) → cmd 큐 생성 → 발행
                              ★ staging_node transit 제외(4.5.6) = staging 교착 예방
+                             ★ B-selfguard: in-flight면 _pending_replan 보류 후 return
+                               (계획은 in_flight None일 때만 — stale 위치 계획 구조적 차단)
   _send_next_command         큐 head cmd 발행 (forward 전 충돌 체크 포함)
   _try_dispatch_all          blocked 로봇 재시도 (blocker 이탈 시 진행 — 반응형 해제 없음)
   ── 경로 / 명령 변환 ──
   _path_to_commands          노드 경로 → forward/turn 명령 리스트 (turn 최소화)
   _get_next_node_by_heading  현재 heading 기준 다음 노드
-  _predict_heading_after_inflight  in-flight turn 반영한 예측 heading (race 방지)
+  _flush_pending_replan      B-selfguard: 보류된 재계획을 fresh 시점(마커/ack)에 실행
   _replan_for_placed_shelf   선반 배치 후 그 노드 경유 로봇 재계획
   ── 큐/예약/상태 추론 (REFACTOR E) ──
   _is_blocked                cmd 남았는데 in_flight 없음 = dispatch 보류 추론
@@ -34,10 +36,10 @@ self 상태 접근:
 
 from typing import Dict, List, Optional, Set, Tuple
 
-from .path_planner import PathPlanner
-from .robot_manager import RobotStatus
-from .shelf_manager import ShelfStatus
-from .command_queue import CommandEntry  # REFACTOR E 2.3
+from ..planning.path_planner import PathPlanner
+from ..managers.robot import RobotStatus
+from ..managers.shelf import ShelfStatus
+from ..planning.command_queue import CommandEntry  # REFACTOR E 2.3
 
 
 class MovementMixin:
@@ -102,6 +104,27 @@ class MovementMixin:
         for rid in sorted(self.command_queues.keys()):
             if self._is_blocked(rid):
                 self._send_next_command(rid)
+
+    def _flush_pending_replan(self, rid: int) -> bool:
+        """B-selfguard: 보류된 재계획을 상태가 fresh한 순간(마커/cmd_ack 직후)에 실행.
+
+        in_flight이 방금 비워진 직후 호출. 보류분이 있으면 *이제* 계획한다 —
+        이 시점 robot.current_node는 AGV가 방금 보고한 실제 위치라 stale일 수 없다.
+        옛 plan은 폐기되므로, 호출자는 True를 받으면 옛 경로 기반 후속 처리를 건너뛴다.
+
+        Returns:
+            True: 보류분 있어 재계획 실행 / False: 보류분 없음
+        """
+        if rid not in self._pending_replan:
+            return False
+        goal, is_forwarding = self._pending_replan.pop(rid)
+        robot = self.robot_manager.get_robot(rid)
+        if robot is None:
+            return False
+        self._plan_and_publish_move(
+            rid, robot.current_node, goal, is_forwarding=is_forwarding
+        )
+        return True
 
     # ─── 큐 기반 노드 예약 조회 (REFACTOR E 3.1) ───
 
@@ -253,21 +276,8 @@ class MovementMixin:
         self.mqtt_publisher.publish_cmd(rid, next_cmd)
         return True
 
-    def _predict_heading_after_inflight(self, rid: int) -> Optional[int]:
-        """in-flight turn cmd의 효과를 미리 적용한 예측 heading 반환 (REFACTOR E 3.2).
-
-        turn cmd 발행 후 cmd_ack 도착 전에 새 경로를 만들면 robot.heading이 옛 값이라
-        path/commands 생성이 stale heading 기준으로 어긋남. CommandEntry.expected_heading
-        으로 보정. ack 도착 시 ground truth로 자동 덮어쓰임.
-        """
-        robot = self.robot_manager.get_robot(rid)
-        if not robot:
-            return None
-        queue = self.command_queues.get(rid)
-        if queue is not None and queue.in_flight is not None:
-            if queue.in_flight.expected_heading is not None:
-                return queue.in_flight.expected_heading
-        return robot.heading
+    # _predict_heading_after_inflight 제거 (B-selfguard): 계획은 in_flight None일 때만
+    # 일어나므로 robot.heading이 항상 ground-truth. in-flight heading 예측 불필요.
 
     def _get_next_node_by_heading(self, rid: int) -> Optional[int]:
         """현재 heading 방향으로 한 칸 이동 시 도착할 노드"""
@@ -307,6 +317,16 @@ class MovementMixin:
             is_forwarding: True면 staging 시 corridor 밖 staging_node 대신
                            진입 경로 위 gateway_node에서 대기 (선반 들고 멀리 우회 방지)
         """
+        # ── B-selfguard: 이동 중(in-flight)이면 지금 계획하지 않고 보류 ──
+        # 핵심 불변식: 계획은 오직 상태가 fresh한 순간(마커/cmd_ack 직후 = in_flight None)에만
+        # 한다. in-flight면 robot.current_node가 stale(아직 다음 노드 미도착)이라 거기서 계획하면
+        # 명령이 한 칸 밀린다(수정 51). → 여기서 막고 _pending_replan에 등록 → 다음 마커/ack 때
+        # _flush_pending_replan이 fresh 상태로 실행. 이 함수를 *누가 직접 부르든* 자동으로 안전.
+        queue = self.command_queues.get(rid)
+        if queue is not None and queue.in_flight is not None:
+            self._pending_replan[rid] = (goal, is_forwarding)
+            return None
+
         # Point A: 작업대 스테이징 체크
         # [DEMO MODE] DEMO_MODE=True이면 스테이징 완전 비활성화 → 바로 작업대 진입
         actual_goal = goal
@@ -322,6 +342,7 @@ class MovementMixin:
                 self.staging_manager.add_staged_agv(goal, rid, staging_node)
 
         # 이미 목적지에 있으면 즉시 도착 처리
+        # (B-selfguard 통과 = in_flight None = robot이 실제로 이 노드에 정지해 있음)
         if start == actual_goal:
             print(f"[RequestHandler] Robot {rid}: already at goal {actual_goal}, immediate arrival")
             self._handle_marker_report({
@@ -382,9 +403,17 @@ class MovementMixin:
         if not excluded_transit:
             excluded_transit = None
 
+        # B-selfguard 불변식 tripwire: 여기 도달 = in_flight None 이어야 함.
+        # 누가 위 가드를 제거/우회해 in-flight 중 계획에 진입하면 즉시 실패시켜
+        # stale 위치 기반 계획(수정 51 클래스)을 조용히 넘기지 않는다.
+        assert queue is None or queue.in_flight is None, (
+            f"B-selfguard 위반: rid={rid} in-flight 중 계획 시도 — "
+            f"_plan_and_publish_move를 직접 호출하지 말 것"
+        )
+
         # A* 경로 계획 (reservation 기반 시공간 충돌 회피)
-        # in-flight turn cmd 효과 반영한 예측 heading 사용 (race 방지)
-        planning_heading = self._predict_heading_after_inflight(rid) if robot else None
+        # in_flight None이 보장되므로 robot.heading이 곧 ground-truth (예측 불필요)
+        planning_heading = robot.heading if robot else None
         timed_path = self.path_planner.astar_with_time(
             start=start,
             goal=actual_goal,

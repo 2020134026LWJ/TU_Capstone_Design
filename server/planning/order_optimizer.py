@@ -13,7 +13,7 @@
 import os
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from .db_loader import DBLoader
+from ..data.db_loader import DBLoader
 
 
 @dataclass
@@ -267,9 +267,11 @@ class OrderOptimizer:
 # 테스트용 실행
 if __name__ == "__main__":
     import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # __file__ = server/planning/order_optimizer.py → dirname 3번 = 프로젝트 루트
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, project_root)
 
-    db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Database")
+    db_dir = os.path.join(project_root, "warehouse_gui_server")
     db_loader = DBLoader(db_dir)
     scheduler = OrderOptimizer(db_loader)
 

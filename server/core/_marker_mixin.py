@@ -23,7 +23,7 @@ self 상태 접근:
 
 from typing import Any, Dict
 
-from .robot_manager import RobotStatus
+from ..managers.robot import RobotStatus
 
 
 class MarkerMixin:
@@ -131,6 +131,14 @@ class MarkerMixin:
         released = self.staging_manager.check_position_release(rid, node)
         self._dispatch_released_agv(released)
 
+        # B-selfguard flush: forward 완료로 in_flight 비워졌고 위치가 fresh →
+        # 이동 중 보류됐던 재계획을 *지금* 실행. 옛 plan은 폐기되므로 아래 staging/도착/
+        # continue 로직(전부 옛 경로 기준)은 건너뛴다.
+        if self._flush_pending_replan(rid):
+            self._try_dispatch_all()
+            self._try_assign_pending_tasks()
+            return {"type": "marker_ack", "success": True, "action": "pending_replan_flushed"}
+
         # 포워딩으로 미리 해제된 로봇이 스테이징 노드 도착
         # 또는 이동 중인데 corridor가 본인 owned/FREE 상태가 되면 즉시 직진 replan (우회 회피)
         if rid in self._staged_to_ws:
@@ -236,7 +244,10 @@ class MarkerMixin:
         # (return-home 등 태스크 없는 이동 중에도 heading을 정확히 유지해야 함)
         if cmd in ("turn_left", "turn_right", "turn_180"):
             self.robot_manager.apply_turn(robot.rid, cmd)
-            self._send_next_command(robot.rid)
+            # B-selfguard flush: turn 완료로 heading fresh → 보류 재계획 우선 실행.
+            # 보류분이 있으면 옛 큐의 다음 명령 대신 새 plan을 발행(옛 경로 폐기).
+            if not self._flush_pending_replan(robot.rid):
+                self._send_next_command(robot.rid)
             self._try_dispatch_all()
             return {"type": "cmd_ack_response", "success": True, "action": f"turned_{cmd}"}
 

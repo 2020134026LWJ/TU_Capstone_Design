@@ -12,8 +12,8 @@ from typing import Set, Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from .config import Config
-from .request_handler import RequestHandler
+from ..config import Config
+from ..core.request_handler import RequestHandler
 
 
 class WebSocketHandler:

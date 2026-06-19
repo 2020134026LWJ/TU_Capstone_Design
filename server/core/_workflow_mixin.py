@@ -40,9 +40,9 @@ self 상태 접근:
 import json
 from typing import Any, Dict, List, Optional, Set
 
-from .robot_manager import RobotStatus
-from .shelf_manager import ShelfStatus
-from .task_manager import SubTaskType, TaskStatus
+from ..managers.robot import RobotStatus
+from ..managers.shelf import ShelfStatus
+from ..managers.task import SubTaskType, TaskStatus
 
 
 class WorkflowMixin:
@@ -74,7 +74,10 @@ class WorkflowMixin:
         if not schedule:
             return self._error_response(f"Order not found: user={user_id}, order={order_id}")
 
-        workstation_id = schedule["workstation"]
+        # 작업대는 GUI 메시지의 '작업대' 필드 우선 (사용자가 어느 작업대 파이에 앉았는지).
+        # 작업대-사용자 디커플링 → 사용자가 작업대를 바꿔도 정확. 없으면 user_id 역산 폴백.
+        ws_node = self.shelf_manager.ws_id_to_node(data.get("작업대"))
+        workstation_id = ws_node if ws_node is not None else schedule["workstation"]
         group_id = f"T{user_id}_{order_id}"
 
         # 선반 1개 단위로 태스크 분리 → 여러 로봇이 동시에 각 선반 처리 가능
@@ -354,6 +357,27 @@ class WorkflowMixin:
 
     # ─── 도착 / lift_up / lift_down 처리 ───
 
+    def _enter_wait_picking(self, robot, shelf_id: int, ws_node: int) -> None:
+        """FLOWCHART 'PICK' 노드: 선반이 작업대에 도착해 피킹 대기 진입.
+
+        일반 배달(_process_arrival)과 포워딩(_handle_putdown_ack) 두 경로가 공유한다.
+        부수효과(상태 전이 + PENDING 재배정 + GUI 셀 활성)를 한 곳에 모아,
+        경로별로 한쪽만 빠뜨리는 분기 누락을 구조적으로 차단한다 (플로우차트 PICK 노드 1:1 대응).
+        user_id는 task 소유자가 아니라 선반이 놓인 WS(ws_node) 기준 — 포워딩 시 둘이 다르다.
+        """
+        self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
+        # CARRIED → AT_WORKSTATION 전환 → 이 선반을 기다리던 PENDING 태스크 재배정
+        self._try_assign_pending_tasks()
+        # GUI 셀 활성(파란색) 알림 — GUI는 '작업대'로 매칭(파이 고정), 사용자ID는 폴백
+        user_id = self.shelf_manager.workstations.get(ws_node, {}).get("user_id")
+        ws_id = self.shelf_manager.node_to_ws_id(ws_node)
+        shelf_label = self.shelf_manager.shelves[shelf_id].label
+        self.mqtt_publisher.client.publish(
+            "warehouse/shelf/arrived",
+            json.dumps({"작업대": ws_id, "사용자ID": user_id, "선반번호": shelf_label},
+                       ensure_ascii=False)
+        )
+
     def _process_arrival(self, robot, task, current_st) -> Dict[str, Any]:
         """로봇 도착 후 서브태스크 유형에 따라 처리"""
 
@@ -389,16 +413,8 @@ class WorkflowMixin:
             next_st = task.get_current_subtask()
 
             if next_st and next_st.subtask_type == SubTaskType.WAIT_PICKING:
-                self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
-                # 선반이 CARRIED → AT_WORKSTATION 전환 → PENDING 태스크 재배정 시도
-                self._try_assign_pending_tasks()
-                # GUI에 AGV 도착 알림 (warehouse/shelf/arrived)
-                user_id = int(task.task_id.split("_")[0][1:])
-                shelf_label = self.shelf_manager.shelves[next_st.shelf_id].label
-                self.mqtt_publisher.client.publish(
-                    "warehouse/shelf/arrived",
-                    json.dumps({"사용자ID": user_id, "선반번호": shelf_label}, ensure_ascii=False)
-                )
+                # FLOWCHART PICK 노드 (일반 배달 경로)
+                self._enter_wait_picking(robot, next_st.shelf_id, current_st.target_node)
                 return {
                     "type": "robot_arrived_ack",
                     "success": True,
@@ -509,6 +525,9 @@ class WorkflowMixin:
                     self._plan_and_publish_move(
                         robot.rid, robot.current_node, next_st.target_node
                     )
+                    # 선반 반납(IN_PLACE 전환) → 그 선반 기다리던 PENDING 재배정
+                    # (FORWARD GO_TO_SHELF 분기와 대칭 — 수정 7의 거울)
+                    self._try_assign_pending_tasks()
                     return {
                         "type": "cmd_ack_response",
                         "success": True,
@@ -570,10 +589,8 @@ class WorkflowMixin:
             elif result.get("action") == "next_subtask":
                 next_st = task.get_current_subtask()
                 if next_st and next_st.subtask_type == SubTaskType.WAIT_PICKING:
-                    # ★ 포워딩 후 목적지 WS에서 T2 아이템 픽업 대기
-                    self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
-                    # AT_WORKSTATION 전환 후 PENDING 태스크 재배정 시도
-                    self._try_assign_pending_tasks()
+                    # ★ 포워딩 후 목적지 WS에서 T2 아이템 픽업 대기 (동일 PICK 노드)
+                    self._enter_wait_picking(robot, shelf_id, dest_ws)
                     return {
                         "type": "cmd_ack_response",
                         "success": True,
@@ -614,15 +631,18 @@ class WorkflowMixin:
         if user_id is None:
             return self._error_response("Missing '사용자ID'")
 
-        # user_id → WS 노드: shelf_config의 user_id 필드 기준
-        # (robot.home_node와 무관 — 교착 회피로 AGV home이 WS와 스왑돼 있을 수 있음)
-        ws_node = next(
-            (node for node, info in self.shelf_manager.workstations.items()
-             if info.get("user_id") == user_id),
-            None,
-        )
+        # WS 노드: GUI 메시지의 '작업대' 필드 우선 (작업대-사용자 디커플링).
+        # 없으면 user_id 역산 폴백(옛 메시지 호환).
+        ws_node = self.shelf_manager.ws_id_to_node(data.get("작업대"))
         if ws_node is None:
-            return self._error_response(f"Unknown user {user_id}")
+            ws_node = next(
+                (node for node, info in self.shelf_manager.workstations.items()
+                 if info.get("user_id") == user_id),
+                None,
+            )
+        if ws_node is None:
+            return self._error_response(
+                f"Unknown workstation (user {user_id}, 작업대 {data.get('작업대')})")
 
         # 해당 WS에 AT_WORKSTATION인 선반 자동 탐색
         shelf_id = self.shelf_manager.get_shelf_at_ws(ws_node)

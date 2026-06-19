@@ -23,12 +23,12 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from server.config import Config
-from server.path_planner import PathPlanner
-from server.robot_manager import RobotManager
-from server.shelf_manager import ShelfManager
-from server.staging_manager import StagingManager
-from server.task_manager import TaskManager
-from server.request_handler import RequestHandler
+from server.planning.path_planner import PathPlanner
+from server.managers.robot import RobotManager
+from server.managers.shelf import ShelfManager
+from server.managers.staging import StagingManager
+from server.managers.task import TaskManager
+from server.core.request_handler import RequestHandler
 
 
 # ─── Mock MQTT ────────────────────────────────────────────────
