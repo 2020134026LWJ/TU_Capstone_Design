@@ -1876,6 +1876,26 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 ---
 
+### 수정 54: 일반 교착(wait-for 사이클) 반응형 해소 — 예방 실패 시 매 주행 backstop (2026-06-21)
+
+> **쉽게**: 두 AGV가 같은 회랑에서 서로 마주보고 가려다 둘 다 멈춰 영구 freeze 되는 일이 시뮬에서 관찰됨. REFACTOR F는 "예약으로 교착을 *예방*하니 반응형 해제는 불필요"로 `_resolve_deadlock`을 제거했는데, 예약은 노드에서만 동기되므로 비동기 실행(회전=실시간 추가) 드리프트를 못 막는 구멍이 있었다. **예약으로 전부 막는 건 원리적으로 불가** → 예방(1차) + 교착 감지·해소(2차)의 표준 2층 구조로. 매 주행마다 "기다림의 순환"을 보고, 있으면 한쪽을 bypass로 우회시켜 푼다.
+
+- **현상 (시뮬 로그)**: AGV-1 반납 `[…,11,12,13,14,15,23]`(row2 우향) + AGV-2 배달 `[…,13,12,11,10,9]`(row2 좌향) 정면 충돌. `Robot 1: blocked → node 13` / `Robot 2: blocked → node 12` 반복 후 침묵 → 시뮬 멈춤.
+- **근본 원인 (예방 실패)**: 시공간 예약은 **노드 hop = 시간** 축(`astar_with_time`은 회전을 비용만, 시간은 이동 시에만 +1). 매 plan마다 모든 로봇 t=0을 "지금"으로 리셋하고 *완벽한 lockstep 전진* 가정. 실제 AGV는 회전 step이 실시간 더 걸려(MQTT 왕복 2회) 비동기로 어긋남. `dwell=1`은 ±1 step만 흡수 → 회전 수 다른 두 경로가 마주보면 "안전" 오판 → head-on 통과. (동기화가 노드에서만 일어나는 한 예약만으론 못 막음.)
+- **근본 원인 (복구 없음)**: `_try_dispatch_all`은 막힌 로봇 재시도만. 교착은 전원이 멈춰 새 marker/ack가 안 와 재시도조차 안 불림 → 영구 freeze.
+- **수정 — 감지(도구) / 해소(core) 분리, layering 준수**:
+  - **감지 = 순수 도구** `planning/deadlock_detector.py::find_wait_cycle(wait_for)`. wait-for 그래프(rid → 가려는 노드를 점유한 상대)는 각 로봇 다음 노드가 하나뿐이라 **out-degree ≤ 1 (functional graph)** → 화살표 따라가다 본 노드 재방문 = 사이클. 사이클 = 서로 영구히 막힌 집합 = 확정 교착. (2대 head-on=길이2, 2×2 사각 회전 교착=길이4의 특수 케이스. 일반 N대 커버.) 점유자가 안 막혀있으면(곧 떠남) 체인이 끊겨 사이클 미형성 → **오발 없음**.
+  - **해소 = core** `_movement_mixin._resolve_deadlock(cycle)`: 사이클은 링크 하나만 끊으면 사슬로 풀림 → **전원 동시 재계획 불필요(재교착 위험)**. 멤버 1명(양보자, 낮은 rid부터; A* 실패 시 다음)을 현재→목표로 재계획하되 그가 가려던 노드(contested)를 `extra_excluded`로 → A*가 **row1/row6 bypass로 우회**(8×6 메시는 모든 열 세로 간선+상하 bypass라 항상 우회로 존재). 양보자가 자기 노드를 비우면 뒤 로봇 전진, 나머지는 `_try_dispatch_all` 재시도로 자연 unwind.
+  - **매 주행 통합**: `_try_dispatch_all`(마커·cmd_ack마다 호출) 재시도 루프 끝에서 `_detect_deadlock_cycle`(wait_for 빌드 + 도구 위임) → 사이클 있으면 `_resolve_deadlock`. = 예약 도구처럼 "매 주행마다 참조하는 계산기" 패턴.
+  - `_plan_and_publish_move(..., extra_excluded)`: 옵션 파라미터 1개(excluded_transit 병합, start/goal 제외). `_robot_at(node)` 헬퍼 추가.
+- **범위 (정직)**: 예방(예약)은 1차 방어로 그대로. backstop은 예약이 못 잡는 교착만 처리. REFACTOR F가 지운 `_resolve_deadlock`을 **사이클 기반 일반 교착**으로 부활(staging yield 전체 복원 아님 — 사이클 감지가 그 케이스도 포함). ⚠️ 한계: A* 우회로 없는 막다른 단일 차선 gridlock은 후진 협조 필요(현 맵엔 해당 없음).
+
+**수정 파일**: `server/planning/deadlock_detector.py`(신규), `server/core/_movement_mixin.py`, `tests/test_headon.py`(신규), `tests/test_deadlock_detector.py`(신규)
+
+**상태**: 코드 완료, 76 pytest 통과(교착 감지/해소 14: head-on·4대 회전·체인 오발방지·우회·순수 사이클). ⚠️ **시뮬 검증 필요** — 동시 배달로 row2 head-on 유발 후 한쪽이 bypass로 우회해 풀리는지 + 일반 동작 회귀.
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
