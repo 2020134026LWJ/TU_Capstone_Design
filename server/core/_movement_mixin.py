@@ -37,6 +37,7 @@ self 상태 접근:
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..planning.path_planner import PathPlanner
+from ..planning.deadlock_detector import find_wait_cycle  # 수정 54: 교착 감지 도구
 from ..managers.robot import RobotStatus
 from ..managers.shelf import ShelfStatus
 from ..planning.command_queue import CommandEntry  # REFACTOR E 2.3
@@ -98,12 +99,70 @@ class MovementMixin:
         """REFACTOR E 3.3 / F 4.5.6: blocked robot dispatch 재시도. ACK 도착 시점마다 호출.
 
         blocker가 떠나면 다음 호출에서 진행. 교착은 plan 시점 예약(I1/I2) +
-        staging_node transit 제외(4.5.6 Step 1)로 *예방*되므로 반응형 해제
-        (_resolve_deadlock)는 불필요 — 막히면 제자리 대기, blocker 이탈 시 자연 진행.
+        staging_node transit 제외(4.5.6 Step 1)로 *예방*되므로 대부분 반응형 해제 불필요.
+        예외(수정 54): 예약의 lockstep 가정이 비동기 실행(회전=실시간 추가)으로 깨질 때
+        예방이 못 잡는 교착이 남는다 → 매 주행마다 wait-for 사이클을 감지해 한쪽을 우회.
         """
         for rid in sorted(self.command_queues.keys()):
             if self._is_blocked(rid):
                 self._send_next_command(rid)
+        # 수정 54: 재시도 후에도 남은 wait-for 사이클(일반 교착)이면 backstop 해소
+        cycle = self._detect_deadlock_cycle()
+        if cycle is not None:
+            self._resolve_deadlock(cycle)
+
+    def _robot_at(self, node: Optional[int]) -> Optional[int]:
+        """node에 현재 정지/위치한 로봇 rid (없으면 None)."""
+        if node is None:
+            return None
+        for rid, robot in self.robot_manager.robots.items():
+            if robot.current_node == node:
+                return rid
+        return None
+
+    def _detect_deadlock_cycle(self) -> Optional[List[int]]:
+        """일반 교착(wait-for 사이클) 감지 (수정 54).
+
+        로봇 상태에서 wait_for 맵(rid → 가려는 노드를 점유한 상대)을 만들고,
+        순수 사이클 찾기는 planning.deadlock_detector.find_wait_cycle에 위임
+        (layering: 감지=도구, 해소=core). 막힌(_is_blocked) + 다음 cmd가 forward인
+        로봇만 대상 — turn 대기 중이면 아직 노드 점유 경쟁 아님.
+        """
+        wait_for: Dict[int, int] = {}
+        for rid, robot in self.robot_manager.robots.items():
+            if not self._is_blocked(rid):
+                continue
+            if not robot.command_queue or robot.command_queue[0] != "forward":
+                continue
+            occupier = self._robot_at(self._get_next_node_by_heading(rid))
+            if occupier is not None and occupier != rid:
+                wait_for[rid] = occupier
+        return find_wait_cycle(wait_for)
+
+    def _resolve_deadlock(self, cycle: List[int]) -> bool:
+        """교착 사이클 해소: 멤버 1명(양보자)을 contested 노드 피해 우회 재계획 (수정 54).
+
+        사이클은 링크 하나만 끊으면 사슬로 풀린다 → 전원 동시 재계획 불필요(재교착 위험).
+        양보자가 가려던 노드(contested)를 excluded_transit에 넣어 A*가 bypass(row1/row6)로
+        우회 → 양보자가 자기 현재 노드를 비우면 뒤 로봇이 전진, 나머지는 _try_dispatch_all
+        재시도로 자연 unwind. 양보자는 결정론(낮은 rid부터), A* 실패 시 다음 멤버 시도.
+        """
+        for yielder in sorted(cycle):
+            y = self.robot_manager.get_robot(yielder)
+            if not y or not y.planned_path:
+                continue
+            contested = self._get_next_node_by_heading(yielder)
+            goal = y.planned_path[-1]
+            print(f"[RequestHandler] 교착 사이클 {cycle}: AGV-{yielder} 우회 재계획 "
+                  f"(exclude={contested})")
+            res = self._plan_and_publish_move(
+                yielder, y.current_node, goal,
+                extra_excluded={contested} if contested is not None else None,
+            )
+            if res is not None:
+                return True
+        print(f"[RequestHandler] 교착 사이클 {cycle}: 우회 경로 없음 — 해소 실패")
+        return False
 
     def _flush_pending_replan(self, rid: int) -> bool:
         """B-selfguard: 보류된 재계획을 상태가 fresh한 순간(마커/cmd_ack 직후)에 실행.
@@ -309,13 +368,16 @@ class MovementMixin:
     # ─── 경로 계획 + 명령 발행 + 스테이징 체크 ───
 
     def _plan_and_publish_move(
-        self, rid: int, start: int, goal: int, is_forwarding: bool = False
+        self, rid: int, start: int, goal: int, is_forwarding: bool = False,
+        extra_excluded: Optional[Set[int]] = None,
     ) -> Optional[Dict]:
         """로봇 이동 경로 계획 → 명령 큐 생성 → 첫 명령 전송
 
         Args:
             is_forwarding: True면 staging 시 corridor 밖 staging_node 대신
                            진입 경로 위 gateway_node에서 대기 (선반 들고 멀리 우회 방지)
+            extra_excluded: A* 통과 금지 노드 추가분 (수정 54: head-on 해소 시
+                            승자 위치를 막아 우회 강제). start/goal은 자동 제외.
         """
         # ── B-selfguard: 이동 중(in-flight)이면 지금 계획하지 않고 보류 ──
         # 핵심 불변식: 계획은 오직 상태가 fresh한 순간(마커/cmd_ack 직후 = in_flight None)에만
@@ -400,6 +462,10 @@ class MovementMixin:
             sn = corridor.staging_node
             if sn != start and sn != actual_goal:
                 excluded_transit.add(sn)
+        # 수정 54: head-on 해소용 추가 제외 노드 (승자 위치 막아 우회 강제)
+        if extra_excluded:
+            excluded_transit |= {n for n in extra_excluded
+                                 if n != start and n != actual_goal}
         if not excluded_transit:
             excluded_transit = None
 
