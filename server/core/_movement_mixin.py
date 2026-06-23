@@ -137,7 +137,27 @@ class MovementMixin:
             occupier = self._robot_at(self._get_next_node_by_heading(rid))
             if occupier is not None and occupier != rid:
                 wait_for[rid] = occupier
+        # 통행권 모델: 줄 서서 기다리는 staging 로봇도 wait-for에 포함.
+        # (빈 command_queue라 위 루프가 놓침 — 이게 옛 staging 교착이 안 풀리던 구조적 결함.)
+        # staging 로봇은 자기 목표 회랑을 점유한 로봇을 기다린다.
+        for rid in self.robot_manager.robots:
+            if rid in wait_for or not self._is_staging_robot(rid):
+                continue
+            target_ws = self._staging_target_ws(rid)
+            if target_ws is None:
+                continue
+            owner = self.reservation.corridor_owner(target_ws)
+            if owner is not None and owner != rid:
+                wait_for[rid] = owner
         return find_wait_cycle(wait_for)
+
+    def _staging_target_ws(self, rid: int) -> Optional[int]:
+        """staging 큐에서 대기 중인 rid의 목표 작업대 노드 (없으면 None)."""
+        for ws_node, corridor in self.staging_manager.corridors.items():
+            for staged in corridor.queue:
+                if staged.rid == rid:
+                    return ws_node
+        return None
 
     def _resolve_deadlock(self, cycle: List[int]) -> bool:
         """교착 사이클 해소: 멤버 1명(양보자)을 contested 노드 피해 우회 재계획 (수정 54).
@@ -432,36 +452,31 @@ class MovementMixin:
         # 선반 운반 중이면 IN_PLACE 선반 노드 통과 불가
         if robot and robot.carrying_shelf is not None:
             excluded_transit |= self._get_occupied_shelf_nodes()
-        # REFACTOR F Phase 3: self.reservation을 다른 로봇 상태로 snapshot 동기화
-        # (Phase 4에서 incremental maintenance로 전환 예정)
-        # keep_indefinite=True: corridor 영구 점유(Phase 4.5)는 resync에도 살아남음
-        self.reservation.release(rid, fire_callbacks=False, keep_indefinite=True)
+        # 통행권 모델 (2026-06-23): 미래 timeline 예측 commit 제거 — 드리프트 원천 제거.
+        # 충돌은 _send_next_command의 진입 직전 점유 체크(현재노드 + in-flight 예약)가 막고,
+        # A*는 "지금" 상태만 본다 — 정지 로봇/선반은 hard 회피, 움직이는 로봇 경로는 soft 회피.
+        # corridor 점유(indefinite)는 self.reservation.is_free가 그대로 막아줌(commit과 무관).
+        soft_avoid: Set[int] = set()
         for other_rid, other in self.robot_manager.robots.items():
             if other_rid == rid:
                 continue
-            self.reservation.release(other_rid, fire_callbacks=False, keep_indefinite=True)
-            # 다른 로봇 planned_path 시공간 예약 (dwell=1: legacy +1 timing 버퍼)
-            if other.planned_path:
-                self.reservation.commit(other_rid, other.planned_path, dwell=1)
-            # 정지 상태 → 영구 장애물. IDLE은 planned_path=[parking_node]가 남을 수 있어 status도 체크.
-            # staging 대기 AGV도 영구 장애물 처리 (포워딩 시 gateway-staging 우회 위함).
-            if (other.status == RobotStatus.IDLE
-                    or not other.planned_path
-                    or self._is_staging_robot(other_rid)):
+            stationary = (other.status == RobotStatus.IDLE
+                          or not other.planned_path
+                          or self._is_staging_robot(other_rid))
+            if stationary:
+                # 주차/대기/staging = 안 비킴 → hard 장애물 (경로가 통과 못 함)
                 excluded_transit.add(other.current_node)
-            # 다른 로봇이 선반 반납 중이면 그 선반의 원위치 노드도 영구 제외
+            else:
+                # 움직이는 로봇 현재 위치 + 남은 경로 → soft 회피 (되도록 피하되 공유 가능)
+                soft_avoid.add(other.current_node)
+                soft_avoid.update(other.planned_path)
+            # 선반 반납 중이면 그 선반의 원위치 노드도 hard 제외
             if other.status == RobotStatus.RETURNING_SHELF and other.carrying_shelf is not None:
                 shelf_obj = self.shelf_manager.shelves.get(other.carrying_shelf)
                 if shelf_obj:
                     excluded_transit.add(shelf_obj.home_node)
-        # REFACTOR F 4.5.6 Step 1: corridor staging_node는 전용 대기 지점 — 어떤 로봇도 경유 금지.
-        # 점유자가 staging_node 경유 경로를 선커밋한 뒤 대기 AGV가 거기 주차하는 시간차 교착을
-        # 구조적으로 차단 (staging yield 반응형 복구를 예방으로 대체 — Step 2에서 yield 제거).
-        # start/goal은 제외 안 함 (대기 AGV의 목적지가 staging_node이므로).
-        for corridor in self.staging_manager.corridors.values():
-            sn = corridor.staging_node
-            if sn != start and sn != actual_goal:
-                excluded_transit.add(sn)
+        # (구 Step 1 "staging_node 무조건 transit 제외" 삭제 — 통행권이 안전 보장.
+        #  빈 회랑은 통행 허용 → 불필요한 회전 제거. 차 있으면 corridor indefinite가 is_free로 막음.)
         # 수정 54: head-on 해소용 추가 제외 노드 (승자 위치 막아 우회 강제)
         if extra_excluded:
             excluded_transit |= {n for n in extra_excluded
@@ -488,6 +503,7 @@ class MovementMixin:
             max_time=self.config.max_time,
             excluded_transit=excluded_transit,
             start_heading=planning_heading,
+            soft_avoid=soft_avoid or None,
         )
 
         if timed_path is None:

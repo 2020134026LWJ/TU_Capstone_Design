@@ -50,6 +50,69 @@ def test_detect_head_on_is_2cycle(handler):
     assert set(cycle) == {1, 2}
 
 
+def test_staging_robot_included_in_deadlock_cycle(handler):
+    """통행권 수정: 줄 서서 기다리는 staging 로봇도 wait-for 사이클에 잡힌다.
+
+    옛 구조적 결함: staging 로봇은 command_queue가 비어 감지기가 못 봐서
+    '작업대 입구 교착'(점유자를 대기자가 막음)이 영영 안 풀렸다.
+    이제 staging 로봇 → 목표 회랑 점유자 엣지를 추가해 사이클이 완성된다.
+    재현: AGV-1@12(→13 막힘, W9 회랑 점유) ↔ AGV-2@13(W9 줄서기로 13에 주차).
+    """
+    r1 = handler.robot_manager.get_robot(1)
+    r1.current_node = 12
+    r1.heading = 90                    # 동 → 다음 13
+    r1.heading_initialized = True
+    r1.planned_path = [12, 13, 11, 10, 9]
+    r1.command_queue = ["forward"]
+
+    r2 = handler.robot_manager.get_robot(2)
+    r2.current_node = 13
+    r2.heading_initialized = True
+    r2.command_queue = []              # staging hold = 빈 큐 (옛 감지기가 놓치던 지점)
+
+    # AGV-2를 W9 줄서기로 등록(13에 주차), W9 회랑은 AGV-1이 점유 중
+    handler.staging_manager.add_staged_agv(ws_node=9, rid=2, staging_node=13)
+    handler.reservation.reserve_indefinite(1, 9)
+
+    cycle = handler._detect_deadlock_cycle()
+    assert cycle is not None, "staging 로봇이 낀 입구 교착도 감지해야 함"
+    assert set(cycle) == {1, 2}
+
+
+def test_staging_deadlock_resolves(handler):
+    """통행권 수정 끝단 증명: staging 낀 입구 교착이 감지→자동 해소(우회)된다.
+
+    손으로 재현하기 어려운 타이밍 버그를, 그 상태를 재구성해 결정론으로 검증.
+    움직이는 AGV-1이 staging 중인 AGV-2를 피해 우회 경로를 받으면 freeze가 풀린다.
+    (staging AGV-2는 planned_path가 없어 양보자가 못 됨 → 움직이는 쪽이 우회.)
+    """
+    # AGV-1: W9 회랑 점유 중이며 16 쪽으로 빠져나가는 길에 13을 지나야 함 (13에 AGV-2 주차)
+    r1 = handler.robot_manager.get_robot(1)
+    r1.current_node = 12
+    r1.heading = 90                    # 동 → 다음 13
+    r1.heading_initialized = True
+    r1.planned_path = [12, 13, 14, 15, 16]
+    r1.command_queue = ["forward"]
+
+    # AGV-2: W9 줄서기로 13에 주차 (빈 큐), W9 회랑은 AGV-1이 점유
+    r2 = handler.robot_manager.get_robot(2)
+    r2.current_node = 13
+    r2.heading_initialized = True
+    r2.command_queue = []
+    handler.staging_manager.add_staged_agv(ws_node=9, rid=2, staging_node=13)
+    handler.reservation.reserve_indefinite(1, 9)
+
+    cycle = handler._detect_deadlock_cycle()
+    assert cycle is not None and set(cycle) == {1, 2}
+
+    assert handler._resolve_deadlock(cycle) is True, "우회 경로를 찾아 풀어야 함"
+    # 양보자 = 움직이는 AGV-1. 막던 staging 로봇 노드(13)를 피하고 목적지(16)는 유지.
+    assert r1.planned_path, "양보자 새 경로가 나와야 함"
+    assert r1.planned_path[-1] == 16, "목적지(16) 유지"
+    assert 13 not in r1.planned_path, \
+        f"막던 staging 로봇 노드(13)를 피해야 함: {r1.planned_path}"
+
+
 def test_no_false_positive_when_not_mutual(handler):
     """한쪽만 막힌(상대가 마주보지 않음) 경우는 사이클 미형성 → None."""
     r1, r2 = _setup_headon(handler)

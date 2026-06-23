@@ -1,5 +1,12 @@
 # AGV 물류 시스템 알고리즘 플로우차트
 
+> **왜 이렇게 고치는가 / 근본 해결 방식**(개발자 아닌 사람도 읽을 수 있는 평문)은
+> [`설계_근본해결_노트.md`](설계_근본해결_노트.md) 참고. 이 문서(FLOWCHART)는 기술 상세·수정 이력.
+>
+> 핵심 결정(2026-06-23): 멈춤(교착)이 반복되는 뿌리 = "지킬 수 없는 시간표 예약" →
+> **시간표 방식을 버리고 "통행권(노드 락) 방식"으로 전환** 예정. 충돌을 *구조적으로* 불가능하게 만들고,
+> 길목 교착 자동 해소 + 불필요한 회전 제거를 한 번에. 상세는 위 노트 + `server/docs/REFACTOR_F.md`.
+
 ```mermaid
 ---
 config:
@@ -1893,6 +1900,23 @@ AGV의 single-slot 채널과 동기화 안 됨.
 **수정 파일**: `server/planning/deadlock_detector.py`(신규), `server/core/_movement_mixin.py`, `tests/test_headon.py`(신규), `tests/test_deadlock_detector.py`(신규)
 
 **상태**: 코드 완료, 76 pytest 통과(교착 감지/해소 14: head-on·4대 회전·체인 오발방지·우회·순수 사이클). ⚠️ **시뮬 검증 필요** — 동시 배달로 row2 head-on 유발 후 한쪽이 bypass로 우회해 풀리는지 + 일반 동작 회귀.
+
+---
+
+### 수정 55: 통행권(노드 락) 모델 전환 — 미래 timeline 예측 제거 + 소프트 회피 + staging 교착 감지 (2026-06-23)
+
+> **쉽게**: 멈춤(교착)이 반복되는 뿌리는 **"못 지킬 미래 시간표"** 였다(수정 54의 드리프트 원인과 동일). 출발 전에 "1초엔 여기, 2초엔 저기"로 전체 동선을 예약해 두는데, 회전·통신지연으로 실제가 어긋나면 시간표가 거짓이 돼 부딪친다. 그래서 **시간표 예측을 버리고**, 사람처럼 "**다음 칸 들어가기 직전에 거기 비었나 보고 한 칸씩**" 가게 한다(=통행권). 이 "한 칸 보고 가기"는 이미 코드에 있던 진입 직전 점유 체크가 그 역할을 하고 있어서, 위에 얹힌 시간표만 걷어내면 된다. 평문 설명: `설계_근본해결_노트.md`.
+
+- **발견**: "락(통행권)"은 이미 `_send_next_command`의 forward 직전 체크(다음 노드 `current_node` 점유 + in-flight 예약 `_is_node_reserved_by`)로 구현돼 있었음. 별도 락 함수 불필요 → Phase 1에 넣었던 `try_lock/unlock`은 죽은 코드라 제거.
+- **변경 1 — 미래 timeline 예측 제거** (`_movement_mixin._plan_and_publish_move`): 매 plan마다 다른 로봇 planned_path를 `reservation.commit(dwell=1)`로 시공간 예약하던 블록 삭제(드리프트 원천). A*는 이제 "지금" 상태만 본다. corridor 점유(indefinite)는 `is_free`가 그대로 막으므로 충돌 회피 유지.
+- **변경 2 — 소프트 회피** (`path_planner.astar_with_time`에 `soft_avoid`/`soft_penalty` 추가): 정지(IDLE/주차/staging) 로봇·선반은 hard 회피(통과 금지), **움직이는 로봇의 현재 위치+남은 경로는 soft 회피**(비용만 +2 → 되도록 피하되 좁으면 공유). "처음부터 상대 피해 경로 짜기"를 *공간*으로만 유지(시간 예측 없이). 공유 지점 안전은 진입 직전 체크가 보장.
+- **변경 3 — staging 교착 감지** (`_detect_deadlock_cycle` + `_staging_target_ws` 헬퍼): 줄 서서 기다리는 staging 로봇은 command_queue가 비어 옛 감지기가 못 봤음(= 작업대 입구 교착이 안 풀리던 **구조적 결함**). staging 로봇 → 자기 목표 회랑 점유자(`reservation.corridor_owner(ws)`) 엣지를 wait-for에 추가 → 사이클 완성 → 수정 54의 `_resolve_deadlock`이 한쪽 우회로 해소.
+- **변경 4 — 대기칸 둔기 제거** (구 4.5.6 Step 1): corridor `staging_node`를 모든 로봇 transit에서 무조건 제외하던 블록 삭제. 통행권이 안전을 보장하므로 **빈 회랑은 통행 허용 → 불필요한 회전 제거**(예: 2→1→9 대신 멀리 2→10→9 우회하던 문제 해소). 차 있으면 corridor indefinite가 `is_free`로 막음.
+- **잃는 것 (정직)**: "같은 칸을 시각만 달리해 번갈아 쓰기"라는 timing 최적화(처리량 미세). 충돌 회피·상대 회피는 유지. 교착은 더 자주 *발생*하되 항상 감지·해소.
+
+**수정 파일**: `server/core/_movement_mixin.py`, `server/planning/path_planner.py`, `server/planning/reservation_service.py`(try_lock 제거), `tests/test_headon.py`(staging 교착 테스트), `tests/test_reservation.py`(try_lock 테스트 제거)
+
+**상태**: 코드 완료, **77 pytest 통과**(staging 교착 감지 회귀 추가). ⚠️ **시뮬 검증 필수** — 충돌 회피의 심장(경로 계획)을 바꾼 거라 단위 테스트만으론 부족. ① 동시 배달로 작업대 입구 교착 유발 → 풀리는지 ② 빈 회랑일 때 우회/회전 줄었는지 ③ 4 시나리오(포워딩/인터셉트/staging/재픽업) 회귀 ④ row2 head-on 회귀.
 
 ---
 
