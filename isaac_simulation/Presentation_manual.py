@@ -51,8 +51,8 @@ from isaacsim.core.api import World
 from isaacsim.core.api.objects import VisualCuboid, VisualCylinder, VisualSphere
 from isaacsim.core.utils.viewports import set_camera_view
 
-from hardware.isaac_hw import IsaacMotors
-from hardware.camera import IsaacCamera
+from isaac_hw import IsaacMotors
+from camera import IsaacCamera
 
 # ─── CAD 경로 ─────────────────────────────────────────────────────────────────
 CAD_PATHS = {"agv": None, "shelf": None, "workstation": None}

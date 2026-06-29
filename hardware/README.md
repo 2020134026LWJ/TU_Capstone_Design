@@ -1,205 +1,92 @@
-# hardware/ — AGV 하드웨어 추상화
+# hardware/ — AGV 실물(RPi) 코드
 
-시뮬레이션(Isaac Sim)과 실물(STM32 + RPi) 양쪽에서 공통으로 쓰는 추상화 레이어.
+실물 AGV(STM32 + RPi) 코드. **Isaac Sim 전용 코드는 `isaac_simulation/`으로 분리**됨.
 
 ## 구조
 
 ```
 hardware/
-+-- __init__.py
-+-- bridge.py      # MQTT <-> UART 브릿지 (Isaac Sim 콜백 / RPi UART 두 모드)
-+-- camera.py      # RpiCamera / IsaacCamera 공통 ABC
-+-- isaac_hw.py    # IsaacMotors (Isaac Sim 전용 가상 모터)
-+-- rpi_main.py    # RPi 진입점
-+-- stm32/         # STM32 C 펌웨어 (CubeIDE)
+├── bridge_rpi.py     ★ 실물 bridge (주원이 STM ASCII 프로토콜 + 카메라 offset)
+├── camera.py         ★ 실물 카메라 (주원이 opencv 비전 기반, detect → id/x/y/yaw)
+├── rpi_main.py       ★ RPi 진입점 (bridge_rpi + camera 엮기)
+├── sil/              ★ SIL — 가짜 STM + 가상 UART로 통신 검증 (실물 없이)
+│   ├── mock_stm.py
+│   └── run_sil.py
+├── AGV_Control.zip               (주원이) 실제 STM32F7 CubeIDE 펌웨어
+├── opencv_arucomarker_detection_v4.py  (주원이) 카메라 원본 — camera.py가 이 비전 로직 참고
+└── camera_calibration.pkl        (주원이) 카메라 캘리브레이션
 ```
+
+> ★ = 사용자 코드. Isaac 전용(`bridge_isaac.py`·`isaac_hw.py`·`IsaacCamera`)은 `isaac_simulation/`,
+> stm32 임시 스켈레톤은 `archive/hardware_stm32_skeleton/`으로 옮겨짐.
 
 ---
 
-## 아키텍처
+## 흐름 (실물)
 
 ```
-서버 (PC)
-  │  MQTT /agv/cmd
-  ▼
-Bridge (bridge.py)
-  │  UART 115200bps          (RPi 모드)
-  │  콜백                    (Isaac Sim 모드)
-  ▼
-STM32 / IsaacAGV
-  │  PWM / 가상 이동
-  ▼
-모터/리프트
+서버 ──MQTT /agv/cmd──→ bridge_rpi ──UART <cmd,x,y,yaw>──→ STM32
+camera ──(id,x,y,yaw)──→ bridge.set_marker_offset(x,y,yaw)  (offset을 UART 패킷에 합성)
+                       └→ bridge.publish_marker(id, heading) (위치 추적용, 서버로)
+STM32 ──0x81/0xFF──→ bridge_rpi ──/agv/cmd_ack──→ 서버
 ```
-
-AGV → 서버:
-- `/agv/marker` — ArUco 마커 감지 (marker_id + heading)
-- `/agv/cmd_ack` — 명령 완료 (turn / lift 완료)
-
-서버 → AGV:
-- `/agv/cmd` — 이동/회전/리프트 명령
+- `camera.py` = 비전(ArUco offset/id 계산)만, UART/명령은 `bridge_rpi`가 담당 (역할 분리)
+- 같은 라파 안 camera↔bridge는 **메모리 공유**(함수 호출), MQTT는 라파↔서버만
 
 ---
 
-## Bridge 두 모드
+## UART 프로토콜 (주원이 STM 기준)
 
-```python
-# Isaac Sim 모드 (step6_visual.py)
-bridge = Bridge(rid=1, cmd_handler=agv._on_cmd_from_bridge)
-bridge.connect()
+**송신** (bridge_rpi → STM): ASCII `<command,±xxxx,±yyyy,±wwww>` (21바이트)
+- command 1자리(1~7), x/y/yaw = (mm·deg)×10 정수 (STM이 /10 복원)
+- offset = camera가 `set_marker_offset()`으로 공급한 최신값
 
-# RPi 실물 모드 (rpi_main.py)
-bridge = Bridge(rid=1)   # cmd_handler=None → UART 모드
-bridge.open_uart()        # UART 포트 열기 + 수신 스레드
-bridge.connect()
-```
+| forward | stop | lift_up | lift_down | turn_left | turn_right | turn_180 |
+|---|---|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+
+**수신** (STM → bridge_rpi): 단일 바이트 `0x81`=DONE / `0xFF`=ACK
+
+**STM 실제 응답**(main.c): 명령 → ACK 즉시 → 동작 → DONE 1번. 항상 ACK→DONE, 중복 없음.
 
 ---
 
-## 실행
+## SIL — 통신 검증 (실물 없이)
 
 ```bash
-# AGV-1
-python3 hardware/rpi_main.py 1
-
-# AGV-2
-python3 hardware/rpi_main.py 2
+cd TU_Capstone_Design
+python3 -m hardware.sil.run_sil
 ```
+가짜 STM(`mock_stm.py`) + 가상 UART(pty)로 `bridge_rpi` 명령-응답 검증.
+**결과**: 정상 흐름(하나씩) 견고. 진짜 위험 = **통신 유실(DONE 누락) 시 멈춤**(복구 없음).
 
 ---
 
-## 실물 전환 (Isaac Sim → RPi)
+## 통합 결정 요약 (2026-06-29 논의)
 
-### 1. UART 활성화
+- **STM 펌웨어 0수정** — bridge를 주원이 ASCII 프로토콜에 맞춤 (STM은 PID/IMU 엮여 못 건드림)
+- **역할 분담** — 주원이 = 카메라 비전 / 사용자 = bridge(UART 다리). camera가 `set_marker_offset`·`publish_marker` 호출
+- **bridge Isaac/실물 분리** — 한 파일에 두 모드 섞으니 한쪽 고치다 다른쪽 깨짐 → `bridge_isaac.py`(시뮬) / `bridge_rpi.py`(실물)
+- **같은 라파 = 메모리 공유** — camera↔bridge는 함수 호출(MQTT 불필요), MQTT는 라파↔서버(다른 머신)만
+- **실물 카메라 = 주원이 opencv 비전 복붙**(`camera.py`), 시뮬 `IsaacCamera`는 별개(proximity)
+- **검증 = SIL**(위 참조) — 정상 흐름 견고, 가상 race(중복·순서)는 STM 구조상 안 남, **진짜 위험 = 통신 유실(DONE 누락 멈춤)**
 
-```bash
-# /boot/config.txt 에 추가
-enable_uart=1
+## 미팅에서 확정할 것 (`bridge_rpi.py` 의 TODO)
 
-sudo reboot
-```
-
-### 2. bridge.py 상단 설정
-
-```python
-UART_ENABLED = True        # False → UART 비활성 (시뮬 모드)
-UART_PORT    = "/dev/ttyAMA0"
-UART_BAUD    = 115200
-
-MQTT_HOST = "192.168.x.x"  # 서버 PC IP
-```
-
-### 3. 카메라 캘리브레이션 파일 준비
-
-```bash
-# camera_calibration.pkl 생성 후 hardware/ 폴더에 배치
-# camera_matrix, dist_coeffs 포함
-```
+1. **carrier 흐름** — STM이 command=0 패킷을 계속 받아야 하나
+2. **forward 완료신호** — forward도 DONE 1번 옴 → 서버 marker와 조율
+3. **통신 유실 복구** — DONE 누락 timeout 주체 + STM 상태 조회 가능한가
+4. **heading 변환** — camera yaw_deg(0~360) → 서버 heading(0=N/90=E)
 
 ---
 
-## MQTT 프로토콜
+## 실물 전환
 
-### 서버 → RPi (`/agv/cmd`)
-
-```json
-{"rid": 1, "cmd": "forward"}
-{"rid": 1, "cmd": "turn_left"}
-{"rid": 1, "cmd": "turn_right"}
-{"rid": 1, "cmd": "turn_180"}
-{"rid": 1, "cmd": "lift_up"}
-{"rid": 1, "cmd": "lift_down"}
-```
-
-### RPi → 서버 (`/agv/marker`)
-
-```json
-{"rid": 1, "marker_id": 14, "heading": 90, "ts": 1700000000}
-```
-
-`heading`: 서버 기준 (0=North, 90=East, 180=South, 270=West)
-
-### RPi → 서버 (`/agv/cmd_ack`)
-
-```json
-{"type": "cmd_ack", "rid": 1, "cmd": "turn_left", "status": "done"}
-{"type": "cmd_ack", "rid": 1, "cmd": "lift_up",   "status": "done"}
-```
-
----
-
-## UART 패킷 프로토콜 (RPi ↔ STM32)
-
-### 패킷 구조
-
-```
-[0xAA] [CMD] [LEN] [PAYLOAD...] [CRC]
-
-CRC = CMD ^ LEN ^ payload[0] ^ payload[1] ^ ...
-```
-
-### RPi → STM32 명령
-
-| CMD  | 이름          | PAYLOAD |
-|------|---------------|---------|
-| 0x01 | MOVE_FORWARD  | 없음    |
-| 0x02 | STOP          | 없음    |
-| 0x03 | LIFT_UP       | 없음    |
-| 0x04 | LIFT_DOWN     | 없음    |
-| 0x05 | ROTATE_LEFT   | 없음    |
-| 0x06 | ROTATE_RIGHT  | 없음    |
-| 0x07 | ROTATE_180    | 없음    |
-
-### STM32 → RPi 이벤트
-
-| CMD  | 이름         | PAYLOAD           |
-|------|--------------|-------------------|
-| 0x81 | MOVE_DONE    | 없음 (현재 미사용) |
-| 0x82 | ROTATE_DONE  | 없음               |
-| 0x83 | LIFT_DONE    | `[1]`=up, `[0]`=down |
-| 0xFF | ACK          | 없음 (명령 수신 확인) |
-
-### 이벤트 → cmd_ack 매핑
-
-| STM32 이벤트          | 서버에 보고하는 cmd_ack                              |
-|-----------------------|------------------------------------------------------|
-| ROTATE_DONE           | 마지막 turn 명령 (turn_left / turn_right / turn_180) |
-| LIFT_DONE(payload=1)  | `lift_up`                                            |
-| LIFT_DONE(payload=0)  | `lift_down`                                          |
-
----
+1. `bridge_rpi.py`: `UART_ENABLED = True`, `MQTT_HOST = "서버IP"`
+2. UART 포트 `/dev/ttyAMA10` (주원이 카메라와 동일)
+3. 실행: `python3 -m hardware.rpi_main 1` (AGV-1) / `2` (AGV-2)
 
 ## 의존성
-
 ```
-paho-mqtt >= 1.6.0
-pyserial >= 3.5
-picamera2              # 실물 카메라 (RPi OS 기본 내장)
-opencv-python          # ArUco 감지
-numpy
+paho-mqtt >= 1.6   pyserial >= 3.5   picamera2   opencv-python   numpy
 ```
-
-```bash
-pip install paho-mqtt pyserial opencv-python numpy
-```
-
----
-
-## 문제 해결
-
-### UART 권한 오류
-```bash
-sudo chmod 666 /dev/ttyAMA0
-# 또는 dialout 그룹 추가
-sudo usermod -aG dialout $USER
-```
-
-### MQTT 연결 실패
-- 서버에서 Mosquitto 실행 확인: `sudo systemctl status mosquitto`
-- 방화벽 1883 포트 확인
-- MQTT_HOST IP 확인
-
-### ArUco 감지 실패
-- `camera_calibration.pkl` 파일 존재 여부 확인
-- 마커 크기 (`_marker_size = 0.05m`) 실제와 일치 확인
-- 조명 조건 확인

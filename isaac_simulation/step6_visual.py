@@ -47,9 +47,9 @@ from isaacsim.core.api import World
 from isaacsim.core.api.objects import VisualCuboid, VisualCylinder, VisualSphere
 from isaacsim.core.utils.viewports import set_camera_view
 
-from hardware.isaac_hw import IsaacMotors
-from hardware.bridge import Bridge
-from hardware.camera import IsaacCamera
+from isaac_hw import IsaacMotors
+from bridge_isaac import Bridge
+from camera import IsaacCamera
 
 # ─── CAD 경로 설정 ────────────────────────────────────────────────────────────
 # None     = 기본 도형 사용 (현재)
