@@ -262,6 +262,17 @@ class MarkerMixin:
         if not current_st:
             return {"type": "cmd_ack_response", "success": True, "action": "no_subtask"}
 
+        # 약점 4: lift_up 결과 검증 — AGV가 실제로 든 선반과 서버 기대(carrying_shelf) 비교.
+        # ('shelf_id' 키가 있을 때만 = 결과를 보고하는 시뮬. 실물 UART는 키 없음 → 스킵)
+        # 불일치(특히 실제=None) = 빈/오 리프트 → 서버↔AGV 상태 분기. 이전엔 서버가
+        # 영영 몰라 유령 선반을 계속 운반했음(분실 영구화). 이제 즉시 드러난다.
+        if cmd == "lift_up" and "shelf_id" in data:
+            reported = data.get("shelf_id")
+            if reported != robot.carrying_shelf:
+                print(f"[AGVServer] ⚠️ lift_up 결과 불일치: AGV-{rid} "
+                      f"기대 선반={robot.carrying_shelf}, 실제={reported} "
+                      f"→ 빈/오 리프트 감지 (선반 분실 위험)")
+
         if cmd == "lift_up":
             result = self._handle_pickup_ack(robot, task, current_st)
         elif cmd == "lift_down":

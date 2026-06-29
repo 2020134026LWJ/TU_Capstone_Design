@@ -1,5 +1,12 @@
 # AGV 물류 시스템 알고리즘 플로우차트
 
+> **왜 이렇게 고치는가 / 근본 해결 방식**(개발자 아닌 사람도 읽을 수 있는 평문)은
+> [`설계_근본해결_노트.md`](설계_근본해결_노트.md) 참고. 이 문서(FLOWCHART)는 기술 상세·수정 이력.
+>
+> 핵심 결정(2026-06-23): 멈춤(교착)이 반복되는 뿌리 = "지킬 수 없는 시간표 예약" →
+> **시간표 방식을 버리고 "통행권(노드 락) 방식"으로 전환** 예정. 충돌을 *구조적으로* 불가능하게 만들고,
+> 길목 교착 자동 해소 + 불필요한 회전 제거를 한 번에. 상세는 위 노트 + `server/docs/REFACTOR_F.md`.
+
 ```mermaid
 ---
 config:
@@ -1873,6 +1880,74 @@ AGV의 single-slot 채널과 동기화 안 됨.
 **수정 파일**: `server/data/shelf_config.json`, `server/managers/shelf.py`, `server/main.py`, `server/core/_workflow_mixin.py`
 
 **상태**: 코드 완료, 62 pytest 통과(회귀 0). ⚠️ **시뮬 검증 필요** — 사용자를 반대 작업대 파이에 앉혀 선반이 그 작업대로 가는지 + 일반 동작 회귀.
+
+---
+
+### 수정 54: 일반 교착(wait-for 사이클) 반응형 해소 — 예방 실패 시 매 주행 backstop (2026-06-21)
+
+> **쉽게**: 두 AGV가 같은 회랑에서 서로 마주보고 가려다 둘 다 멈춰 영구 freeze 되는 일이 시뮬에서 관찰됨. REFACTOR F는 "예약으로 교착을 *예방*하니 반응형 해제는 불필요"로 `_resolve_deadlock`을 제거했는데, 예약은 노드에서만 동기되므로 비동기 실행(회전=실시간 추가) 드리프트를 못 막는 구멍이 있었다. **예약으로 전부 막는 건 원리적으로 불가** → 예방(1차) + 교착 감지·해소(2차)의 표준 2층 구조로. 매 주행마다 "기다림의 순환"을 보고, 있으면 한쪽을 bypass로 우회시켜 푼다.
+
+- **현상 (시뮬 로그)**: AGV-1 반납 `[…,11,12,13,14,15,23]`(row2 우향) + AGV-2 배달 `[…,13,12,11,10,9]`(row2 좌향) 정면 충돌. `Robot 1: blocked → node 13` / `Robot 2: blocked → node 12` 반복 후 침묵 → 시뮬 멈춤.
+- **근본 원인 (예방 실패)**: 시공간 예약은 **노드 hop = 시간** 축(`astar_with_time`은 회전을 비용만, 시간은 이동 시에만 +1). 매 plan마다 모든 로봇 t=0을 "지금"으로 리셋하고 *완벽한 lockstep 전진* 가정. 실제 AGV는 회전 step이 실시간 더 걸려(MQTT 왕복 2회) 비동기로 어긋남. `dwell=1`은 ±1 step만 흡수 → 회전 수 다른 두 경로가 마주보면 "안전" 오판 → head-on 통과. (동기화가 노드에서만 일어나는 한 예약만으론 못 막음.)
+- **근본 원인 (복구 없음)**: `_try_dispatch_all`은 막힌 로봇 재시도만. 교착은 전원이 멈춰 새 marker/ack가 안 와 재시도조차 안 불림 → 영구 freeze.
+- **수정 — 감지(도구) / 해소(core) 분리, layering 준수**:
+  - **감지 = 순수 도구** `planning/deadlock_detector.py::find_wait_cycle(wait_for)`. wait-for 그래프(rid → 가려는 노드를 점유한 상대)는 각 로봇 다음 노드가 하나뿐이라 **out-degree ≤ 1 (functional graph)** → 화살표 따라가다 본 노드 재방문 = 사이클. 사이클 = 서로 영구히 막힌 집합 = 확정 교착. (2대 head-on=길이2, 2×2 사각 회전 교착=길이4의 특수 케이스. 일반 N대 커버.) 점유자가 안 막혀있으면(곧 떠남) 체인이 끊겨 사이클 미형성 → **오발 없음**.
+  - **해소 = core** `_movement_mixin._resolve_deadlock(cycle)`: 사이클은 링크 하나만 끊으면 사슬로 풀림 → **전원 동시 재계획 불필요(재교착 위험)**. 멤버 1명(양보자, 낮은 rid부터; A* 실패 시 다음)을 현재→목표로 재계획하되 그가 가려던 노드(contested)를 `extra_excluded`로 → A*가 **row1/row6 bypass로 우회**(8×6 메시는 모든 열 세로 간선+상하 bypass라 항상 우회로 존재). 양보자가 자기 노드를 비우면 뒤 로봇 전진, 나머지는 `_try_dispatch_all` 재시도로 자연 unwind.
+  - **매 주행 통합**: `_try_dispatch_all`(마커·cmd_ack마다 호출) 재시도 루프 끝에서 `_detect_deadlock_cycle`(wait_for 빌드 + 도구 위임) → 사이클 있으면 `_resolve_deadlock`. = 예약 도구처럼 "매 주행마다 참조하는 계산기" 패턴.
+  - `_plan_and_publish_move(..., extra_excluded)`: 옵션 파라미터 1개(excluded_transit 병합, start/goal 제외). `_robot_at(node)` 헬퍼 추가.
+- **범위 (정직)**: 예방(예약)은 1차 방어로 그대로. backstop은 예약이 못 잡는 교착만 처리. REFACTOR F가 지운 `_resolve_deadlock`을 **사이클 기반 일반 교착**으로 부활(staging yield 전체 복원 아님 — 사이클 감지가 그 케이스도 포함). ⚠️ 한계: A* 우회로 없는 막다른 단일 차선 gridlock은 후진 협조 필요(현 맵엔 해당 없음).
+
+**수정 파일**: `server/planning/deadlock_detector.py`(신규), `server/core/_movement_mixin.py`, `tests/test_headon.py`(신규), `tests/test_deadlock_detector.py`(신규)
+
+**상태**: 코드 완료, 76 pytest 통과(교착 감지/해소 14: head-on·4대 회전·체인 오발방지·우회·순수 사이클). ⚠️ **시뮬 검증 필요** — 동시 배달로 row2 head-on 유발 후 한쪽이 bypass로 우회해 풀리는지 + 일반 동작 회귀.
+
+---
+
+### 수정 55: 통행권(노드 락) 모델 전환 — 미래 timeline 예측 제거 + 소프트 회피 + staging 교착 감지 (2026-06-23)
+
+> **쉽게**: 멈춤(교착)이 반복되는 뿌리는 **"못 지킬 미래 시간표"** 였다(수정 54의 드리프트 원인과 동일). 출발 전에 "1초엔 여기, 2초엔 저기"로 전체 동선을 예약해 두는데, 회전·통신지연으로 실제가 어긋나면 시간표가 거짓이 돼 부딪친다. 그래서 **시간표 예측을 버리고**, 사람처럼 "**다음 칸 들어가기 직전에 거기 비었나 보고 한 칸씩**" 가게 한다(=통행권). 이 "한 칸 보고 가기"는 이미 코드에 있던 진입 직전 점유 체크가 그 역할을 하고 있어서, 위에 얹힌 시간표만 걷어내면 된다. 평문 설명: `설계_근본해결_노트.md`.
+
+- **발견**: "락(통행권)"은 이미 `_send_next_command`의 forward 직전 체크(다음 노드 `current_node` 점유 + in-flight 예약 `_is_node_reserved_by`)로 구현돼 있었음. 별도 락 함수 불필요 → Phase 1에 넣었던 `try_lock/unlock`은 죽은 코드라 제거.
+- **변경 1 — 미래 timeline 예측 제거** (`_movement_mixin._plan_and_publish_move`): 매 plan마다 다른 로봇 planned_path를 `reservation.commit(dwell=1)`로 시공간 예약하던 블록 삭제(드리프트 원천). A*는 이제 "지금" 상태만 본다. corridor 점유(indefinite)는 `is_free`가 그대로 막으므로 충돌 회피 유지.
+- **변경 2 — 소프트 회피** (`path_planner.astar_with_time`에 `soft_avoid`/`soft_penalty` 추가): 정지(IDLE/주차/staging) 로봇·선반은 hard 회피(통과 금지), **움직이는 로봇의 현재 위치+남은 경로는 soft 회피**(비용만 +2 → 되도록 피하되 좁으면 공유). "처음부터 상대 피해 경로 짜기"를 *공간*으로만 유지(시간 예측 없이). 공유 지점 안전은 진입 직전 체크가 보장.
+- **변경 3 — staging 교착 감지** (`_detect_deadlock_cycle` + `_staging_target_ws` 헬퍼): 줄 서서 기다리는 staging 로봇은 command_queue가 비어 옛 감지기가 못 봤음(= 작업대 입구 교착이 안 풀리던 **구조적 결함**). staging 로봇 → 자기 목표 회랑 점유자(`reservation.corridor_owner(ws)`) 엣지를 wait-for에 추가 → 사이클 완성 → 수정 54의 `_resolve_deadlock`이 한쪽 우회로 해소.
+- **변경 4 — 대기칸 둔기 제거** (구 4.5.6 Step 1): corridor `staging_node`를 모든 로봇 transit에서 무조건 제외하던 블록 삭제. 통행권이 안전을 보장하므로 **빈 회랑은 통행 허용 → 불필요한 회전 제거**(예: 2→1→9 대신 멀리 2→10→9 우회하던 문제 해소). 차 있으면 corridor indefinite가 `is_free`로 막음.
+- **잃는 것 (정직)**: "같은 칸을 시각만 달리해 번갈아 쓰기"라는 timing 최적화(처리량 미세). 충돌 회피·상대 회피는 유지. 교착은 더 자주 *발생*하되 항상 감지·해소.
+
+**수정 파일**: `server/core/_movement_mixin.py`, `server/planning/path_planner.py`, `server/planning/reservation_service.py`(try_lock 제거), `tests/test_headon.py`(staging 교착 테스트), `tests/test_reservation.py`(try_lock 테스트 제거)
+
+**상태**: 코드 완료, **77 pytest 통과**(staging 교착 감지 회귀 추가). ⚠️ **시뮬 검증 필수** — 충돌 회피의 심장(경로 계획)을 바꾼 거라 단위 테스트만으론 부족. ① 동시 배달로 작업대 입구 교착 유발 → 풀리는지 ② 빈 회랑일 때 우회/회전 줄었는지 ③ 4 시나리오(포워딩/인터셉트/staging/재픽업) 회귀 ④ row2 head-on 회귀.
+
+---
+
+### 수정 56: 선반 분실(AGV 빈손 작업대 도착) 근본 수정 — 중복 start_order 멱등화 + lift 정합 (2026-06-24)
+
+> **쉽게**: AGV가 선반을 안 든 채 작업대로 가버리는 버그. 뿌리는 **중복 start_order**(사용자가 GUI에서 같은 주문 재선택 — 정상 동작)가 **진행 중인 task를 새로 덮어써서**, 복귀 중이던 로봇의 단계가 RETURN_SHELF → GO_TO_SHELF로 리셋 → 이미 든 선반에 또 `lift_up` → 시뮬이 "바닥에 선반 없음(None)"으로 들고 있던 선반을 놓침 → 빈손 운반. 진단 전말: 메모리 `dup_order_shelf_loss_diagnosis`.
+
+- **약점 2 (진짜 범인) — `create_task` 멱등화** (`server/managers/task.py`): 같은 `task_id`가 이미 `IN_PROGRESS`면 새 객체로 덮어쓰지 않고 기존 task 반환. "start_order는 1회"라는 잘못된 가정 제거 → 재선택/중복 메시지에 비행 중 task가 `current_subtask_idx=0`으로 리셋되는 클래스를 **구조적 차단(불변식)**.
+- **carry-guard (backstop)** (`_workflow_mixin._process_arrival` GO_TO_SHELF): 로봇이 이미 목표 선반을 들고 있으면 `lift_up` 생략 → 바로 배달(`_handle_pickup_ack` 위임). 어떤 stale 상태가 와도 "든 걸 또 든다 → 분실"을 차단.
+- **약점 3 — lift cmd에 `shelf_id` 전달** (`mqtt_client.publish_cmd` + `_movement_mixin._send_next_command` + `bridge` + `step6_visual.execute_cmd`): 서버가 들/놓을 선반을 명시(lift 시점 `carrying_shelf`). 시뮬은 좌표 추측(`_find_nearby_shelf`) 대신 그 선반을 직접 처리하되, `_shelf_is_near`로 실제 근처일 때만(teleport 방지) — 없으면 빈 리프트로 보고.
+- **약점 4 — cmd_ack에 lift 결과 보고** (`bridge.publish_cmd_ack` shelf_id 센티넬 + `_marker_mixin._handle_cmd_ack` 검증): 시뮬이 실제 든 선반을 ack에 실어 보냄(None=빈 리프트). 서버가 기대(`carrying_shelf`)와 비교해 불일치 시 경고 → **이전엔 서버가 빈 리프트를 영영 몰라 유령 선반을 계속 운반(분실 영구화)** 하던 관측 격차를 닫음. 실물(UART)은 미지정 → 검증 스킵(오경보 방지).
+
+- **별개로 확정된 약점 1 (이번 미수정)**: Node U 인터셉트가 복귀 이동 중 거의 발화 불가(이중 게이트 — `get_available_robot()==None`일 때만 시도 + in_flight 가드 + 마커 핸들러가 다음 명령을 인터셉트 검사보다 먼저 발행). **이번 분실의 원인 아님**(없으면 포워딩 최적화 손실일 뿐) + 수정 시 in-flight race 재오픈 위험 → 백로그.
+- **버그 B (GUI 파란불 누락)**: 협업자 GUI 코드 영역(`activate_shelf_cells`가 현재 그리드만 켬) → 별도 트랙(통지+파이 로그 확정). AGV 서버는 정상.
+
+**수정 파일**: `server/managers/task.py`, `server/core/_workflow_mixin.py`, `server/core/_movement_mixin.py`, `server/comm/mqtt_client.py`, `server/core/_marker_mixin.py`, `hardware/bridge.py`, `isaac_simulation/step6_visual.py`, `tests/conftest.py`, `tests/test_dup_order_idempotent.py`(신규), `tests/test_lift_shelf_id.py`(신규)
+
+**상태**: 코드 완료, **83 pytest 통과**(신규 5 + 회귀). ⚠️ **시뮬 검증 필요** — 약점 3·4가 시뮬 lift 경로/ACK 프로토콜을 바꿔 단위 테스트로 런타임 미검증. ① 중복 주문(재선택)에도 선반 분실 없는지 ② 빈 리프트 발생 시 서버 경고 뜨는지 ③ 4 시나리오 회귀 ④ 정상 픽업/배달에 영향 없는지.
+
+---
+
+### 수정 57: 멱등 가드 COMPLETED 확장 — 중복 start_order가 완료된 선반 재배달 → 작업대 입구 freeze 차단 (2026-06-28)
+
+> **쉽게**: 수정 56의 형제 버그. 56은 **IN_PROGRESS** task가 덮어써지는 걸 막았는데, **이미 COMPLETED된** task는 가드를 통과해서 새 PENDING task로 재생성됨. 사용자가 GUI에서 진행 중 주문을 재선택(정상 동작) → 중복 start_order → AGV가 **이미 완료한 선반을 작업대로 다시 배달**. 그런데 GUI 백엔드는 같은 중복 start_order에서 완료분을 `↺ 생략`하고 그리드를 축소(`['1-1','1-2','1-3','2-1','2-2']` → `['1-3','2-2']`) → 라파 GUI에 그 선반 셀이 없어 **파란불 안 뜸** → 작업자가 `shelf_complete` 못 보냄 → AGV가 `wait_picking` 영구 정지 → 회랑 점유로 상대 AGV도 staging에서 정지. **= 작업대 입구 freeze.** GUI 서버 로그 + AGV 로그 양쪽에서 교차 확인.
+
+- **수정** (`server/managers/task.py` create_task 가드): `existing.status == IN_PROGRESS` → `existing.status in (IN_PROGRESS, COMPLETED)`. 완료된 task도 재생성·재배차 안 함 → GUI 백엔드의 "resume = 완료분 생략"과 **대칭**. `create_task`가 task 생애주기 전체에 멱등(불변식 강화).
+- **안전성 검증**: 호출부(`_workflow_mixin._handle_start_order`)가 COMPLETED 반환을 받아도 `_try_assign_pending_tasks`→`get_next_pending_task_fair`가 `status==PENDING`만 배차 → 재배달 없음, 새 버그 없음. 새 주문은 task_id(`T{user}_{order}_{idx}`)가 달라 오막힘 없음.
+- **협업자 트랙(중복)**: GUI가 "버튼 재클릭 시 별도 토픽" 보내기로 함 → 입력단 중복 억제. 단 MQTT 재전송/재연결 등 버튼 외 경로의 중복은 서버 가드만이 막음 → **방어선 2겹, 서버 멱등은 유지**.
+- **한계**: 미래 중복을 예방하는 가드 — 이미 멈춘 런을 되살리진 않음.
+
+**수정 파일**: `server/managers/task.py` (1줄 + 로그 메시지 일반화)
 
 ---
 

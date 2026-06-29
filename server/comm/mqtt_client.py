@@ -91,7 +91,7 @@ class MQTTClient:
             self.connected = False
             print("[MQTTClient] Disconnected")
 
-    def publish_cmd(self, rid: int, cmd: str) -> bool:
+    def publish_cmd(self, rid: int, cmd: str, shelf_id: Optional[int] = None) -> bool:
         """
         AGV 개별 명령 발행
 
@@ -99,12 +99,16 @@ class MQTTClient:
             rid: 로봇 ID
             cmd: "forward" | "backward" | "turn_left" | "turn_right" | "turn_180"
                  | "lift_up" | "lift_down"
+            shelf_id: lift_up/lift_down 시 대상 선반 (약점 3 — 시뮬이 추측 대신
+                      이 선반을 직접 들도록. 실물은 무시). None이면 미지정.
         """
         if not self.client or not self.connected:
             print("[MQTTClient] Not connected")
             return False
 
         payload = {"rid": rid, "cmd": cmd, "timestamp": time.time()}
+        if shelf_id is not None:
+            payload["shelf_id"] = shelf_id
 
         try:
             self.client.publish(self.config.mqtt_topic_cmd, json.dumps(payload), qos=0)

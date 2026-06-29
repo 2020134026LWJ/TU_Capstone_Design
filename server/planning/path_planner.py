@@ -114,6 +114,8 @@ class PathPlanner:
         excluded_transit: Optional[Set[int]] = None,
         turn_penalty: float = 0.3,    # PARAM: 방향 전환 추가 비용 (0=무시). ↑하면 직선 선호, 회전 ↓
         start_heading: Optional[int] = None,  # 서버 기준 degree (0=N,90=E,180=S,270=W)
+        soft_avoid: Optional[Set[int]] = None,  # 통행권: 되도록 피할 노드(움직이는 로봇 경로). 비용만 +
+        soft_penalty: float = 2.0,    # PARAM: soft_avoid 노드 통과 시 추가 비용 (회피 강도)
     ) -> Optional[List[Tuple[int, int]]]:
         """
         시간 포함 A* 알고리즘 (회전 페널티 포함)
@@ -205,6 +207,10 @@ class PathPlanner:
                 else:
                     nxt_dir = cur_dir  # 대기: 방향 유지
                     extra = 0.0
+
+                # 통행권: 움직이는 로봇의 경로는 되도록 피함 (목표 노드는 예외)
+                if soft_avoid and nxt_node in soft_avoid and nxt_node != goal:
+                    extra += soft_penalty
 
                 tentative_g = g + step_cost + extra
                 next_state = (nxt_node, nt, nxt_dir)

@@ -177,6 +177,7 @@ class IsaacAGV:
 
         # MQTT 스레드 → main loop 핸드오프
         self._pending_cmd: str | None = None   # 실행할 다음 명령
+        self._pending_shelf_id: int | None = None  # 약점 3: 서버가 지정한 lift 대상 선반
         self._current_turn_cmd: str | None = None  # 실행 중인 turn 명령 이름
 
     def set_bridge(self, bridge):
@@ -187,9 +188,10 @@ class IsaacAGV:
         """Camera 인스턴스 연결"""
         self.camera = camera
 
-    def _on_cmd_from_bridge(self, rid: int, cmd: str):
-        """Bridge cmd_handler 콜백 — main loop 핸드오프"""
+    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None):
+        """Bridge cmd_handler 콜백 — main loop 핸드오프 (shelf_id: lift 대상, 약점 3)"""
         self._pending_cmd = cmd
+        self._pending_shelf_id = shelf_id
 
     def poll_camera(self):
         """카메라 감지 → marker 보고 (main loop에서 호출)"""
@@ -203,8 +205,8 @@ class IsaacAGV:
 
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
 
-    def execute_cmd(self, cmd: str):
-        """서버 명령 수신 → 상태 전환"""
+    def execute_cmd(self, cmd: str, target_shelf: int | None = None):
+        """서버 명령 수신 → 상태 전환 (target_shelf: lift_up 대상 선반, 약점 3)"""
         if cmd == "forward":
             target = self._find_forward_target()
             if target is None:
@@ -242,19 +244,28 @@ class IsaacAGV:
             print(f"[AGV {self.rid}] <- turn_180")
 
         elif cmd == "lift_up":
-            shelf_id = self._find_nearby_shelf()
-            self.carrying_shelf = shelf_id
-            if shelf_id is not None:
-                shelf_origins.pop(shelf_id, None)
+            # 약점 3: 서버가 지정한 선반을 직접 든다 (좌표 추측 금지).
+            # teleport 방지 — 지정 선반이 실제로 근처에 있을 때만 집고, 없으면
+            # 빈 리프트로 보고(약점 4). 엉뚱한 이웃 선반을 집지 않는다.
+            if target_shelf is not None:
+                picked = target_shelf if self._shelf_is_near(target_shelf) else None
+                if picked is None:
+                    print(f"[AGV {self.rid}] lift_up: 서버지정 선반 {target_shelf}이 "
+                          f"근처에 없음 → 빈 리프트(보고)")
+            else:
+                picked = self._find_nearby_shelf()  # 폴백 (서버 미지정 / 수동)
+            self.carrying_shelf = picked
+            if picked is not None:
+                shelf_origins.pop(picked, None)
             self.lift_target_z  = self.LIFT_PLATE_UP
             self.lift_state     = "RAISING"
             # 픽업 순간: 선반의 현재 orient와 AGV heading의 offset 저장
             # _sync_shelf에서 q_agv * shelf_offset으로 선반이 AGV와 함께 회전
-            q_shelf = self._read_shelf_orient(shelf_id)
+            q_shelf = self._read_shelf_orient(picked)
             q_agv   = self._heading_quat(self.heading)
             q_inv   = Gf.Quatf(q_agv.GetReal(), -q_agv.GetImaginary())
             self.shelf_offset = q_inv * q_shelf
-            print(f"[AGV {self.rid}] <- lift_up → shelf {shelf_id}")
+            print(f"[AGV {self.rid}] <- lift_up → shelf {picked}")
 
         elif cmd == "lift_down":
             self.lift_target_z = self.LIFT_PLATE_Z
@@ -298,6 +309,14 @@ class IsaacAGV:
                 best_dist = dist
                 best_nid  = sid
         return best_nid
+
+    def _shelf_is_near(self, sid: int) -> bool:
+        """선반 sid가 현재 AGV 위치 근처(tolerance*3)에 실제로 놓여 있는지 (약점 3).
+        든 선반은 shelf_origins에서 빠져 있어 False → 중복/오발 lift_up을 빈 리프트로 처리."""
+        if sid not in shelf_origins:
+            return False
+        sx, sy = shelf_origins[sid]
+        return float(np.linalg.norm(self.pos - np.array([sx, sy]))) < POSITION_TOLERANCE * 3
 
     # ─── 업데이트 ────────────────────────────────────────────────────────────
 
@@ -372,14 +391,15 @@ class IsaacAGV:
             if prev_state == "RAISING":
                 print(f"[AGV {self.rid}] Lift UP done (shelf {self.carrying_shelf})")
                 if self.bridge:
-                    self.bridge.publish_cmd_ack("lift_up")
+                    # 약점 4: 실제 든 선반 보고 (None이면 빈 리프트 → 서버 감지)
+                    self.bridge.publish_cmd_ack("lift_up", self.carrying_shelf)
             elif prev_state == "LOWERING":
                 shelf_id = self.carrying_shelf
                 self.carrying_shelf = None
                 self._place_shelf(stage, shelf_id)
                 print(f"[AGV {self.rid}] Lift DOWN done (shelf {shelf_id})")
                 if self.bridge:
-                    self.bridge.publish_cmd_ack("lift_down")
+                    self.bridge.publish_cmd_ack("lift_down", shelf_id)
         else:
             self.lift_z += step if diff > 0 else -step
             self._sync_lift(stage)
@@ -1128,8 +1148,10 @@ while simulation_app.is_running():
         # (이동/회전 중 명령 수신 시 현재 동작 완료 후 실행)
         if agv._pending_cmd is not None and agv.state == "IDLE":
             cmd = agv._pending_cmd
+            shelf_id = agv._pending_shelf_id
             agv._pending_cmd = None
-            agv.execute_cmd(cmd)
+            agv._pending_shelf_id = None
+            agv.execute_cmd(cmd, shelf_id)
 
         agv.update(dt, stage)
 

@@ -46,6 +46,7 @@ class _MockClient:
 class MockMqttPublisher:
     """publish_cmd 호출 + broadcast 기록. 실제 MQTT 연결 없음."""
     cmds: List[Tuple[int, str]] = field(default_factory=list)
+    lift_shelf_ids: List[Tuple[int, str, Optional[int]]] = field(default_factory=list)
     subscriptions: Dict[str, Callable] = field(default_factory=dict)
     client: _MockClient = field(default_factory=_MockClient)
 
@@ -61,8 +62,10 @@ class MockMqttPublisher:
     def subscribe(self, topic: str, callback: Callable) -> None:
         self.subscriptions[topic] = callback
 
-    def publish_cmd(self, rid: int, cmd: str) -> bool:
+    def publish_cmd(self, rid: int, cmd: str, shelf_id: Optional[int] = None) -> bool:
         self.cmds.append((rid, cmd))
+        if cmd in ("lift_up", "lift_down"):
+            self.lift_shelf_ids.append((rid, cmd, shelf_id))
         return True
 
     # ─── 테스트 편의 메서드 ───
@@ -77,6 +80,7 @@ class MockMqttPublisher:
 
     def reset(self) -> None:
         self.cmds.clear()
+        self.lift_shelf_ids.clear()
         self.client.broadcasts.clear()
 
 
