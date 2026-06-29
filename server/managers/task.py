@@ -130,6 +130,23 @@ class TaskManager:
         2. 선반 방문 순서 결정 (optimized_shelf_sequence가 있으면 사용, 없으면 거리순)
         3. 각 선반에 대해 서브태스크 시퀀스 생성
         """
+        # 멱등 가드 (약점 2 + 수정 57): 같은 task_id가 이미 처리 중/완료면 덮어쓰지 않음.
+        # 사용자 재선택 등으로 start_order가 중복 발행돼도, task를
+        # current_subtask_idx=0(GO_TO_SHELF)으로 리셋하는 것을 구조적으로 차단.
+        #  - IN_PROGRESS(약점 2): 복귀 중 로봇의 RETURN_SHELF가 GO_TO_SHELF로 리셋 →
+        #    이미 든 선반에 lift_up → 선반 분실. dup_order_shelf_loss_diagnosis 참조.
+        #  - COMPLETED(수정 57): 완료된 선반이 다시 PENDING으로 재생성 → AGV가 이미
+        #    완료한 선반을 작업대로 재배달 → GUI는 완료분 생략(셀 없음 → 파란불 X) →
+        #    shelf_complete 못 옴 → wait_picking 영구 정지(작업대 입구 freeze).
+        # GUI 백엔드의 "resume = 완료분 생략"과 대칭. create_task 생애주기 전체 멱등.
+        existing = self.tasks.get(task_id)
+        if existing is not None and existing.status in (
+            TaskStatus.IN_PROGRESS, TaskStatus.COMPLETED
+        ):
+            print(f"[TaskManager] Task {task_id} already {existing.status.value} "
+                  f"(idx={existing.current_subtask_idx}) — skip re-create (idempotent)")
+            return existing
+
         # 물품 → 선반 매핑
         shelf_items = self.shelf_manager.find_shelves_for_items(items)
         if not shelf_items:

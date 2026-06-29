@@ -352,7 +352,11 @@ class MovementMixin:
 
         # 명령 전송 (큐 dispatch 후 publish — I1)
         robot.command_queue.pop(0)
-        self.mqtt_publisher.publish_cmd(rid, next_cmd)
+        # 약점 3: lift_up/lift_down 시 대상 선반을 함께 전달 → 시뮬이 좌표 추측 대신
+        # 이 선반을 직접 처리. lift_up 발행 시점엔 carrying_shelf가 이미 목표 선반으로
+        # 세팅돼 있고(픽업 직전), lift_down 시엔 운반 중 선반이 곧 놓을 선반.
+        shelf_id = robot.carrying_shelf if next_cmd in ("lift_up", "lift_down") else None
+        self.mqtt_publisher.publish_cmd(rid, next_cmd, shelf_id)
         return True
 
     # _predict_heading_after_inflight 제거 (B-selfguard): 계획은 in_flight None일 때만

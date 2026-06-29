@@ -389,6 +389,15 @@ class WorkflowMixin:
             next_st = task.get_current_subtask()
 
             if next_st and next_st.subtask_type == SubTaskType.PICKUP_SHELF:
+                # backstop: 이미 목표 선반을 들고 있으면 중복 lift_up 금지.
+                # "들고 있는 걸 또 든다" = 빈 리프트/선반 분실의 직접 원인 →
+                # 픽업을 즉시 완료 처리하고 배달 단계로(=든 채 진행). 정상 경로(약점2
+                # 멱등 가드)면 도달 안 하지만, 어떤 stale 상태가 와도 분실을 구조 차단.
+                if robot.carrying_shelf == next_st.shelf_id:
+                    print(f"[RequestHandler] Robot {robot.rid}: already carrying shelf "
+                          f"{next_st.shelf_id} → skip redundant lift_up, proceed to deliver")
+                    return self._handle_pickup_ack(robot, task, next_st)
+
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
                 self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)

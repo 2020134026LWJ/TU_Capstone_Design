@@ -1920,6 +1920,37 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 ---
 
+### 수정 56: 선반 분실(AGV 빈손 작업대 도착) 근본 수정 — 중복 start_order 멱등화 + lift 정합 (2026-06-24)
+
+> **쉽게**: AGV가 선반을 안 든 채 작업대로 가버리는 버그. 뿌리는 **중복 start_order**(사용자가 GUI에서 같은 주문 재선택 — 정상 동작)가 **진행 중인 task를 새로 덮어써서**, 복귀 중이던 로봇의 단계가 RETURN_SHELF → GO_TO_SHELF로 리셋 → 이미 든 선반에 또 `lift_up` → 시뮬이 "바닥에 선반 없음(None)"으로 들고 있던 선반을 놓침 → 빈손 운반. 진단 전말: 메모리 `dup_order_shelf_loss_diagnosis`.
+
+- **약점 2 (진짜 범인) — `create_task` 멱등화** (`server/managers/task.py`): 같은 `task_id`가 이미 `IN_PROGRESS`면 새 객체로 덮어쓰지 않고 기존 task 반환. "start_order는 1회"라는 잘못된 가정 제거 → 재선택/중복 메시지에 비행 중 task가 `current_subtask_idx=0`으로 리셋되는 클래스를 **구조적 차단(불변식)**.
+- **carry-guard (backstop)** (`_workflow_mixin._process_arrival` GO_TO_SHELF): 로봇이 이미 목표 선반을 들고 있으면 `lift_up` 생략 → 바로 배달(`_handle_pickup_ack` 위임). 어떤 stale 상태가 와도 "든 걸 또 든다 → 분실"을 차단.
+- **약점 3 — lift cmd에 `shelf_id` 전달** (`mqtt_client.publish_cmd` + `_movement_mixin._send_next_command` + `bridge` + `step6_visual.execute_cmd`): 서버가 들/놓을 선반을 명시(lift 시점 `carrying_shelf`). 시뮬은 좌표 추측(`_find_nearby_shelf`) 대신 그 선반을 직접 처리하되, `_shelf_is_near`로 실제 근처일 때만(teleport 방지) — 없으면 빈 리프트로 보고.
+- **약점 4 — cmd_ack에 lift 결과 보고** (`bridge.publish_cmd_ack` shelf_id 센티넬 + `_marker_mixin._handle_cmd_ack` 검증): 시뮬이 실제 든 선반을 ack에 실어 보냄(None=빈 리프트). 서버가 기대(`carrying_shelf`)와 비교해 불일치 시 경고 → **이전엔 서버가 빈 리프트를 영영 몰라 유령 선반을 계속 운반(분실 영구화)** 하던 관측 격차를 닫음. 실물(UART)은 미지정 → 검증 스킵(오경보 방지).
+
+- **별개로 확정된 약점 1 (이번 미수정)**: Node U 인터셉트가 복귀 이동 중 거의 발화 불가(이중 게이트 — `get_available_robot()==None`일 때만 시도 + in_flight 가드 + 마커 핸들러가 다음 명령을 인터셉트 검사보다 먼저 발행). **이번 분실의 원인 아님**(없으면 포워딩 최적화 손실일 뿐) + 수정 시 in-flight race 재오픈 위험 → 백로그.
+- **버그 B (GUI 파란불 누락)**: 협업자 GUI 코드 영역(`activate_shelf_cells`가 현재 그리드만 켬) → 별도 트랙(통지+파이 로그 확정). AGV 서버는 정상.
+
+**수정 파일**: `server/managers/task.py`, `server/core/_workflow_mixin.py`, `server/core/_movement_mixin.py`, `server/comm/mqtt_client.py`, `server/core/_marker_mixin.py`, `hardware/bridge.py`, `isaac_simulation/step6_visual.py`, `tests/conftest.py`, `tests/test_dup_order_idempotent.py`(신규), `tests/test_lift_shelf_id.py`(신규)
+
+**상태**: 코드 완료, **83 pytest 통과**(신규 5 + 회귀). ⚠️ **시뮬 검증 필요** — 약점 3·4가 시뮬 lift 경로/ACK 프로토콜을 바꿔 단위 테스트로 런타임 미검증. ① 중복 주문(재선택)에도 선반 분실 없는지 ② 빈 리프트 발생 시 서버 경고 뜨는지 ③ 4 시나리오 회귀 ④ 정상 픽업/배달에 영향 없는지.
+
+---
+
+### 수정 57: 멱등 가드 COMPLETED 확장 — 중복 start_order가 완료된 선반 재배달 → 작업대 입구 freeze 차단 (2026-06-28)
+
+> **쉽게**: 수정 56의 형제 버그. 56은 **IN_PROGRESS** task가 덮어써지는 걸 막았는데, **이미 COMPLETED된** task는 가드를 통과해서 새 PENDING task로 재생성됨. 사용자가 GUI에서 진행 중 주문을 재선택(정상 동작) → 중복 start_order → AGV가 **이미 완료한 선반을 작업대로 다시 배달**. 그런데 GUI 백엔드는 같은 중복 start_order에서 완료분을 `↺ 생략`하고 그리드를 축소(`['1-1','1-2','1-3','2-1','2-2']` → `['1-3','2-2']`) → 라파 GUI에 그 선반 셀이 없어 **파란불 안 뜸** → 작업자가 `shelf_complete` 못 보냄 → AGV가 `wait_picking` 영구 정지 → 회랑 점유로 상대 AGV도 staging에서 정지. **= 작업대 입구 freeze.** GUI 서버 로그 + AGV 로그 양쪽에서 교차 확인.
+
+- **수정** (`server/managers/task.py` create_task 가드): `existing.status == IN_PROGRESS` → `existing.status in (IN_PROGRESS, COMPLETED)`. 완료된 task도 재생성·재배차 안 함 → GUI 백엔드의 "resume = 완료분 생략"과 **대칭**. `create_task`가 task 생애주기 전체에 멱등(불변식 강화).
+- **안전성 검증**: 호출부(`_workflow_mixin._handle_start_order`)가 COMPLETED 반환을 받아도 `_try_assign_pending_tasks`→`get_next_pending_task_fair`가 `status==PENDING`만 배차 → 재배달 없음, 새 버그 없음. 새 주문은 task_id(`T{user}_{order}_{idx}`)가 달라 오막힘 없음.
+- **협업자 트랙(중복)**: GUI가 "버튼 재클릭 시 별도 토픽" 보내기로 함 → 입력단 중복 억제. 단 MQTT 재전송/재연결 등 버튼 외 경로의 중복은 서버 가드만이 막음 → **방어선 2겹, 서버 멱등은 유지**.
+- **한계**: 미래 중복을 예방하는 가드 — 이미 멈춘 런을 되살리진 않음.
+
+**수정 파일**: `server/managers/task.py` (1줄 + 로그 메시지 일반화)
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
