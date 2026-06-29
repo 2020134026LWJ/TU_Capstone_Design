@@ -53,7 +53,7 @@ _ROOT      = os.path.join(_HERE, "..")
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
 SHELF_PATH = os.path.join(_ROOT, "server", "data", "shelf_config.json")
 ROBOT_PATH = os.path.join(_ROOT, "server", "data", "robot_config.json")
-ARUCO_DIR  = os.path.join(_ROOT, "webots_simulation", "textures", "aruco_markers")
+ARUCO_DIR  = os.path.join(_ROOT, "isaac_simulation", "aruco_markers")
 
 with open(MAP_PATH)   as f: map_cfg   = json.load(f)
 with open(SHELF_PATH) as f: shelf_cfg = json.load(f)

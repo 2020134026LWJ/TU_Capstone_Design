@@ -75,7 +75,7 @@ TURN_SPEED         = HEADING_SPEED * WHEEL_BASE / 2.0
 ANGLE_TOLERANCE    = 0.03
 DETECT_INTERVAL    = 5      # ← 마커 감지 주기 조절
 CAM_DETECT_RADIUS  = 0.087
-ARUCO_DIR = os.path.join(_ROOT, "webots_simulation", "textures", "aruco_markers")
+ARUCO_DIR = os.path.join(_ROOT, "isaac_simulation", "aruco_markers")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
