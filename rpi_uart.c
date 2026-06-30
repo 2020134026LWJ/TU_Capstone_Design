@@ -33,6 +33,10 @@ void Read_RPI_Data(RPI_Data_t* data, const uint8_t* buf)
 void Send_Event(UART_HandleTypeDef* huart, AGV_Event_t evt)
 {
 	HAL_UART_Transmit(huart, &evt, 1, 10);
+	HAL_Delay(10);
+	HAL_UART_Transmit(huart, &evt, 1, 10);
+	HAL_Delay(10);
+	HAL_UART_Transmit(huart, &evt, 1, 10);
 }
 
 void Reset_RPI_Data(RPI_Data_t* data)
