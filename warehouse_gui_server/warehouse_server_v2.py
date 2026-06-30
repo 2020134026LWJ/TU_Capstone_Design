@@ -244,10 +244,14 @@ class WarehouseServer:
         # 가상 차감: 다른 사용자가 같은 물건을 동시에 못 가져가도록 예약
         self.reserve_inventory(user_id, order_number)
 
+        prev_order = self.current_orders.get(user_id)
         self.current_orders[user_id] = order_number
 
-        # 새 주문 시작 → 작업 중인 선반 없음
-        self.active_shelf.pop(user_id, None)
+        # 새 주문 시작 시에만 작업 중인 선반 해제.
+        # 같은 주문을 재진입(사용자 버튼 재선택 등)할 땐 active_shelf를 유지해야
+        # GUI가 파란색(활성) 셀을 복원할 수 있다.
+        if prev_order != order_number:
+            self.active_shelf.pop(user_id, None)
 
         picking_list = self.generate_picking_list(user_id, order_number)
         shelf_groups = self.extract_shelf_groups(picking_list)
