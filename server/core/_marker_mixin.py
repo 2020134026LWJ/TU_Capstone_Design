@@ -104,17 +104,21 @@ class MarkerMixin:
 
         # heading 업데이트: 마커 메시지에 포함된 경우 우선 사용 (ArUco 포즈 기반)
         # 없으면 경로 기반 계산 (이전 방식 폴백)
+        # 실물(옵션 a): 카메라 yaw는 절대방위가 아니라 heading 미전송 → 경로 기반 계산.
+        # 시뮬: IsaacCamera가 실제 heading 전송 → 그대로 사용.
         reported_heading = data.get("heading")
         if reported_heading is not None:
             robot.heading = int(reported_heading)
-            if not robot.heading_initialized:
-                robot.heading_initialized = True
-                print(f"[RequestHandler] Robot {rid}: heading initialized to {robot.heading}° (first marker)")
-                self._try_assign_pending_tasks()
         else:
             robot.heading = self.path_planner.calc_heading_from_path(
                 robot.planned_path, node
             ) or robot.heading
+        # 첫 마커 = heading 확인 완료. heading 출처(보고/경로)와 무관하게 가용 게이트 해제.
+        # (이 블록이 reported_heading 분기 안에 있으면 옵션 a에서 영영 False → 배차 안 됨)
+        if not robot.heading_initialized:
+            robot.heading_initialized = True
+            print(f"[RequestHandler] Robot {rid}: heading initialized to {robot.heading}° (first marker)")
+            self._try_assign_pending_tasks()
 
         # planned_path slide: 이미 지나친 노드 제거 → A* 시간 예약을 실제 진행과 정합
         # (heading 계산이 prev_node를 보므로 위 fallback 뒤에서 실행)

@@ -4,7 +4,7 @@ TU Capstone Design - AGV 물류 피킹 시스템
 
   서버(MQTT) ↔ Bridge(RPi) ↔ STM32(UART)
   + 같은 라파의 카메라 스레드가 set_marker_offset()으로 최신 ArUco offset 공급
-  ※ Isaac Sim(콜백) 버전은 bridge.py
+  ※ Isaac Sim(콜백) 버전은 isaac_simulation/bridge_isaac.py (이 파일은 실물 AGV 전용)
 
 MQTT 토픽:
   수신: /agv/cmd         서버 → AGV 명령
@@ -13,13 +13,20 @@ MQTT 토픽:
 
 UART 프로토콜 (RPi ↔ STM32, 주원이 rpi_uart.c / main.c 기준):
   송신 (Bridge→STM): ASCII "<command,±xxxx,±yyyy,±wwww>"  (21바이트)
-      command = 1자리(1~7), x/y/yaw = (mm·deg)×10 정수 → STM이 /10로 복원
+      command = 1자리(1~7, 0=carrier/무명령), x/y/yaw = (mm·deg)×10 정수 → STM이 /10로 복원
       x/y/yaw offset = 카메라가 본 ArUco 오프셋 (set_marker_offset로 갱신한 최신값)
   수신 (STM→Bridge): 단일 바이트  0x81=DONE(동작완료) / 0xFF=ACK(명령수신)
 
+  전송 흐름 (주원이 카메라와 동일 — bridge가 인수):
+      set_marker_offset()가 매 프레임 패킷 스트리밍. command은 평소 0,
+      MQTT 명령 수신 시 _pending_code에 실림 → EVT_ACK 오면 0으로 복귀.
+
+[carrier 흐름 — 해결(2026-06-30)] 명령 계속 보내도 OK. 주원이가 STM에 DMA 처리 →
+  명령은 필요할 때만 동작. bridge는 오프셋을 연속 스트리밍, command=0이 기본.
+
 [미팅 후 조정 필요 — TODO]
-  (1) carrier 흐름 : STM이 command=0 패킷을 계속 받아야 하나? (지금은 cmd 시 1회 송신)
   (2) forward 완료신호 : STM은 forward도 DONE을 보냄 ↔ 서버는 marker로 도착 인지 → 조율
+  (3) 통신 유실 복구 : DONE 누락 시 timeout 주체(bridge/서버) + STM 상태조회 가능한가
 
 [결정됨 — 카메라(비전)는 주원이 영역, bridge는 받기만]
   - UART 포트 = /dev/ttyAMA10 (주원이 카메라 코드와 동일)
@@ -34,19 +41,13 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-# ─── 설정 ───
-
-MQTT_HOST = "localhost"
-MQTT_PORT = 1883
-
-TOPIC_CMD     = "/agv/cmd"
-TOPIC_MARKER  = "/agv/marker"
-TOPIC_CMD_ACK = "/agv/cmd_ack"
-
-# UART 설정
-UART_PORT    = "/dev/ttyAMA10"  # 주원이 카메라 코드와 동일 포트
-UART_BAUD    = 115200
-UART_ENABLED = False  # True로 바꾸면 실제 UART 활성화
+# ─── 설정은 hardware/config.py 에서 (배포 시 그 파일만 수정) ───
+# 모듈 전역으로 가져옴 → SIL 테스트가 br.UART_ENABLED/br.UART_PORT 를 monkeypatch 가능
+from hardware.config import (
+    MQTT_HOST, MQTT_PORT,
+    TOPIC_CMD, TOPIC_MARKER, TOPIC_CMD_ACK,
+    UART_PORT, UART_BAUD, UART_ENABLED,
+)
 
 
 # ─── 명령 / 이벤트 코드 (주원이 rpi_uart.h와 동일) ───
@@ -84,6 +85,10 @@ class Bridge:
         # 마지막으로 전송한 명령 추적 (DONE 수신 시 ack 타입 결정)
         self._last_cmd: Optional[str] = None
 
+        # 현재 STM으로 실어 보내는 명령 코드 (0=carrier/무명령).
+        # MQTT 명령 수신 시 set → EVT_ACK 오면 0으로 복귀 (주원이 카메라와 동일 흐름)
+        self._pending_code = 0
+
         # 카메라 스레드가 갱신하는 최신 ArUco offset (x_mm, y_mm, yaw_deg)
         # → UART 송신 시 command과 합쳐 패킷에 실림
         self._latest_offset = (0.0, 0.0, 0.0)
@@ -119,32 +124,45 @@ class Bridge:
                 self._dispatch_cmd(cmd)
 
     def _dispatch_cmd(self, cmd: str):
+        code = CMD_CODE.get(cmd)
+        if code is None:
+            print(f"[Bridge-{self.rid}] Unknown cmd: {cmd}")
+            return
         print(f"[Bridge-{self.rid}] <- cmd: {cmd}")
         if cmd != "forward":
-            self._last_cmd = cmd  # DONE 수신 시 ack 타입 결정용
-        self._uart_send(cmd)
+            self._last_cmd = cmd      # DONE 수신 시 ack 타입 결정용
+        self._pending_code = code     # arm: 다음 패킷부터 실려 나감 (EVT_ACK까지 반복)
+        self._uart_send_packet()      # 즉시 1회도 송신 (마커 안 보여도 명령 전달 보장)
 
     # ─── 카메라 offset 공급 (같은 라파 카메라 스레드가 호출) ───────────────────
 
     def set_marker_offset(self, x_mm: float, y_mm: float, yaw_deg: float):
-        """카메라 스레드가 최신 ArUco offset 갱신 → 다음 UART 송신에 합쳐짐.
+        """카메라 스레드가 최신 ArUco offset 갱신 → 즉시 STM으로 패킷 스트리밍.
 
+        주원이 카메라가 매 프레임 UART에 쓰던 것을 bridge가 인수받음.
+        command은 평소 0(carrier), MQTT 명령 수신 시에만 실림.
         같은 라파 안 메모리 공유라 MQTT 불필요. 단순 변수 대입(원자적)이라 락 불요.
         """
         self._latest_offset = (float(x_mm), float(y_mm), float(yaw_deg))
+        self._uart_send_packet()
 
     # ─── 발행 ─────────────────────────────────────────────────────────────────
 
-    def publish_marker(self, marker_id: int, heading_deg: int):
-        """ArUco 마커 감지 결과 서버에 보고 (카메라 스레드가 호출)"""
+    def publish_marker(self, marker_id: int, heading_deg: Optional[int] = None):
+        """ArUco 마커 감지 결과 서버에 보고 (카메라 스레드가 호출).
+
+        옵션 a: heading_deg 미전달 → 서버가 경로 기반으로 heading 계산.
+        (카메라 yaw는 마커 대비 회전 오프셋이지 절대방위가 아니므로 heading으로 안 보냄)
+        """
         msg = {
             "rid": self.rid,
             "marker_id": marker_id,
-            "heading": heading_deg,
             "ts": int(time.time()),
         }
+        if heading_deg is not None:
+            msg["heading"] = heading_deg
         self._client.publish(TOPIC_MARKER, json.dumps(msg))
-        print(f"[Bridge-{self.rid}] -> /agv/marker  id={marker_id}  heading={heading_deg}°")
+        print(f"[Bridge-{self.rid}] -> /agv/marker  id={marker_id}")
 
     def publish_cmd_ack(self, cmd: str):
         """명령 완료 서버에 보고"""
@@ -154,17 +172,16 @@ class Bridge:
 
     # ─── UART 송신 (ASCII <cmd,x,y,yaw>) ──────────────────────────────────────
 
-    def _uart_send(self, cmd: str):
-        """cmd 문자열 + 최신 카메라 offset → 주원이 ASCII 패킷 전송"""
-        code = CMD_CODE.get(cmd)
-        if code is None:
-            print(f"[Bridge-{self.rid}] Unknown cmd: {cmd}")
-            return
+    def _uart_send_packet(self):
+        """현재 armed 명령(_pending_code) + 최신 카메라 offset → 주원이 ASCII 패킷 전송.
+
+        set_marker_offset(프레임마다) + _dispatch_cmd(명령 시)에서 호출.
+        _pending_code=0이면 carrier 패킷(오프셋만, STM PID 정렬용).
+        """
         x, y, yaw = self._latest_offset
         # 주원이 포맷: <command,±xxxx,±yyyy,±wwww>  (offset은 ×10 정수, STM이 /10 복원)
-        msg = f"<{code},{int(x * 10):+05d},{int(y * 10):+05d},{int(yaw * 10):+05d}>"
+        msg = f"<{self._pending_code},{int(x * 10):+05d},{int(y * 10):+05d},{int(yaw * 10):+05d}>"
         self._uart_write(msg.encode())
-        print(f"[Bridge-{self.rid}] -> UART {msg}")
 
     def _uart_write(self, data: bytes):
         if not UART_ENABLED or not self._serial:
@@ -193,12 +210,17 @@ class Bridge:
     def _handle_uart_event(self, event: int):
         """STM32 단일 바이트 이벤트 → cmd_ack 발행"""
         if event == EVT_DONE:
-            # TODO(미팅): STM은 forward 완료도 DONE을 보냄 → 서버 marker 도착신호와 조율 필요
-            cmd = self._last_cmd or "forward"
+            # forward 완료는 카메라 마커가 서버에 보고함(_marker_mixin이 forward의 ACK로 사용).
+            # → forward DONE은 서버로 보내지 않음 (중복 + 다음 in_flight 명령 오ack 방지, 문제 #1).
+            #   forward는 _dispatch_cmd에서 _last_cmd를 안 set하므로 None → 여기서 자동 스킵.
+            #   turn/lift만 _last_cmd가 있어 cmd_ack 발행.
+            cmd = self._last_cmd
             self._last_cmd = None
-            self.publish_cmd_ack(cmd)
+            if cmd is not None:
+                self.publish_cmd_ack(cmd)
         elif event == EVT_ACK:
-            pass  # 명령 수신 확인 (로깅 불필요)
+            # STM이 명령 수신 확인 → carrier(0)로 복귀 (다음 패킷부터 오프셋만 스트리밍)
+            self._pending_code = 0
 
     # ─── UART 초기화 ──────────────────────────────────────────────────────────
 
