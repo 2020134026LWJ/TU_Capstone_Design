@@ -25,14 +25,14 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '10.220.55.38'
+SERVER_IP = '172.30.1.87'
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 
 # 이 파이가 설치된 작업대 번호 (작업대-파이 고정: 파이1=1, 파이2=2)
 # 사용자는 파이에서 1·2 모두 선택 가능하지만 작업대는 파이에 고정된다.
 # AGV가 선반을 어느 작업대로 보낼지 알 수 있도록 모든 발행 메시지에 실어 보낸다.
-WORKSTATION_ID = 2
+WORKSTATION_ID = 1
 
 Window.size = (800, 448)
 Window.borderless = True
@@ -432,6 +432,22 @@ class WarehouseGUI(MDBoxLayout):
         except Exception as e:
             print(f"MQTT 전송 실패: {e}")
 
+    def send_mqtt_release_hold(self):
+        """그리드 빨강(주문 품목 전부 완료) 시 점유만 해제 요청.
+        '다음 작업'을 누르면 order/start로 다시 점유된다."""
+        if not self.mqtt_client:
+            return
+        msg = {
+            "type": "release_hold",
+            "사용자ID": self.selected_user_id,
+            "주문번호": self.current_order_number,
+            "작업대": WORKSTATION_ID,
+        }
+        try:
+            self.mqtt_client.publish("warehouse/order/release_hold", json.dumps(msg, ensure_ascii=False))
+        except Exception as e:
+            print(f"MQTT 전송 실패: {e}")
+
     def send_mqtt_all_orders_complete(self):
         if not self.mqtt_client:
             return
@@ -469,6 +485,8 @@ class WarehouseGUI(MDBoxLayout):
                     self.grid_label.text = '주문 완료 | "다음 작업" 버튼을 누르세요'
                     self._show_next_button()
                     self._unlock_all_users()
+                    # 서버 점유도 해제 → 같은 작업대에서 사용자 전환 시 유령 점유 방지
+                    self.send_mqtt_release_hold()
                     return
                 # 피킹리스트 확인 후 MQTT 전송
                 self.send_mqtt_start_order()
@@ -537,10 +555,40 @@ class WarehouseGUI(MDBoxLayout):
             # 주문 1건 완료 → 잠금 해제 (다른 사용자가 작업할 수 있음)
             # '다음 작업'을 누르면 다음 주문이 로드되며 fetch_picking_list에서 다시 잠금
             self._unlock_all_users()
+            # 서버 점유도 해제 → 같은 작업대에서 사용자 전환 시 유령 점유 방지
+            self.send_mqtt_release_hold()
 
     def on_next_button(self, instance):
-        """'다음 작업' 버튼: 현재 주문 완료 처리 후 다음 주문으로 진행"""
+        """'다음 작업' 버튼: 서버 점유 확인 후 다음 주문으로 진행.
+        다른 작업대가 이 사용자를 선점(작업 중)하고 있으면 차단하고 팝업을 띄운다."""
         self._hide_next_button()
+        threading.Thread(
+            target=self._check_hold_and_advance,
+            args=(self.selected_user_id,), daemon=True
+        ).start()
+
+    def _check_hold_and_advance(self, user_id):
+        busy_ws = None
+        try:
+            url = f"http://{SERVER_IP}:{HTTP_PORT}/api/user/{user_id}/state"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                busy_ws = resp.json().get('점유작업대')
+        except Exception as e:
+            print(f"점유 확인 실패: {e}")
+        Clock.schedule_once(
+            lambda dt: self._after_hold_check(user_id, busy_ws), 0
+        )
+
+    def _after_hold_check(self, user_id, busy_ws):
+        # 확인 도중 사용자가 바뀌었으면 무시
+        if self.selected_user_id != user_id:
+            return
+        # 다른 작업대가 이 사용자를 선점 중이면 진행 차단
+        if busy_ws is not None and busy_ws != WORKSTATION_ID:
+            self.show_error_dialog(f'작업대{busy_ws}에서 선점 중입니다', title='알림')
+            self._show_next_button()  # 버튼 다시 노출 → 해제 후 재시도 가능
+            return
         self._finish_order_and_advance()
 
     def _show_next_button(self):
@@ -611,9 +659,9 @@ class WarehouseGUI(MDBoxLayout):
 
         open_dialog()
 
-    def show_error_dialog(self, message):
+    def show_error_dialog(self, message, title='오류'):
         d = MDDialog(
-            title='오류',
+            title=title,
             text=message,
             buttons=[MDFlatButton(text='확인', font_name=FONT_NAME)],
         )

@@ -7,6 +7,7 @@
 - [테스트용] 선반 도착 신호 수동 전송 (콘솔 입력)
   → 추후 알고리즘 코드가 직접 shelf_arrived를 전송하면 서버 코드는 사용 안 함
 """
+import os
 import sqlite3
 import json
 import threading
@@ -31,7 +32,11 @@ class WarehouseServer:
         self.mqtt_port = mqtt_port
         self.http_port = http_port
         self.mqtt_client = None
-        
+
+        # 입고 완료 로그 Excel 파일 (DB 폴더와 같은 위치)
+        self.inbound_log_file = os.path.join(
+            os.path.dirname(os.path.abspath(db_path)) or '.', '입고로그.xlsx')
+
         # 사용자별 현재 주문 추적
         self.current_orders = {}  # {user_id: order_number}
 
@@ -138,6 +143,24 @@ class WarehouseServer:
         def get_inventory_status():
             status = self.get_inventory_status()
             return jsonify(status), 200
+
+        # ── 입고(入庫) 전용 API ────────────────────────────────────────
+        @self.app.route('/api/inbound/search', methods=['GET'])
+        def inbound_search():
+            """품명으로 물건 검색 (부분 일치). 입고 GUI가 사용."""
+            query = request.args.get('q', '').strip()
+            results = self.search_items(query)
+            return jsonify({'status': 'success', '결과': results}), 200
+
+        @self.app.route('/api/inbound/item/<path:item>', methods=['GET'])
+        def inbound_item(item):
+            """품명으로 현재 재고/선반번호 조회 (입고 후 수량 확인용)."""
+            info = self.get_item_info(item)
+            if info is None:
+                return jsonify({'status': 'error', 'message': '물건을 찾을 수 없습니다'}), 404
+            shelf_number, stock = info
+            return jsonify({'status': 'success', '품명': item,
+                            '선반번호': shelf_number, '재고': stock}), 200
         
         @self.app.route('/health', methods=['GET'])
         def health_check():
@@ -170,6 +193,11 @@ class WarehouseServer:
             client.subscribe("warehouse/shelf/complete")
             client.subscribe("warehouse/order/complete")
             client.subscribe("warehouse/order/all_complete")
+            # 그리드 빨강(주문 품목 전부 완료) 시 점유만 해제 — 같은 작업대에서 다른 사용자 선택 허용
+            client.subscribe("warehouse/order/release_hold")
+            # 입고 전용 토픽 (피킹과 별개)
+            client.subscribe("warehouse/inbound/request")
+            client.subscribe("warehouse/inbound/complete")
             print("📡 토픽 구독 완료")
         else:
             print(f"❌ MQTT 연결 실패: {rc}")
@@ -188,8 +216,14 @@ class WarehouseServer:
             self.handle_shelf_complete(payload)
         elif topic == "warehouse/order/complete":
             self.handle_order_complete(payload)
+        elif topic == "warehouse/order/release_hold":
+            self.handle_release_hold(payload)
         elif topic == "warehouse/order/all_complete":
             self.handle_all_orders_complete(payload)
+        elif topic == "warehouse/inbound/request":
+            self.handle_inbound_request(payload)
+        elif topic == "warehouse/inbound/complete":
+            self.handle_inbound_complete(payload)
     
     def handle_order_start(self, data):
         """주문 시작 처리 - 가상 차감(reserved)으로 이중 피킹 방지 + 선반 목록 준비"""
@@ -453,6 +487,15 @@ class WarehouseServer:
             del self.user_shelf_groups[user_id]
         self.active_shelf.pop(user_id, None)
 
+    def handle_release_hold(self, data):
+        """그리드 빨강(주문 품목 전부 완료) 시 점유만 해제.
+        주문 완료/예약 해제는 건드리지 않는다 — '다음 작업'을 누르면
+        order/start로 다시 점유가 등록된다. 같은 작업대에서 사용자2로
+        전환하거나, 사용자1이 다른 작업대에서 유령 점유로 남는 것을 방지한다."""
+        user_id = data.get('사용자ID')
+        if self.user_busy.pop(user_id, None) is not None:
+            print(f"🔓 점유 해제(주문 품목 완료): 사용자{user_id}")
+
     def handle_all_orders_complete(self, data):
         """전체 주문 완료 처리 - 혹시 남은 예약 해제"""
         user_id = data.get('사용자ID')
@@ -466,7 +509,129 @@ class WarehouseServer:
             del self.current_orders[user_id]
         self.active_shelf.pop(user_id, None)
         self.user_busy.pop(user_id, None)  # 전체 완료 → 점유 해제(안전)
-    
+
+    # ── 입고(入庫) 처리 — 피킹과 완전히 별개 ───────────────────────────
+
+    def search_items(self, query):
+        """품명 부분 일치 검색 → [{선반번호, 품명, 재고}, ...]"""
+        with self.db_lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            if query:
+                cursor.execute(
+                    "SELECT shelf_number, item, stock FROM inventory "
+                    "WHERE item LIKE ? ORDER BY zone, row, tier",
+                    (f'%{query}%',))
+            else:
+                cursor.execute(
+                    "SELECT shelf_number, item, stock FROM inventory "
+                    "ORDER BY zone, row, tier")
+            rows = cursor.fetchall()
+            conn.close()
+        return [{'선반번호': s, '품명': i, '재고': st} for s, i, st in rows]
+
+    def get_item_info(self, item):
+        """품명으로 (선반번호, 재고) 조회. 없으면 None."""
+        with self.db_lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT shelf_number, stock FROM inventory WHERE item = ?", (item,))
+            result = cursor.fetchone()
+            conn.close()
+        return result if result else None
+
+    def handle_inbound_request(self, data):
+        """입고 GUI의 '선반 필요' 요청 → 선반을 입고대로 보낸다.
+
+        지금은 AGV/알고리즘을 대신해 잠깐 뒤 도착 신호를 발행한다.
+        (추후 실제 알고리즘 코드가 warehouse/inbound/arrived 를 직접 발행하면
+         아래 시뮬레이션은 대체된다.)
+        """
+        item = data.get('품명')
+        shelf_group = data.get('선반번호')
+        station = data.get('입고작업대')
+        print(f"📥 입고 요청: {item} (선반 {shelf_group} 필요, 입고대 {station})")
+
+        def deliver():
+            if not self.mqtt_client:
+                return
+            msg = {
+                "type": "inbound_arrived",
+                "품명": item,
+                "선반번호": shelf_group,
+                "입고작업대": station,
+            }
+            self.mqtt_client.publish(
+                "warehouse/inbound/arrived",
+                json.dumps(msg, ensure_ascii=False))
+            print(f"🚚 (시뮬) 선반 {shelf_group} 입고대 {station} 도착 신호 전송")
+
+        # 2초 뒤 도착 (AGV 이동 시뮬레이션)
+        threading.Timer(2.0, deliver).start()
+
+    def handle_inbound_complete(self, data):
+        """입고 완료 신호 → 해당 품목 재고를 더하고 입고 로그(Excel)에 기록한다."""
+        item = data.get('품명')
+        quantity = data.get('수량', 0)
+        shelf_group = data.get('선반번호')
+        station = data.get('입고작업대')
+        print(f"📦 입고 완료: {item} +{quantity}개 (선반 {shelf_group})")
+        if item and quantity and quantity > 0:
+            new_stock = self.add_stock(item, quantity)
+            if new_stock is not None:
+                self.write_inbound_log(item, shelf_group, quantity, new_stock, station)
+
+    def add_stock(self, item, quantity):
+        """입고: 재고 증가. 입고 후 재고를 반환(없는 품목이면 None)."""
+        new_stock = None
+        with self.db_lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE inventory SET stock = stock + ? WHERE item = ?",
+                    (quantity, item))
+                if cursor.rowcount == 0:
+                    print(f"   ⚠️  물건을 찾을 수 없음: {item} (입고 무시)")
+                else:
+                    cursor.execute(
+                        "SELECT stock FROM inventory WHERE item = ?", (item,))
+                    new_stock = cursor.fetchone()[0]
+                    print(f"   ✓ {item}: +{quantity}개 → 현재 재고 {new_stock}개")
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"   ❌ 입고 재고 증가 실패: {e}")
+            conn.close()
+        return new_stock
+
+    def write_inbound_log(self, item, shelf_group, quantity, new_stock, station):
+        """입고 완료 내역을 Excel 파일(입고로그.xlsx)에 한 줄 추가한다.
+
+        파일이 없으면 헤더와 함께 새로 만든다.
+        컬럼: 입고시각 | 품명 | 선반번호 | 입고수량 | 입고후재고 | 입고작업대
+        """
+        from datetime import datetime
+        headers = ['입고시각', '품명', '선반번호', '입고수량', '입고후재고', '입고작업대']
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        row = [timestamp, item, shelf_group, quantity, new_stock, station]
+        try:
+            if os.path.exists(self.inbound_log_file):
+                wb = load_workbook(self.inbound_log_file)
+                ws = wb.active
+            else:
+                from openpyxl import Workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.title = '입고로그'
+                ws.append(headers)
+            ws.append(row)
+            wb.save(self.inbound_log_file)
+            print(f"   📝 입고 로그 기록: {self.inbound_log_file} ← {row}")
+        except Exception as e:
+            print(f"   ❌ 입고 로그 기록 실패: {e}")
+
     def extract_shelf_groups(self, picking_list):
         """피킹리스트에서 중복 없는 선반 그룹(구역-열) 목록 추출
 
