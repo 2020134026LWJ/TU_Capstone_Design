@@ -95,6 +95,97 @@ raw UART는 ACK/DONE이 1회 송신이라, **DONE 유실 → 멈춤 / ACK 유실
 
 ---
 
+## 라파 카메라 환경 구축 — Pi 5 + Ubuntu 24.04 (2026-07-11, 검증됨)
+
+> **왜 어려운가**: Raspberry Pi OS면 `sudo apt install python3-picamera2` 한 방이다.
+> 그런데 **Ubuntu 24.04에는 그 패키지가 아예 없고**, 우분투가 배포한 libcamera(0.2.0)에는
+> **Pi 5용 ISP 파이프라인(PiSP)이 빠져 있다** → 카메라가 **0대**로 잡힌다.
+> 커널은 센서(ov5647)를 정상 인식하는데도 그렇다. apt로는 절대 해결 안 됨(백포트에도 없음).
+> → **libpisp / libcamera / kmsxx를 소스 빌드**해야 한다. (Pi OS를 쓰면 이 절 전체가 불필요)
+
+**증상 판별**: `cam -l` → `Available cameras:` 뒤가 비어 있음 / `ls /usr/lib/aarch64-linux-gnu/libcamera/`에
+`ipa_rpi_vc4.so`(Pi 4 이하용)만 있고 **`ipa_rpi_pisp.so`가 없음**.
+
+```bash
+# 0) 의존성
+sudo apt install -y libcamera-dev libepoxy-dev libjpeg-dev libtiff5-dev libpng-dev \
+  qtbase5-dev libavcodec-dev libavdevice-dev libavformat-dev libswresample-dev \
+  libboost-dev libboost-program-options-dev libgnutls28-dev openssl pybind11-dev \
+  meson ninja-build cmake python3-yaml python3-ply python3-jinja2 \
+  libglib2.0-dev libgstreamer-plugins-base1.0-dev libdrm-dev libexif-dev libfmt-dev \
+  libyaml-dev libssl-dev libevent-dev python3-pyqt5 python3-prctl python3-pip
+
+# 1) libpisp — Pi 5 ISP 저수준 라이브러리 (우분투에 없음)
+git clone --depth 1 https://github.com/raspberrypi/libpisp.git && cd libpisp
+meson setup build && ninja -C build && sudo ninja -C build install && sudo ldconfig && cd ..
+
+# 2) libcamera — PiSP 파이프라인 켜서 빌드 (핵심)
+git clone --depth 1 https://github.com/raspberrypi/libcamera.git && cd libcamera
+meson setup build --buildtype=release \
+  -Dpipelines=rpi/vc4,rpi/pisp -Dipas=rpi/vc4,rpi/pisp \
+  -Dv4l2=true -Dgstreamer=enabled -Dtest=false -Dlc-compliance=disabled \
+  -Dcam=disabled -Dqcam=disabled -Ddocumentation=disabled -Dpycamera=enabled
+ninja -C build && sudo ninja -C build install && sudo ldconfig && cd ..
+
+# 3) kmsxx — picamera2가 import 시점에 요구하는 pykms
+git clone https://github.com/tomba/kmsxx.git && cd kmsxx && git submodule update --init
+meson setup build -Dpykms=enabled && ninja -C build && sudo ninja -C build install && cd ..
+
+# 4) 파이썬 패키지
+pip3 install picamera2 opencv-contrib-python --break-system-packages
+#   ※ apt python3-opencv(4.6)에는 cv2.aruco.ArucoDetector가 없다 → pip 최신판 필수
+
+# 5) 장치 권한
+sudo usermod -aG video,render $USER      # 재로그인 필요
+sudo tee /etc/udev/rules.d/99-camera.rules > /dev/null <<'EOF'
+SUBSYSTEM=="video4linux", KERNEL=="video*", MODE="0666"
+SUBSYSTEM=="media", KERNEL=="media*", MODE="0666"
+SUBSYSTEM=="video4linux", KERNEL=="v4l-subdev*", MODE="0666"
+SUBSYSTEM=="dma_heap", MODE="0666"
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# 6) ★ 파이썬 경로 연결 — 우분투 함정. 이거 안 하면 위를 다 해도 import 실패
+mkdir -p ~/.local/lib/python3.12/site-packages
+echo "/usr/local/lib/python3/dist-packages"                     >  ~/.local/lib/python3.12/site-packages/libcamera-local.pth
+echo "/usr/local/lib/aarch64-linux-gnu/python3.12/site-packages" >  ~/.local/lib/python3.12/site-packages/pykms-local.pth
+```
+
+**확인**: `python3 -c "from picamera2 import Picamera2; print(Picamera2.global_camera_info())"`
+→ `[{'Model': 'ov5647', ...}]` 가 나오면 성공 (빈 리스트면 PiSP가 안 붙은 것).
+
+**함정 요약** (하나라도 빠지면 조용히 실패):
+1. `libcamera-dev`(apt) 위에 rpicam-apps만 빌드 → **API가 낡아 컴파일 에러**. libcamera부터 소스로.
+2. 우분투는 `/usr/local/lib/python3/dist-packages`와 `.../python3.12/site-packages`를 **sys.path에 안 넣는다** → `.pth` 필수.
+3. `video` 그룹 미가입 → `/dev/media*` **Permission denied** → 카메라 0대.
+4. OpenCV 5.0은 `detectMarkers`의 `ids` 모양이 4.x와 다르다(`[[9]]` → `[9]`). `camera.py`는 양쪽 호환(`np.ravel`).
+
+---
+
+## 벤치 테스트 — 카메라만으로 서버↔라파 통신 검증 (STM·모터 없이)
+
+로봇(STM32+모터)이 없어도 **서버 알고리즘 전체**를 실물 카메라로 굴려볼 수 있다.
+서버는 AGV 위치를 오직 **마커 ID**로만 알기 때문에, **마커 카드를 손으로 보여주면** 된다
+(공간 정확도는 STM 몫이라 이 테스트와 무관).
+
+```bash
+# 라파 (repo 루트)
+python3 -m virtual_test.bench_camera.run_bench 1              # 미리보기 창 (ssh -X 로 노트북에 표시)
+python3 -m virtual_test.bench_camera.run_bench 1 --no-preview # 헤드리스
+python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 9   # PC 예행연습(가짜 로봇)
+
+# PC: 마커 시트 인쇄 (검은 사각형 25mm = camera.py marker_size)
+python3 -m hardware.make_marker_sheet 9 17 25 26 27
+```
+
+- 실물 `Bridge`를 **상속만** 하므로 MQTT 경로(토픽·페이로드·발행 시점)는 진짜와 동일.
+  STM이 없어 안 오는 **turn/lift 완료 신호만 가짜 타이머**가 채운다(`forward`는 마커 보고가 완료 신호).
+- 배포 파일(`hardware/`)은 건드리지 않는다 — SIL과 같이 `br.UART_ENABLED` monkeypatch.
+- **Isaac 트윈과 함께**: PC에서 `TWIN=1 python.sh isaac_simulation/step7_kinematic.py`
+  → 라파에 마커를 보여줄 때마다 **시뮬 AGV가 따라 움직인다**.
+
+---
+
 ## SIL — 통신 검증 (실물 없이)
 
 SIL 하니스는 **`virtual_test/software_in_the_loop/`** 로 이동됨 (알고리즘 테스트와 함께 `virtual_test/`에서 관리). 가짜 STM + 가상 UART(pty)로 `bridge_rpi`의 명령-응답을 실물 없이 검증한다 (상세는 `run_sil.py` docstring).

@@ -95,6 +95,12 @@ class RpiCamera:
 
         result = (None, None, None, None)
 
+        # 마커 ID 배열 평탄화 — OpenCV 버전별 모양 차이 흡수.
+        #   4.x: ids = [[9], [17]]  (N,1) → ids[i][0]
+        #   5.x: ids = [9, 17]      (N,)  → ids[i] 가 이미 스칼라 (ids[i][0]은 IndexError)
+        # 두 버전 모두에서 동작하도록 여기서 1차원으로 펴서 marker_ids[i]로 쓴다.
+        marker_ids = np.ravel(ids) if ids is not None else np.array([])
+
         # 마커가 검출되면 표시 및 포즈 추정
         if corners:
             for i, corner in enumerate(corners):
@@ -145,7 +151,7 @@ class RpiCamera:
                 if self.show_preview:
                     corner = corners[i][0]
                     pos = (int(topLeft[0]), int(topLeft[1]) - 10)
-                    text = f"ID:{ids[i][0]} ({x}, {y})mm {yaw_deg}deg"
+                    text = f"ID:{marker_ids[i]} ({x}, {y})mm {yaw_deg}deg"
                     cv2.putText(frame_undistorted, text, pos,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
@@ -164,7 +170,7 @@ class RpiCamera:
                 #   → 주원이 원본은 여기서 msg = f"<{command},..>" 를 uart.write() 했음.
                 #     UART 송신은 bridge_rpi 담당 → 여기선 첫 마커 (id, x, y, yaw)만 반환.
                 if result[0] is None:
-                    result = (int(ids[i][0]), float(x), float(y), float(yaw_deg))
+                    result = (int(marker_ids[i]), float(x), float(y), float(yaw_deg))
 
         # 프레임 표시
         if self.show_preview:

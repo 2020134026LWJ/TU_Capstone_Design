@@ -23,6 +23,8 @@ isaac_simulation/aruco_markers/aruco_{N}.png (DICT_4X4_250, ID=노드번호)를
 import argparse
 import os
 
+import matplotlib
+matplotlib.use("Agg")          # 파일 저장 전용 — 디스플레이 없는 환경(SSH 등)에서도 동작
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.backends.backend_pdf import PdfPages
@@ -38,9 +40,39 @@ LABEL_H = 8.0            # mm — 마커 아래 라벨 높이
 QUIET = 6.0              # mm — 마커 주변 흰 여백 (ArUco 검출 필수)
 
 
+def black_square_ratio(png_path: str) -> float:
+    """PNG 안에서 '검은 사각형'이 차지하는 비율 (이미지엔 흰 여백이 함께 들어 있다).
+
+    camera.py의 marker_size(25mm)는 solvePnP에 쓰이는 '검은 사각형' 한 변이다.
+    PNG를 그냥 25mm로 인쇄하면 검은 변은 19.6mm가 되어 거리(x/y)가 27% 틀어진다.
+    → 이 비율로 나눠서 배치해야 검은 변이 정확히 25mm가 된다.
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(png_path, cv2.IMREAD_GRAYSCALE)
+    pad = cv2.copyMakeBorder(img, 60, 60, 60, 60, cv2.BORDER_CONSTANT, value=255)
+    det = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250),
+        cv2.aruco.DetectorParameters(),
+    )
+    corners, ids, _ = det.detectMarkers(pad)
+    if not corners:
+        raise RuntimeError(f"{png_path}: ArUco 검출 실패 — 비율 계산 불가")
+    p = corners[0].reshape(4, 2)
+    side_px = float(np.linalg.norm(p[0] - p[1]))
+    return side_px / img.shape[1]
+
+
 def build_sheet(node_ids, marker_mm: float, out_path: str) -> None:
-    cell_w = marker_mm + 2 * QUIET
-    cell_h = marker_mm + 2 * QUIET + LABEL_H
+    # 검은 사각형이 marker_mm이 되도록 이미지 배치 크기를 키운다 (여백 보정)
+    ratio = black_square_ratio(os.path.join(ARUCO_DIR, f"aruco_{node_ids[0]}.png"))
+    img_mm = marker_mm / ratio
+    print(f"  여백 보정: 검은 사각형 {marker_mm:.0f}mm → 이미지 배치 {img_mm:.1f}mm "
+          f"(검은사각형/이미지 = {ratio:.3f})")
+
+    cell_w = img_mm + 2 * QUIET
+    cell_h = img_mm + 2 * QUIET + LABEL_H
 
     cols = max(1, int((A4_W - 2 * MARGIN) // cell_w))
     rows = max(1, int((A4_H - 2 * MARGIN) // cell_h))
@@ -64,7 +96,7 @@ def build_sheet(node_ids, marker_mm: float, out_path: str) -> None:
 
                 ax = fig.add_axes([
                     x_mm / A4_W, y_mm / A4_H,
-                    marker_mm / A4_W, marker_mm / A4_H,
+                    img_mm / A4_W, img_mm / A4_H,
                 ])
                 ax.imshow(mpimg.imread(png), cmap="gray", interpolation="nearest")
                 ax.set_xticks([]); ax.set_yticks([])
@@ -73,14 +105,14 @@ def build_sheet(node_ids, marker_mm: float, out_path: str) -> None:
 
                 # 라벨 — 노드 번호 + 북쪽 방향 (마커 위쪽이 북)
                 fig.text(
-                    (x_mm + marker_mm / 2) / A4_W,
+                    (x_mm + img_mm / 2) / A4_W,
                     (y_mm - LABEL_H / 2) / A4_H,
                     f"node {nid}   ↑N",
                     ha="center", va="center", fontsize=7,
                 )
 
             fig.text(0.5, 0.015,
-                     f"ArUco DICT_4X4_250 · marker {marker_mm:.0f}mm "
+                     f"ArUco DICT_4X4_250 · 검은사각형 {marker_mm:.0f}mm "
                      f"(= camera.py marker_size) · '↑N' 을 맵 북쪽으로",
                      ha="center", fontsize=6, color="0.4")
             pdf.savefig(fig)

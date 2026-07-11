@@ -25,7 +25,7 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '10.220.55.38'
+SERVER_IP = 'UB-Region5.local'   # mDNS 이름 — 같은 네트워크면 IP가 바뀌어도 그대로 동작 (IP 하드코딩 제거)
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 

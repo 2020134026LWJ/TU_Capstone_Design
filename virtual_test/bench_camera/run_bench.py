@@ -140,6 +140,9 @@ def main():
     p.add_argument("--auto-walk", type=int, metavar="START_NODE",
                    help="--no-camera 와 함께: 가짜 로봇이 명령대로 '주행'하며 마커를 "
                         "자동 발행 (사람 대신). 예: --auto-walk 9  (AGV-1 홈)")
+    p.add_argument("--no-preview", action="store_true",
+                   help="OpenCV 미리보기 창 끄기 (라파에 모니터가 없을 때 필수). "
+                        "감지 결과는 콘솔에 출력됨")
     args = p.parse_args()
 
     # SIL과 동일한 monkeypatch — 배포 config는 손대지 않는다
@@ -181,11 +184,14 @@ def main():
         return
 
     from hardware.camera import RpiCamera   # picamera2 — 라파에서만 import 가능
-    camera = RpiCamera(CALIB_FILE, show_preview=SHOW_PREVIEW)
-    print(f"[벤치 AGV-{args.rid}] 카메라 준비 완료")
-    print("  마커를 카메라에 보여주세요. 서버가 명령을 내리면 여기에 출력됩니다.\n")
+    preview = SHOW_PREVIEW and not args.no_preview   # 헤드리스 라파면 --no-preview
+    camera = RpiCamera(CALIB_FILE, show_preview=preview)
+    print(f"[벤치 AGV-{args.rid}] 카메라 준비 완료 (미리보기: {'ON' if preview else 'OFF'})")
+    print("  마커를 카메라에 보여주세요. 서버가 명령을 내리면 여기에 출력됩니다.")
+    print("  ※ yaw 부호 확인: 마커를 시계방향 90° 돌렸을 때 yaw가 90 쪽인지 270 쪽인지 보세요.\n")
 
     prev_marker = None     # 같은 마커 중복 발행 방지 (rpi_main과 동일 규칙)
+    last_log = 0.0
     try:
         while True:
             marker_id, x_mm, y_mm, yaw_deg = camera.detect()
@@ -196,6 +202,11 @@ def main():
                           f"(x={x_mm}mm y={y_mm}mm yaw={yaw_deg}°) → 서버 보고")
                     bridge.publish_marker(marker_id)
                     prev_marker = marker_id
+                elif not preview and time.time() - last_log > 1.0:
+                    # 미리보기가 없으니 같은 마커라도 1초마다 오프셋을 찍어준다
+                    # (yaw 부호·x/y 스케일을 눈으로 확인하는 유일한 창구)
+                    print(f"    마커 {marker_id}: x={x_mm}mm y={y_mm}mm yaw={yaw_deg}°")
+                    last_log = time.time()
             time.sleep(0.05)
     except KeyboardInterrupt:
         print(f"\n[벤치 AGV-{args.rid}] 종료 중...")

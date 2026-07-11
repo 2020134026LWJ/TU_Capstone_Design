@@ -242,10 +242,14 @@ class IsaacAGV:
         """트윈 모드 — 실물 AGV의 마커 보고 수신 (MQTT 스레드). main loop로 핸드오프."""
         self._pending_marker = marker_id
 
-    def sync_to_node(self, nid: int):
+    def sync_to_node(self, nid: int, stage):
         """트윈 모드 — 실물이 보고한 노드로 위치 보정 (main loop에서 호출).
 
         회전/리프트 중에는 건드리지 않는다 (그 동작은 명령으로 이미 재현 중).
+
+        [주의] pos만 바꾸면 화면은 그대로다. _sync_prim은 _update_move가 MOVING/TURNING일
+        때만 부르는데, 트윈은 마커를 받고 곧장 IDLE이라 그 경로를 안 탄다 → 여기서 직접
+        호출해야 USD prim(차체·바퀴·선반)이 새 위치로 그려진다.
         """
         if nid not in nodes:
             print(f"[AGV {self.rid}] (트윈) 알 수 없는 마커 {nid} — 무시")
@@ -258,6 +262,8 @@ class IsaacAGV:
         self.target_pos      = None
         self.state           = "IDLE"
         self.motors.stop()
+        self._sync_prim(stage)      # ← 화면 반영 (없으면 좌표만 바뀌고 안 움직임)
+        self._sync_shelf(stage)     # 선반을 들고 있으면 같이 따라오게
         print(f"[AGV {self.rid}] (트윈) 실물 마커 {nid} → 위치 동기화")
 
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
@@ -1303,7 +1309,7 @@ while simulation_app.is_running():
         if agv._pending_marker is not None:
             nid = agv._pending_marker
             agv._pending_marker = None
-            agv.sync_to_node(nid)
+            agv.sync_to_node(nid, stage)
 
         # MQTT 스레드 → main loop: IDLE 상태일 때만 명령 실행
         # (이동/회전 중 명령 수신 시 현재 동작 완료 후 실행)

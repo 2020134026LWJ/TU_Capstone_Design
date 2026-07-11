@@ -1951,10 +1951,57 @@ AGV의 single-slot 채널과 동기화 안 됨.
 
 ---
 
+### 수정 58: 작업대 피킹 방향 회전 — 선반을 작업자 쪽으로 돌린 뒤 파란불 (2026-07-11)
+
+> **쉽게**: 지금까지 AGV는 작업대에 **도착한 방향 그대로 멈췄다**. 그러면 작업자가 선반의 옆면이나 뒷면을 마주할 수 있다. 선반은 리프트 위에 얹혀 AGV heading을 따라 도니(실물·시뮬 동일), **AGV를 돌리면 선반 면이 작업자를 향한다.** 작업대(9·33)는 맵 서쪽 끝 열이라 작업자가 서쪽에 서므로 heading **270°(서)**로 마무리한다.
+
+- **회전 게이트** (`_workflow_mixin._enter_wait_picking`): 도착 시 `_orient_for_picking()`이 목표 heading과 다르면 turn 명령을 큐에 넣고 **함수를 중단**. 회전 `cmd_ack`가 오면 `_handle_cmd_ack`가 `_enter_wait_picking`을 다시 불러 나머지(WAITING_FOR_PICK 전이 + PENDING 재배정 + GUI `shelf/arrived`)를 마저 실행.
+- **단일 지점**: 일반 배달과 포워딩이 둘 다 `_enter_wait_picking`을 지나므로 한 곳만 고쳐도 양쪽 적용 (플로우차트 PICK 노드 1:1 대응 유지).
+- **의도한 부수효과**: 회전 완료 **전에는 GUI 파란불이 안 켜진다.** 작업자가 옆면을 보고 집는 상황을 구조적으로 차단.
+- **설정 주도** (`shelf_config.json`): 작업대별 `pick_heading` (9·33 → 270). 없으면 회전 안 함(기존 동작 유지).
+- **입고 스테이션 (노드 48)**: `inbound_station` 블록 신설, `pick_heading: 90`(동=창고 밖 작업자). **출고 `workstations`에 안 섞음** — 섞으면 회랑·스테이징·GUI 매핑 로직이 딸려 들어옴. `_pick_heading()`이 두 블록을 모두 조회 → 입고 워크플로우 붙일 때 회전 로직 재사용. **입고 로직 자체는 아직 없음(설정만).**
+- **검증**: Isaac step6 + 라파 GUI 2대 실주행. 작업대 도착 15회 전부 회전 발동, 출발 heading(0°/180°) 무관하게 270°로 수렴, W1(33)·W2(9) 양쪽 동작. `피킹 방향 회전` → `heading updated to 270°` → `waiting_for_pick` 순서 확인. 경고 0건.
+
+**수정 파일**: `server/core/_workflow_mixin.py`, `server/core/_marker_mixin.py`, `server/core/request_handler.py`, `server/managers/shelf.py`, `server/data/shelf_config.json`, `isaac_simulation/step7_kinematic.py`(입고대 시각화)
+
+---
+
+### 수정 59: 맵에 없는 마커 무시 — 실물 ArUco 오검출 방어 (2026-07-11)
+
+> **쉽게**: 실물 라파 카메라 테스트 중 **존재하지 않는 마커 145가 검출**됐다(맵은 노드 1~48뿐). 조명·각도·잘린 마커 때문에 ArUco는 엉뚱한 ID를 내뱉는다. 그런데 서버가 그걸 **그대로 믿어** `robot.current_node = 145`가 됐다. 맵 밖 노드가 되면 경로계획·충돌회피가 통째로 무너진다. 위치는 "모르는 값"보다 **"직전 값"이 안전**하므로 무시가 정답.
+
+- **가드** (`_marker_mixin._handle_marker_report` 진입부): `node not in self.path_planner.nodes` → 로그 남기고 즉시 반환(`unknown_marker`). 위치·큐·예약 어느 것도 건드리지 않음.
+- **발견 경위**: 시뮬에선 IsaacCamera가 맵 노드만 발행하므로 영원히 안 드러났을 버그. **실물 카메라를 붙인 첫날 바로 재현**됨.
+- **트윈 쪽은 이미 방어됨**: `sync_to_node`가 `nid not in nodes`면 무시(로그: "알 수 없는 마커 145 — 무시"). 서버만 뚫려 있었다.
+
+**수정 파일**: `server/core/_marker_mixin.py` (가드 4줄)
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.
 > `server/`, `config/`, `Database/`는 변경 없음. 컨트롤러 레이어만 교체.
+
+### Step 7 — 디지털 트윈 모드 (TWIN=1) + stale 버그 수정 (2026-07-11)
+
+**디지털 트윈**: `TWIN=1`로 실행하면 Isaac이 **AGV 역할을 그만두고 관찰자가 된다.**
+
+| | 일반 (TWIN=0) | 트윈 (TWIN=1) |
+|---|---|---|
+| 마커 발행 | Isaac이 발행 (가상 카메라) | **안 함** — 실물 라파가 발행 |
+| cmd_ack | Isaac이 발행 | **안 함** — 실물이 발행 |
+| 구독 | `/agv/cmd` | `/agv/cmd` + **`/agv/marker`**(실물 위치 추종) |
+
+- **이중 발행 금지가 핵심**: 발행자가 둘이면 서버가 같은 로봇의 도착을 두 번 받아 상태가 꼬인다 (실제로 테스트 중 재현 — `marker mismatch` 경고 폭주).
+- **동기화 장치 불필요**: 서버는 실물의 마커 보고가 와야 다음 명령을 내리므로, Isaac이 먼저 도착해도 그 노드에서 대기 → 자연스럽게 보조가 맞는다.
+- **heading 규약 정합** (`TWIN_INIT_HEADING_DEG = 0`): 실물 라파는 heading을 안 보내므로(옵션 a) 서버는 **0°(북)** 로 가정한다. Isaac 몸체 기본값은 0 rad(동) → 그대로 두면 90° 어긋난 채 회전 명령을 받아 **엉뚱한 노드로 향한다**(실측: 서버 경로는 9→17인데 트윈은 19로 감). 트윈 모드에서 초기 heading을 서버 가정에 맞춤.
+- **화면 갱신 버그**: `sync_to_node`가 `self.pos`만 바꾸고 `_sync_prim`을 안 불렀다. `_sync_prim`은 `_update_move`가 MOVING/TURNING일 때만 호출하는데 트윈은 마커 수신 후 곧장 IDLE → **로그엔 "동기화"가 찍히는데 화면은 그대로.** 마커 수신 시 직접 호출로 수정(선반도 함께).
+- **`bridge_isaac.py`**: 선택적 `marker_handler` 파라미터 추가 (기본 None → step6 영향 없음).
+
+**step7 stale 버그** (첫 런타임에서 발견): step7이 수정 56 이후 갱신 안 된 파일이었다. `bridge_isaac`이 lift 명령에 `shelf_id`를 실어 보내는데 step7 콜백은 인자 2개만 받아 **모든 명령이 `TypeError`** → AGV가 한 발짝도 안 움직였다(예외가 Isaac stderr에 묻혀 "그냥 안 움직임"으로 보임). step6의 누락분을 이식: lift `shelf_id` 인자, lift ACK의 실제 선반 보고(약점 4), `_find_nearby_shelf`가 정적 노드 대신 `shelf_origins`(실제 위치) 사용(수정 30의 포워딩 재픽업 버그가 step7엔 그대로 남아 있었음), `_shelf_is_near` 추가. **이제 두 파일의 함수 시그니처가 일치** (step6/step7 중복이 실제로 비용을 청구한 사례).
+
+**수정 파일**: `isaac_simulation/step7_kinematic.py`, `isaac_simulation/bridge_isaac.py`
 
 ### Isaac Step 3 완료: AGV 이동 + MQTT 연동 (`step3_agv_mqtt.py`)
 

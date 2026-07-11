@@ -91,6 +91,15 @@ class MarkerMixin:
             return self._error_response(f"Robot {rid} not found")
 
         node = int(marker_id)
+
+        # 수정 59: 맵에 없는 마커는 버린다 (실물 오검출 방어).
+        # ArUco는 조명·각도·잘린 마커 때문에 엉뚱한 ID를 내뱉는다(실측: 노드 1~48뿐인데 145 검출).
+        # 이걸 그대로 믿으면 robot.current_node가 맵 밖 노드가 되어 경로계획·충돌회피가
+        # 통째로 무너진다. 위치는 '모르는 값'보다 '직전 값'이 안전하므로 무시가 정답.
+        if node not in self.path_planner.nodes:
+            print(f"[RequestHandler] Robot {rid}: 맵에 없는 마커 {node} 무시 (오검출)")
+            return {"type": "marker_ack", "success": False, "action": "unknown_marker"}
+
         # REFACTOR E 3.2: forward의 ACK = 마커. 큐 ack가 in_flight + reservation 한 번에 해제.
         # I4 일치성: in_flight이 forward이고 target_node가 marker와 일치해야 정상.
         queue = self.command_queues.get(rid)
