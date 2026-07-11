@@ -87,6 +87,27 @@ CAM_DETECT_RADIUS = 0.087  # m
 # 그 노드에서 기다린다 → 별도 동기화 장치 없이 실물과 보조가 맞는다.
 TWIN_MODE = os.environ.get("TWIN", "0") == "1"
 
+# 트윈 페이싱 (수정 60) — 실물과 보조를 맞춘다.
+#   문제: 트윈도 /agv/cmd 를 받아 자기 속도(MOVE_SPEED)로 움직인다. 실물보다 빠르면 먼저
+#         도착해 멈춰 서 있고, 느리면 마커가 와서 순간이동한다 → 한 칸마다 어긋난다.
+#   해결: (1) 한 칸을 실물이 몇 초에 가는지 실측(forward 발행 → 마커 도착)해서 그 시간에
+#         맞춰 시뮬 속도를 정하고, (2) 엣지 끝까지 가지 않고 HOLD_RATIO 지점에서 멈춰
+#         실물 마커를 기다린다. 실물이 도착해야 트윈도 노드에 안착한다.
+# 첫 칸 추정값 — 실측이 1회 들어오면 EMA가 바로 끌고 간다. 즉 "첫 칸만" 이 값으로 달린다.
+# 실물 1칸 시간을 이미 알면 실행 시 넘겨라:  TWIN=1 TWIN_EDGE_SECS=3.2 python.sh ...
+# (로그의 "실측 1칸 N초"가 안정되면 그 값을 기본값으로 박아두면 첫 칸도 안 어긋난다)
+TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "4.0"))
+# 회전·리프트도 같은 방식으로 페이싱한다. 완료 신호가 마커가 아니라 cmd_ack라는 것만 다르다
+# (명령 발행 → 실물의 cmd_ack 도착 = 실물이 그 동작에 쓴 시간).
+TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "1.0"))
+TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.0"))
+TWIN_EMA_ALPHA      = 0.4    # 실측 반영 비율 (0=고정, 1=직전값만)
+# 엣지의 이 지점까지만 가고 실물 마커를 기다린다. 노드에 바짝 붙일수록(→1.0) 마지막
+# 스냅이 작아져 끊김이 안 보인다(0.99 = 1cm). 페이싱 정확도와는 무관 — 홀드 비율은
+# '트윈이 먼저 도착했을 때 어디서 기다리나'만 정한다.
+TWIN_HOLD_RATIO     = float(os.environ.get("TWIN_HOLD_RATIO", "0.99"))
+TWIN_SPEED_MIN      = 0.05   # m/s — 페이싱 속도 하한 (실물이 오래 멈춰도 기어가지 않게)
+
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
 SHELF_PATH = os.path.join(_ROOT, "server", "data", "shelf_config.json")
@@ -203,6 +224,28 @@ class IsaacAGV:
         self._pending_marker: int | None = None    # 트윈: 실물이 보고한 마커 (동기화 대기)
         self._current_turn_cmd: str | None = None  # 실행 중인 turn 명령 이름
 
+        # ── 트윈 페이싱 (수정 60) ─────────────────────────────────────────
+        # 직진: forward → 마커 도착으로 실측 / 회전·리프트: cmd → cmd_ack로 실측
+        self._twin_edge_secs   = TWIN_EDGE_SECS_INIT  # 실측 1칸 소요시간 (EMA)
+        self._twin_edge_n      = 0                    # 실측 횟수
+        self._twin_forward_t: float | None = None     # forward 실행 시각 (실측 시작점)
+        self._twin_hold_pos = None                    # 홀드 지점 (엣지 99%)
+        self._twin_holding  = False                   # 홀드 중 = 실물 마커 대기
+        self._move_speed    = MOVE_SPEED              # 이번 엣지에 쓸 속도
+
+        self._twin_turn_secs = TWIN_TURN_SECS_INIT    # 실측 회전 소요시간 (EMA)
+        self._twin_turn_n    = 0
+        self._twin_lift_secs = TWIN_LIFT_SECS_INIT    # 실측 리프트 소요시간 (EMA)
+        self._twin_lift_n    = 0
+        self._twin_cmd_t: float | None = None         # turn/lift 실행 시각 (실측 시작점)
+        self._twin_turn_total  = 0.0                  # 이번 회전의 총 각도 (rad)
+        self._twin_lift_total  = 0.0                  # 이번 리프트의 총 높이 (m)
+        self._turn_wheel_speed = TURN_SPEED           # 이번 회전에 쓸 바퀴 속도
+        self._lift_speed       = LIFT_SPEED           # 이번 리프트에 쓸 속도
+        self._twin_holding_turn = False               # 회전 홀드 = 실물 cmd_ack 대기
+        self._twin_holding_lift = False               # 리프트 홀드 = 실물 cmd_ack 대기
+        self._pending_ack: str | None = None           # 트윈: 실물이 보고한 cmd_ack
+
     def set_bridge(self, bridge):
         """Bridge 인스턴스 연결 — cmd_ack 발행 경로 설정"""
         self.bridge = bridge
@@ -242,6 +285,114 @@ class IsaacAGV:
         """트윈 모드 — 실물 AGV의 마커 보고 수신 (MQTT 스레드). main loop로 핸드오프."""
         self._pending_marker = marker_id
 
+    def _on_ack_from_real(self, rid: int, cmd: str):
+        """트윈 모드 — 실물의 회전/리프트 완료(cmd_ack) 수신. main loop로 핸드오프."""
+        self._pending_ack = cmd
+
+    # ─── 트윈 페이싱 (수정 60) ───────────────────────────────────────────────
+
+    def _start_twin_pacing(self):
+        """forward 시작 — 실측 시간에 맞춰 이번 엣지 속도를 정하고 홀드 지점을 잡는다."""
+        edge = self.target_pos - self.pos
+        edge_len = float(np.linalg.norm(edge))
+        if edge_len < 1e-6:
+            return
+        # 실측 1칸 소요시간에 맞춘 속도 (아직 실측 전이면 INIT 추정값)
+        self._move_speed    = max(TWIN_SPEED_MIN,
+                                  min(MOVE_SPEED, edge_len / self._twin_edge_secs))
+        self._twin_hold_pos = self.pos + edge * TWIN_HOLD_RATIO
+        self._twin_holding  = False
+        self._twin_forward_t = time.time()
+
+    def _start_twin_turn_pacing(self):
+        """turn 시작 — 실측 회전시간에 맞춰 각속도를 정한다."""
+        total = abs(_normalize_angle(self.heading_target - self.heading))
+        if total < 1e-6:
+            total = np.pi          # turn_180 (diff가 ±π라 부호에 따라 0에 가까울 수 있음)
+        self._twin_turn_total = total
+        omega = total / max(0.1, self._twin_turn_secs)      # rad/s
+        self._turn_wheel_speed = omega * WHEEL_BASE / 2.0   # 차동구동 바퀴 속도
+        self._twin_holding_turn = False
+        self._twin_cmd_t = time.time()
+
+    def _start_twin_lift_pacing(self):
+        """lift 시작 — 실측 리프트시간에 맞춰 승강 속도를 정한다."""
+        total = abs(self.lift_target_z - self.lift_z)
+        self._twin_lift_total = total
+        self._lift_speed = total / max(0.1, self._twin_lift_secs)   # m/s
+        self._twin_holding_lift = False
+        self._twin_cmd_t = time.time()
+
+    def on_real_ack(self, cmd: str, stage):
+        """트윈 — 실물의 cmd_ack 수신 (main loop). 실측 + 홀드 중인 동작을 끝낸다."""
+        is_turn = cmd in ("turn_left", "turn_right", "turn_180")
+        is_lift = cmd in ("lift_up", "lift_down")
+
+        # 실측 (명령 발행 → ack 도착 = 실물이 그 동작에 쓴 시간)
+        if self._twin_cmd_t is not None and (is_turn or is_lift):
+            secs = time.time() - self._twin_cmd_t
+            self._twin_cmd_t = None
+            if 0.1 < secs < 120.0:
+                if is_turn:
+                    self._twin_turn_secs = (TWIN_EMA_ALPHA * secs
+                                            + (1 - TWIN_EMA_ALPHA) * self._twin_turn_secs)
+                    self._twin_turn_n += 1
+                    print(f"[AGV {self.rid}] (트윈) 실측 회전 {secs:.2f}초 → 평균 "
+                          f"{self._twin_turn_secs:.2f}초 (n={self._twin_turn_n})")
+                else:
+                    self._twin_lift_secs = (TWIN_EMA_ALPHA * secs
+                                            + (1 - TWIN_EMA_ALPHA) * self._twin_lift_secs)
+                    self._twin_lift_n += 1
+                    print(f"[AGV {self.rid}] (트윈) 실측 리프트 {secs:.2f}초 → 평균 "
+                          f"{self._twin_lift_secs:.2f}초 (n={self._twin_lift_n})")
+
+        # 홀드 해제 → 동작 완료 (실물보다 먼저 끝내지 않는다)
+        if is_turn and self.state == "TURNING":
+            self._twin_holding_turn = False
+            self.heading = self.heading_target
+            self._finish_turn(stage)
+        elif is_lift and self.lift_state != "IDLE":
+            self._twin_holding_lift = False
+            self.lift_z = self.lift_target_z
+            self._finish_lift(stage)
+
+    def _record_twin_edge(self, nid: int):
+        """마커 도착 — 실물이 한 칸을 몇 초에 갔는지 실측해 EMA로 반영."""
+        if self._twin_forward_t is None or nid != self._moving_to_node:
+            return                      # 예상 밖 노드(드리프트) → 측정 안 함
+        secs = time.time() - self._twin_forward_t
+        self._twin_forward_t = None
+        if not (0.2 < secs < 120.0):    # 이상치 (중복 마커 / 장기 정지)
+            return
+        self._twin_edge_secs = (TWIN_EMA_ALPHA * secs
+                                + (1.0 - TWIN_EMA_ALPHA) * self._twin_edge_secs)
+        self._twin_edge_n += 1
+        print(f"[AGV {self.rid}] (트윈) 실측 1칸 {secs:.2f}초 "
+              f"→ 평균 {self._twin_edge_secs:.2f}초 (n={self._twin_edge_n})")
+
+    def _heal_heading(self, nid: int):
+        """트윈 방향 자가복구 — 실물이 지나온 두 노드로 실제 heading을 역산한다.
+
+        왜 필요한가: 트윈을 서버 도중에 켜면 트윈은 자기가 홈 노드·heading 0이라고 믿는다.
+        실제 로봇은 다른 곳에서 다른 방향을 보고 있다 → forward 목표 노드를 엉뚱하게
+        골라 헤매다 마커가 올 때마다 멀리 순간이동한다.
+
+        실물은 자기 heading 방향으로만 직진하므로 **직전 노드 → 지금 노드 벡터 = 실제 heading**.
+        마커 하나만 더 받으면 정렬된다. (인접 노드일 때만 — 순간이동한 보고는 신뢰 못 함)
+        """
+        prev = self.current_node
+        if prev is None or prev == nid or prev not in nodes:
+            return
+        (px, py), (cx, cy) = node_xy(prev), node_xy(nid)
+        dx, dy = float(cx - px), float(cy - py)
+        if abs(dx) + abs(dy) > 1.01:      # 인접(1칸)이 아니면 방향을 못 믿는다
+            return
+        real_heading = _normalize_angle(float(np.arctan2(dy, dx)))
+        if abs(_normalize_angle(real_heading - self.heading)) > 0.1:
+            print(f"[AGV {self.rid}] (트윈) 방향 보정 {np.degrees(self.heading):.0f}° → "
+                  f"{np.degrees(real_heading):.0f}° (실물 이동 {prev}→{nid} 기준)")
+            self.heading = real_heading
+
     def sync_to_node(self, nid: int, stage):
         """트윈 모드 — 실물이 보고한 노드로 위치 보정 (main loop에서 호출).
 
@@ -254,13 +405,17 @@ class IsaacAGV:
         if nid not in nodes:
             print(f"[AGV {self.rid}] (트윈) 알 수 없는 마커 {nid} — 무시")
             return
+        self._heal_heading(nid)     # 방향 자가복구 (트윈을 중간에 켜도 한 칸이면 정렬)
         if self.state not in ("MOVING", "IDLE"):
             return
+        self._record_twin_edge(nid)     # 실물 1칸 소요시간 실측 (다음 엣지 속도에 반영)
         self.pos             = node_xy(nid).copy()
         self.current_node    = nid
         self._moving_to_node = None
         self.target_pos      = None
         self.state           = "IDLE"
+        self._twin_hold_pos  = None     # 홀드 해제 — 실물이 도착했으므로 노드에 안착
+        self._twin_holding   = False
         self.motors.stop()
         self._sync_prim(stage)      # ← 화면 반영 (없으면 좌표만 바뀌고 안 움직임)
         self._sync_shelf(stage)     # 선반을 들고 있으면 같이 따라오게
@@ -283,6 +438,8 @@ class IsaacAGV:
             if self.camera:
                 self.camera.set_last_marker(self.current_node)
             self.state = "MOVING"
+            if TWIN_MODE:
+                self._start_twin_pacing()
             print(f"[AGV {self.rid}] <- forward → node {target}")
 
         elif cmd == "turn_left":
@@ -290,6 +447,8 @@ class IsaacAGV:
             self.heading_target    = _normalize_angle(self.heading + np.pi / 2)
             self.motors.stop()
             self.state = "TURNING"
+            if TWIN_MODE:
+                self._start_twin_turn_pacing()
             print(f"[AGV {self.rid}] <- turn_left")
 
         elif cmd == "turn_right":
@@ -297,6 +456,8 @@ class IsaacAGV:
             self.heading_target    = _normalize_angle(self.heading - np.pi / 2)
             self.motors.stop()
             self.state = "TURNING"
+            if TWIN_MODE:
+                self._start_twin_turn_pacing()
             print(f"[AGV {self.rid}] <- turn_right")
 
         elif cmd == "turn_180":
@@ -304,6 +465,8 @@ class IsaacAGV:
             self.heading_target    = _normalize_angle(self.heading + np.pi)
             self.motors.stop()
             self.state = "TURNING"
+            if TWIN_MODE:
+                self._start_twin_turn_pacing()
             print(f"[AGV {self.rid}] <- turn_180")
 
         elif cmd == "lift_up":
@@ -322,6 +485,8 @@ class IsaacAGV:
                 shelf_origins.pop(picked, None)
             self.lift_target_z  = self.LIFT_PLATE_UP
             self.lift_state     = "RAISING"
+            if TWIN_MODE:
+                self._start_twin_lift_pacing()
             # 픽업 순간: 선반의 현재 orient와 AGV heading의 offset 저장
             # _sync_shelf에서 q_agv * shelf_offset으로 선반이 AGV와 함께 회전
             q_shelf = self._read_shelf_orient(picked)
@@ -333,6 +498,8 @@ class IsaacAGV:
         elif cmd == "lift_down":
             self.lift_target_z = self.LIFT_PLATE_Z
             self.lift_state    = "LOWERING"
+            if TWIN_MODE:
+                self._start_twin_lift_pacing()
             print(f"[AGV {self.rid}] <- lift_down → shelf {self.carrying_shelf}")
 
     def _find_forward_target(self) -> int | None:
@@ -387,22 +554,43 @@ class IsaacAGV:
         self._update_move(dt, stage)
         self._update_lift(dt, stage)
 
+    def _finish_turn(self, stage):
+        """회전 완료 — 일반 모드는 각도 도달 시, 트윈은 실물 cmd_ack 도착 시."""
+        self.motors.stop()
+        self.heading = self.heading_target  # 정확한 값으로 스냅
+        self.state   = "IDLE"
+        self._sync_prim(stage)
+        turn_cmd = self._current_turn_cmd
+        self._current_turn_cmd = None
+        print(f"[AGV {self.rid}] Turn done ({turn_cmd})")
+        if turn_cmd:
+            self._ack(turn_cmd)     # 트윈에선 침묵 (실물이 이미 보고했다)
+
     def _update_move(self, dt: float, stage):
         if self.state == "TURNING":
+            # 트윈: 회전을 거의 끝내고 실물 cmd_ack 대기 (먼저 끝내지 않는다)
+            if self._twin_holding_turn:
+                return
+
             diff = _normalize_angle(self.heading_target - self.heading)
-            if abs(diff) < ANGLE_TOLERANCE:
+            # 트윈은 남은 각도가 총각도의 1% 이내면 홀드 (일반은 ANGLE_TOLERANCE에서 완료)
+            limit = ANGLE_TOLERANCE
+            if TWIN_MODE and self._twin_turn_total > 0:
+                limit = max(ANGLE_TOLERANCE,
+                            self._twin_turn_total * (1.0 - TWIN_HOLD_RATIO))
+
+            if abs(diff) < limit:
                 self.motors.stop()
-                self.heading = self.heading_target  # 정확한 값으로 스냅
-                self.state   = "IDLE"
-                self._sync_prim(stage)
-                turn_cmd = self._current_turn_cmd
-                self._current_turn_cmd = None
-                print(f"[AGV {self.rid}] Turn done ({turn_cmd})")
-                if turn_cmd:
-                    self._ack(turn_cmd)
+                if TWIN_MODE:
+                    self._twin_holding_turn = True   # 완료는 실물 ack가 시킨다
+                    self._sync_prim(stage)
+                    return
+                self._finish_turn(stage)
             else:
-                # 목표에 가까울수록 속도 감소 (오버슈트 방지)
-                speed = min(1.0, abs(diff) / 0.5) * TURN_SPEED
+                if TWIN_MODE:
+                    speed = self._turn_wheel_speed   # 실측 회전시간에 맞춘 등속
+                else:
+                    speed = min(1.0, abs(diff) / 0.5) * TURN_SPEED  # 오버슈트 방지 감속
                 if diff > 0:
                     self.motors.set_speeds(-speed,  speed)  # 반시계
                 else:
@@ -412,15 +600,28 @@ class IsaacAGV:
                 self._sync_prim(stage)
 
         elif self.state == "MOVING":
-            diff = self.target_pos - self.pos
+            # 트윈: 홀드 지점 도달 → 실물 마커가 올 때까지 정지 (sync_to_node가 풀어준다)
+            if self._twin_holding:
+                return
+
+            # 트윈은 엣지 끝이 아니라 홀드 지점(92%)을 목표로 달린다
+            goal = (self._twin_hold_pos
+                    if (TWIN_MODE and self._twin_hold_pos is not None)
+                    else self.target_pos)
+            diff = goal - self.pos
             dist = float(np.linalg.norm(diff))
 
             if dist < POSITION_TOLERANCE:
                 self.motors.stop()
-                self.pos          = self.target_pos.copy()
+                self.pos = goal.copy()
+                self._sync_prim(stage)
+
+                if TWIN_MODE and self._twin_hold_pos is not None:
+                    self._twin_holding = True
+                    return              # 노드 안착은 실물 마커가 왔을 때만
+
                 self.current_node = self._moving_to_node
                 self.state        = "IDLE"
-                self._sync_prim(stage)
                 print(f"[AGV {self.rid}] Reached node {self.current_node}")
                 # 다음 명령은 ArUco 마커 감지 → /agv/marker → 서버가 결정
             else:
@@ -428,8 +629,10 @@ class IsaacAGV:
                 angle_to_target = float(np.arctan2(diff[1], diff[0]))
                 err = _normalize_angle(angle_to_target - self.heading)
                 correction = max(-0.5, min(0.5, err * 2.0))
-                self.motors.set_speeds(MOVE_SPEED - correction,
-                                       MOVE_SPEED + correction)
+                # 트윈은 실측에 맞춘 속도(_move_speed), 일반 모드는 MOVE_SPEED
+                speed = self._move_speed if TWIN_MODE else MOVE_SPEED
+                self.motors.set_speeds(speed - correction,
+                                       speed + correction)
                 v, omega = self.motors.get_velocity()
                 self.heading = _normalize_angle(self.heading + omega * dt)
                 self.pos += v * dt * np.array([np.cos(self.heading),
@@ -438,29 +641,46 @@ class IsaacAGV:
                 self.wheel_angle += abs(v) * dt / WHEEL_RADIUS
                 self._sync_prim(stage)
 
+    def _finish_lift(self, stage):
+        """리프트 완료 — 일반 모드는 높이 도달 시, 트윈은 실물 cmd_ack 도착 시."""
+        self.lift_z     = self.lift_target_z
+        prev_state      = self.lift_state
+        self.lift_state = "IDLE"
+        self._sync_lift(stage)
+
+        if prev_state == "RAISING":
+            print(f"[AGV {self.rid}] Lift UP done (shelf {self.carrying_shelf})")
+            # 약점 4: 실제 든 선반 보고 (None이면 빈 리프트 → 서버 감지)
+            self._ack("lift_up", self.carrying_shelf)
+        elif prev_state == "LOWERING":
+            shelf_id = self.carrying_shelf
+            self.carrying_shelf = None
+            self._place_shelf(stage, shelf_id)
+            print(f"[AGV {self.rid}] Lift DOWN done (shelf {shelf_id})")
+            self._ack("lift_down", shelf_id)
+
     def _update_lift(self, dt: float, stage):
         if self.lift_state == "IDLE":
             return
+        # 트윈: 리프트를 거의 끝내고 실물 cmd_ack 대기
+        if self._twin_holding_lift:
+            return
 
-        diff = self.lift_target_z - self.lift_z
-        step = min(LIFT_SPEED * dt, abs(diff))
+        diff  = self.lift_target_z - self.lift_z
+        speed = self._lift_speed if TWIN_MODE else LIFT_SPEED   # 트윈은 실측에 맞춘 속도
+        step  = min(speed * dt, abs(diff))
 
-        if abs(diff) < 0.005:
-            self.lift_z     = self.lift_target_z
-            prev_state      = self.lift_state
-            self.lift_state = "IDLE"
-            self._sync_lift(stage)
+        # 트윈은 남은 높이가 총높이의 1% 이내면 홀드 (일반은 5mm에서 완료)
+        limit = 0.005
+        if TWIN_MODE and self._twin_lift_total > 0:
+            limit = max(0.005, self._twin_lift_total * (1.0 - TWIN_HOLD_RATIO))
 
-            if prev_state == "RAISING":
-                print(f"[AGV {self.rid}] Lift UP done (shelf {self.carrying_shelf})")
-                # 약점 4: 실제 든 선반 보고 (None이면 빈 리프트 → 서버 감지)
-                self._ack("lift_up", self.carrying_shelf)
-            elif prev_state == "LOWERING":
-                shelf_id = self.carrying_shelf
-                self.carrying_shelf = None
-                self._place_shelf(stage, shelf_id)
-                print(f"[AGV {self.rid}] Lift DOWN done (shelf {shelf_id})")
-                self._ack("lift_down", shelf_id)
+        if abs(diff) < limit:
+            if TWIN_MODE:
+                self._twin_holding_lift = True   # 완료는 실물 ack가 시킨다
+                self._sync_lift(stage)
+                return
+            self._finish_lift(stage)
         else:
             self.lift_z += step if diff > 0 else -step
             self._sync_lift(stage)
@@ -1236,6 +1456,7 @@ for agv in agvs.values():
         # 트윈 모드에서만 /agv/marker 구독 (실물 위치 추종). 일반 모드는 구독 안 함 —
         # 자기가 발행한 마커를 되받으면 자기 위치를 자기가 덮어쓴다.
         marker_handler=(agv._on_marker_from_real if TWIN_MODE else None),
+        ack_handler=(agv._on_ack_from_real if TWIN_MODE else None),
     )
     cam = IsaacCamera(
         get_pos_fn=lambda a=agv: a.pos,
@@ -1262,6 +1483,11 @@ print("=" * 60)
 print("  Isaac Sim 5.1.0 — Step 7: Kinematic Physics + cmd-based 제어")
 print("=" * 60)
 print(f"  모드: {'디지털 트윈 (실물 마커 추종 · 발행 안 함)' if TWIN_MODE else '일반 시뮬 (Isaac이 AGV 역할)'}")
+if TWIN_MODE:
+    print(f"  페이싱 초기추정: 1칸 {TWIN_EDGE_SECS_INIT:.1f}초 / 회전 {TWIN_TURN_SECS_INIT:.1f}초 "
+          f"/ 리프트 {TWIN_LIFT_SECS_INIT:.1f}초 → 실측으로 자동 보정")
+    print(f"          동작 {TWIN_HOLD_RATIO*100:.0f}% 지점에서 실물 신호 대기 "
+          f"(직진=마커, 회전·리프트=cmd_ack) → 먼저 끝내지 않는다")
 print(f"  AGV-1 홈: {robot_homes[1]}  AGV-2 홈: {robot_homes[2]}")
 print(f"  이동 방식: TURNING({TURN_SPEED:.2f}m/s) -> MOVING({MOVE_SPEED}m/s)")
 print(f"  물리: AGV 바디(kinematic) + 선반(kinematic+collision) + 바닥(static)")
@@ -1310,6 +1536,12 @@ while simulation_app.is_running():
             nid = agv._pending_marker
             agv._pending_marker = None
             agv.sync_to_node(nid, stage)
+
+        # 트윈: 실물의 회전/리프트 완료(cmd_ack) → 홀드 해제 + 실측 (수정 60)
+        if agv._pending_ack is not None:
+            ack_cmd = agv._pending_ack
+            agv._pending_ack = None
+            agv.on_real_ack(ack_cmd, stage)
 
         # MQTT 스레드 → main loop: IDLE 상태일 때만 명령 실행
         # (이동/회전 중 명령 수신 시 현재 동작 완료 후 실행)

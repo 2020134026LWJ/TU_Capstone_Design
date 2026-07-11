@@ -44,12 +44,16 @@ class Bridge:
     """
 
     def __init__(self, rid: int, cmd_handler: Callable,
-                 marker_handler: Optional[Callable] = None):
+                 marker_handler: Optional[Callable] = None,
+                 ack_handler: Optional[Callable] = None):
         self.rid = rid
         self._cmd_handler = cmd_handler
         # 트윈 모드 전용: 실물 AGV가 발행한 /agv/marker를 구독해 위치를 따라간다.
         # None(기본, 일반 시뮬)이면 구독조차 하지 않음 → 자기가 발행한 마커를 되받지 않는다.
         self._marker_handler = marker_handler
+        # 트윈 모드 전용: 실물의 /agv/cmd_ack(회전·리프트 완료)를 구독 → 그 시간에 맞춰
+        # 애니메이션을 끝낸다 (수정 60). 일반 모드는 자기가 발행하므로 구독하면 되받는다.
+        self._ack_handler = ack_handler
 
         self._client = mqtt.Client(client_id=f"bridge_{rid}_{int(time.time())}")
         self._client.on_connect = self._on_connect
@@ -69,6 +73,8 @@ class Bridge:
         client.subscribe(TOPIC_CMD)
         if self._marker_handler is not None:
             client.subscribe(TOPIC_MARKER)   # 트윈 모드 — 실물의 위치 보고를 따라감
+        if self._ack_handler is not None:
+            client.subscribe(TOPIC_CMD_ACK)  # 트윈 모드 — 실물의 회전/리프트 완료를 따라감
         print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})")
 
     def _on_message(self, client, userdata, msg):
@@ -87,6 +93,12 @@ class Bridge:
             marker_id = data.get("marker_id")
             if rid == self.rid and marker_id is not None:
                 self._marker_handler(self.rid, int(marker_id))
+
+        elif msg.topic == TOPIC_CMD_ACK and self._ack_handler is not None:
+            rid = int(data.get("rid", -1))
+            cmd = data.get("cmd", "")
+            if rid == self.rid and cmd:
+                self._ack_handler(self.rid, cmd)
 
     def _dispatch_cmd(self, cmd: str, shelf_id: Optional[int] = None):
         print(f"[Bridge-{self.rid}] <- cmd: {cmd}")

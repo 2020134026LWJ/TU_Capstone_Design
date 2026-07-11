@@ -46,10 +46,13 @@ class StagingManager:
 
     def __init__(self, workstations: Dict[int, Dict],
                  get_robot_node: Optional[Callable[[int], Optional[int]]] = None,
-                 get_robot_planned_path: Optional[Callable[[int], Optional[List[int]]]] = None):
+                 get_robot_planned_path: Optional[Callable[[int], Optional[List[int]]]] = None,
+                 is_robot_waiting_for_pick: Optional[Callable[[int], bool]] = None):
         # try_preempt_at_gateway에서 점유자 위치/경로 조회용 콜백
         self._get_robot_node = get_robot_node
         self._get_robot_planned_path = get_robot_planned_path
+        # 수정 61 — 타임아웃이 '사람 대기'를 고장으로 오인하지 않도록 (아래 _check_timeout 참조)
+        self._is_robot_waiting_for_pick = is_robot_waiting_for_pick
         self.corridors: Dict[int, CorridorInfo] = {}
 
         # REFACTOR F Phase 4.5.1 — corridor 점유를 reservation에 이중기록 (set_reservation으로 주입)
@@ -345,9 +348,22 @@ class StagingManager:
         return None
 
     def _check_timeout(self, corridor: CorridorInfo):
-        """타임아웃 체크 - ArUco 인식 실패 시 강제 해제"""
+        """타임아웃 체크 - ArUco 인식 실패 시 강제 해제.
+
+        [수정 61] WAITING_FOR_PICK 점유자는 타임아웃 대상이 아니다.
+        그 상태는 '사람이 픽킹 완료를 누를 때까지' 기다리는 정상 상태이고, 사람의 시간은
+        원래 무한정이다. 이걸 고장으로 오인해 회랑을 뺏으면 두 번째 AGV가 회랑에 입장하고,
+        정작 작업대 노드엔 첫 AGV가 그대로 서 있어 코앞(트리거 노드)에서 막힌다.
+        (실측: W9 점유 197초 → 강제 FREE → AGV-2 입장 → `blocked → node 9` 반복)
+        타임아웃은 '움직여야 하는데 안 움직이는' 로봇만 감시한다.
+        """
         owner = self._owner(corridor.ws_node)
         if owner is None:
+            return
+
+        if self._is_robot_waiting_for_pick is not None \
+                and self._is_robot_waiting_for_pick(owner):
+            corridor.occupied_at = time.time()   # 시계를 멈춘다 (픽킹 끝나면 다시 흐름)
             return
 
         elapsed = time.time() - corridor.occupied_at

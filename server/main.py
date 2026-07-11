@@ -58,7 +58,7 @@ import sys       # 인터럽트 시 종료 코드 반환
 from .config import Config
 from .planning.path_planner import PathPlanner
 from .comm.mqtt_client import MQTTClient
-from .managers.robot import RobotManager
+from .managers.robot import RobotManager, RobotStatus
 from .managers.shelf import ShelfManager
 from .managers.staging import StagingManager
 from .managers.task import TaskManager
@@ -91,6 +91,11 @@ class AGVServer:
             get_robot_planned_path=lambda rid: (
                 self.robot_manager.get_robot(rid).planned_path
                 if self.robot_manager.get_robot(rid) else None
+            ),
+            # 수정 61 — 사람 픽킹 대기는 타임아웃 대상이 아니다 (사람 시간은 무한정)
+            is_robot_waiting_for_pick=lambda rid: (
+                self.robot_manager.get_robot(rid) is not None
+                and self.robot_manager.get_robot(rid).status == RobotStatus.WAITING_FOR_PICK
             ),
         )
         self.task_manager = TaskManager(self.shelf_manager, self.path_planner)  # 주문→서브태스크 분해
