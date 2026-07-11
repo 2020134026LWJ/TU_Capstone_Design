@@ -25,7 +25,7 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '10.37.235.105'
+SERVER_IP = '10.220.55.38'
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 

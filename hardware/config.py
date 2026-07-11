@@ -12,7 +12,7 @@ TU Capstone Design - AGV 물류 피킹 시스템
 import os
 
 # ─── 서버 (MQTT) ───
-MQTT_HOST = "172.30.1.26"   # PC 서버 IP (핫스팟). 네트워크 바뀌면 여기만 수정
+MQTT_HOST = "UB-Region5.local"   # PC 서버 mDNS 이름 (IP 바뀌어도 자동 해석). IP 직접 쓰려면 여기 교체
 MQTT_PORT = 1883
 
 TOPIC_CMD     = "/agv/cmd"      # 서버 → AGV 명령 (구독)

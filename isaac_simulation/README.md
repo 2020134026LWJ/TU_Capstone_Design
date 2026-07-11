@@ -57,43 +57,27 @@ Isaac Sim 5.1.0으로 시뮬레이션 환경 구성 중.
 ```
 TU_Capstone_Design/
 |
-+-- isaac_simulation/           # Isaac Sim 시뮬레이션
-|   +-- hello_world.py          # Step 1: 씬 레이아웃 확인
-|   +-- step2_environment.py    # Step 2: 선반, 작업대, ArUco 마커
-|   +-- step3_agv_mqtt.py       # Step 3: AGV 이동 + MQTT 연동
-|   +-- step4_lift_shelf.py     # Step 4: 리프트 + 선반 이동 (USD API)
-|   +-- step5_camera_aruco.py   # Step 5: 가상 카메라 ArUco 감지 (cmd-based)
-|   +-- step6_visual.py         # Step 6: 바퀴 회전 + 차체 방향 + 시각 개선 (현재)
-|   +-- README.md               # 이 파일
++-- isaac_simulation/           # Isaac Sim (현재 메인) — Isaac 전용
+|   +-- hello_world.py ~ step5_camera_aruco.py   # Step 1~5 (완료)
+|   +-- step6_visual.py         # Step 6: 바퀴/차체방향/시각/터치스크린 (현재 메인)
+|   +-- step7_kinematic.py      # Step 7: Kinematic Physics (구현 완료, 런타임 검증 남음)
+|   +-- bridge_isaac.py         # Isaac 전용 bridge (콜백)
+|   +-- isaac_hw.py             # IsaacMotors (가상)
+|   +-- camera.py               # IsaacCamera (proximity 가상 마커 감지)
+|   +-- STEP8_PLAN.md / README.md
 |
-+-- hardware/                   # AGV 하드웨어 추상화 (시뮬/실물 공용)
-|   +-- __init__.py
-|   +-- camera.py               # RpiCamera / IsaacCamera 공통 ABC
-|   +-- isaac_hw.py             # IsaacMotors (시뮬레이터용)
-|   +-- rpi/
-|   |   +-- __init__.py
-|   |   +-- bridge.py           # MQTT ↔ UART 브릿지
-|   |   +-- main.py             # RPi 진입점
++-- hardware/                   # AGV 실물(RPi) 전용 (주원이 STM 펌웨어 대응)
+|   +-- rpi_main.py             # 실물 진입점 (camera+bridge, AGV_ID로 rid)
+|   +-- bridge_rpi.py           # MQTT ↔ UART 브릿지
+|   +-- camera.py               # RpiCamera (주원이 opencv ArUco 비전)
+|   +-- config.py               # 배포 설정 (서버IP/UART/카메라)
+|   +-- stm32/rpi_uart.c, AGV_Control.zip   # 주원이 STM 소스/펌웨어
 |
-+-- server/                     # AGV 서버 (시뮬레이터와 무관, MQTT 기반)
-|   +-- main.py                 # 서버 진입점
-|   +-- config.py               # 설정값 (포트, 파일경로, MQTT 토픽)
-|   +-- request_handler.py      # 195줄 베이스 (라우터)
-|   +-- _movement_mixin.py      # ★ 이동/충돌/yield (수정 29)
-|   +-- _marker_mixin.py        # AGV 이벤트 수신
-|   +-- _workflow_mixin.py      # 주문/태스크 워크플로우
-|   +-- task_manager.py         # 작업 분해 (서브태스크 시퀀스 생성)
-|   +-- order_optimizer.py      # Nearest Neighbor 최적화 (구 task_scheduler)
-|   +-- robot_manager.py        # 로봇 6단계 상태 머신
-|   +-- shelf_manager.py        # 선반 상태 추적
-|   +-- staging_manager.py      # 작업대 회랑 진입/퇴출 게이팅
-|   +-- path_planner.py         # A* 시간 기반 경로 계획
-|   +-- mqtt_client.py          # MQTT 클라이언트 publish + subscribe (구 mqtt_publisher)
-|   +-- db_loader.py            # 엑셀 주문 DB 로더
-|   +-- map.json                # 8x6 그리드 맵 (48노드)
-|   +-- shelf_config.json       # 선반/물품/작업대 설정
-|   +-- robot_config.json       # AGV 홈 노드 등
-|   +-- Database/               # 주문 엑셀 데이터 (db_loader가 읽음)
++-- server/                     # AGV 서버 (MQTT 기반) — 2026-06-13 레이어 분리
+|   +-- main.py  config.py
+|   +-- comm/ core/ planning/ managers/ data/ docs/   # 상세는 루트 README / CLAUDE.md
+|
++-- virtual_test/               # 실물 없이 도는 테스트 (algorithm=pytest, software_in_the_loop=SIL)
 |
 +-- webots_simulation/          # Webots 전용
 |   (controllers, worlds, textures)
@@ -151,8 +135,8 @@ W1(33)-- 33 -34 -35 -36 -37 -38 -39 -40    (row 4, W1 작업대)
 | `/agv/cmd` | Server → AGV | 이동/회전/리프트 명령 |
 | `/agv/marker` | AGV → Server | ArUco 마커 감지 (위치 + heading) |
 | `/agv/cmd_ack` | AGV → Server | 회전/리프트 완료 알림 |
-| `agv/algorithm` | GUI/CLI → Server | 주문/완료 명령 수신 |
-| `warehouse/agv/at_ws` | Server → GUI | AGV 작업대 도착 알림 (선반 셀 활성화) |
+| `warehouse/order/start` `warehouse/shelf/complete` `warehouse/order/complete` | GUI → Server | 주문 시작/선반완료/주문종료 (start_order 등) |
+| `warehouse/shelf/arrived` | Server → GUI | AGV 작업대 도착 알림 (선반 셀 활성화) |
 
 ### 메시지 형식
 
@@ -716,35 +700,10 @@ python3 warehouse_gui_v2.py
 카메라 → RPi (OpenCV ArUco) --MQTT(/agv/marker)--> 서버
 ```
 
-### 하드웨어 추상화 계층 (hardware/)
+### 하드웨어 (실물 RPi) — 상세는 `hardware/README.md`
 
-```
-hardware/
-+-- __init__.py
-+-- bridge.py       # MQTT <-> UART 브릿지 (두 모드 동일 클래스)
-+-- camera.py       # RpiCamera / IsaacCamera 공통 ABC
-+-- isaac_hw.py     # IsaacMotors (시뮬레이터용 가상 모터)
-+-- rpi_main.py     # RPi 진입점
-+-- stm32/          # STM32 C 펌웨어 (CubeIDE)
-```
-
-**Bridge 두 모드:**
-```python
-# Isaac Sim 콜백 모드 (step6_visual.py)
-bridge = Bridge(rid=1, cmd_handler=agv._on_cmd_from_bridge)
-bridge.connect()   # MQTT만 연결, UART 없음
-
-# RPi 실물 모드 (hardware/rpi_main.py)
-bridge = Bridge(rid=1)   # cmd_handler=None -> UART 모드
-bridge.open_uart()        # UART 포트 열기 + 수신 스레드
-bridge.connect()
-```
-
-**실물 전환 체크리스트:**
-1. `hardware/bridge.py`: `UART_ENABLED = True`, `MQTT_HOST = "서버IP"`
-2. `camera_calibration.pkl` 파일 준비
-3. RPi에서: `python3 hardware/rpi_main.py <rid>`
-4. 서버 코드 변경 없음 (MQTT 토픽 동일)
+> bridge·카메라가 Isaac/실물 2개로 분리됨(2026-06-30): Isaac=`isaac_simulation/bridge_isaac.py`(콜백)+IsaacCamera, 실물=`hardware/bridge_rpi.py`(UART)+RpiCamera.
+> **실물 전환·UART 프로토콜·통신유실 대응·설정(`config.py`)은 모두 `hardware/README.md` 가 단일 진실.** (이 문서는 Isaac 시뮬레이션 중심)
 
 ---
 
@@ -757,61 +716,18 @@ bridge.connect()
 | 1 | **Step 6 검증** | TURNING/MOVING 동작, 바퀴 회전, 센서/LED 시각 확인 |
 | 2 | **전체 흐름 시연** | 서버 + Isaac Sim + GUI 연동 영상 |
 
-### 발표 후 — 하드웨어 연동
+### 발표 후 — 하드웨어 연동 (2026-06-30 코드 통합 완료)
 
-#### RPi ↔ STM32 통신 구조
+> ⚠️ 아래는 옛 계획(0xAA 바이너리 패킷)이었고, **실제는 주원이 STM 프로토콜로 확정**됨. 상세·최신은 **`hardware/README.md`**.
 
-```
-서버 (노트북)
-  │  MQTT /agv/cmd  {"rid":1, "cmd":"forward"}
-  ▼
-RPi (Python — hardware/bridge.py)
-  │  UART 패킷: [0xAA][CMD][LEN][PAYLOAD][CRC]
-  ▼
-STM32 (C 펌웨어)
-  │  PWM
-  ▼
-모터/리프트
-```
-
-#### UART 패킷 프로토콜 (RPi → STM32)
-
-| CMD  | 이름          | PAYLOAD |
-|------|---------------|---------|
-| 0x01 | MOVE_FORWARD  | 없음    |
-| 0x02 | STOP          | 없음    |
-| 0x03 | LIFT_UP       | 없음    |
-| 0x04 | LIFT_DOWN     | 없음    |
-| 0x05 | ROTATE_LEFT   | 없음    |
-| 0x06 | ROTATE_RIGHT  | 없음    |
-| 0x07 | ROTATE_180    | 없음    |
-
-#### STM32 → RPi 이벤트
-
-| CMD  | 이름         | 의미                               |
-|------|--------------|------------------------------------|
-| 0x82 | ROTATE_DONE  | 회전 완료 → `/agv/cmd_ack` (turn)  |
-| 0x83 | LIFT_DONE    | 리프트 완료 → `/agv/cmd_ack` (lift)|
-| 0xFF | ACK          | 명령 수신 확인                     |
-
-LIFT_DONE payload: `[1]` = lift_up 완료, `[0]` = lift_down 완료
-
-#### 실물 전환 방법
-
-**Step 1.** `hardware/bridge.py` 설정 변경:
-```python
-UART_ENABLED = True
-UART_PORT    = "/dev/ttyAMA0"
-MQTT_HOST    = "192.168.x.x"   # 서버 PC IP
-```
-
-**Step 2.** RPi에서 실행:
-```bash
-python3 hardware/rpi_main.py 1   # AGV-1
-python3 hardware/rpi_main.py 2   # AGV-2
-```
-
-**Step 3.** 서버 코드 변경 없음 — `/agv/cmd`, `/agv/marker`, `/agv/cmd_ack` 토픽 동일.
+핵심만:
+- **UART 송신**: ASCII `<cmd,±xxxx,±yyyy,±wwww>` 21바이트 (cmd 1~7, x/y/yaw=ArUco offset×10)
+- **명령 코드**: forward1 / stop2 / lift_up3 / lift_down4 / turn_left5 / turn_right6 / turn_180_7
+- **수신**: 단일바이트 `0x81`=DONE / `0xFF`=ACK (각 3회 반복 송신 — 신호 유실 대비)
+- **forward 완료 = 카메라 마커**(서버 ACK), turn/lift 완료 = cmd_ack
+- **실행**: `python3 -m hardware.rpi_main` (라파별 `export AGV_ID=1/2`), 설정은 `hardware/config.py` (`UART_ENABLED`/`MQTT_HOST` 등)
+- **서버 코드 변경 없음** — `/agv/cmd` `/agv/marker` `/agv/cmd_ack` 토픽 동일
+- **남은 HIL**: heading K 보정 / turn 좌우 방향 / 마커=노드 배치
 
 ---
 
@@ -833,7 +749,7 @@ CAD_PATHS = {
 | 순서 | 항목 | 구체적 작업 | 난이도 |
 |------|------|------------|--------|
 | 1 | UART 프로토콜 연동 | STM32 팀과 패킷 포맷 최종 확인 | 낮음 |
-| 2 | bridge.py UART 활성화 | UART_ENABLED=True, IP 설정 | 낮음 |
+| 2 | config.py 설정 | UART_ENABLED=True, MQTT_HOST=서버IP (hardware/config.py) | 낮음 |
 | 3 | RPi 실행 확인 | main.py 1/2 실행 → MQTT ↔ UART 동작 | 낮음 |
 | 4 | 카메라 캘리브레이션 | camera_calibration.pkl 생성 | 중간 |
 | 5 | RpiCamera ArUco 실물 | 마커 감지 + heading 정확도 확인 | 중간 |

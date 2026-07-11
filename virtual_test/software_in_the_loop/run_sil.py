@@ -17,7 +17,7 @@ TU Capstone Design
   ③ 통신 유실 — turn의 DONE 누락 시 bridge가 멈추나 (cmd_ack 안 옴 → 서버 hang)
                (forward DONE 유실은 이제 무해 — 완료는 마커 채널이라 UART와 무관)
 
-실행:  cd TU_Capstone_Design && python3 -m hardware.sil.run_sil
+실행:  cd TU_Capstone_Design && python3 -m virtual_test.software_in_the_loop.run_sil
 """
 
 import os
@@ -26,7 +26,7 @@ import json
 import time
 
 import hardware.bridge_rpi as br
-from hardware.sil.mock_stm import MockSTM
+from virtual_test.software_in_the_loop.mock_stm import MockSTM
 
 TURN_LIFT = ("turn_left", "turn_right", "turn_180", "lift_up", "lift_down")
 

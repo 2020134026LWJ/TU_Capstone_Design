@@ -17,14 +17,14 @@ KIVA 스타일 이동식 선반을 AGV 2대가 작업대로 운반하여 작업 
 - AGV 기반 선반 이송 시스템 구현
 - ArUco 마커 기반 경로 인식 및 주행
 - 중앙 서버를 통한 경로 계획 / 작업 관리 / 충돌·교착 회피
-- 시뮬레이션 ↔ 실물 코드 공통 추상화 (`hardware/` 레이어)
+- 시뮬/실물 분리 코드 구조 (Isaac=`isaac_simulation/`, 실물=`hardware/`)
 
 ## 시스템 구성
 
 ```
 +---------------+    MQTT          +-------------+      MQTT       +------------------+
 | warehouse_gui | ---------------> |   Server    | --------------> | AGV (Isaac/RPi)  |
-| (Kivy, 터치)  |  agv/algorithm   |  (Python)   |   /agv/cmd      |  Bridge + AGV    |
+| (Kivy, 터치)  | warehouse/order/*|  (Python)   |   /agv/cmd      |  Bridge + AGV    |
 +---------------+                  +-------------+                 +---------+--------+
                                           ^                                  |
                                           |     /agv/marker                  |
@@ -34,15 +34,15 @@ KIVA 스타일 이동식 선반을 AGV 2대가 작업대로 운반하여 작업 
 
 | 구성 요소 | 역할 | 기술 |
 |-----------|------|------|
-| AGV 서버 | 경로 계획, 작업 스케줄링, 충돌/교착 회피 | Python, MQTT, WebSocket |
+| AGV 서버 | 경로 계획, 작업 스케줄링, 충돌/교착 회피 | Python, MQTT |
 | Isaac Sim | AGV + 창고 3D 시뮬레이션 | Isaac Sim 5.1.0, USD |
 | AGV 실물 | 자율 이동 + 선반 리프트 | STM32 + Raspberry Pi 5 |
 | warehouse_gui | 작업자 터치스크린 주문 GUI | Kivy, MQTT, Raspberry Pi |
-| `hardware/` 추상화 | 시뮬/실물 공통 인터페이스 | Python (Bridge, Camera ABC) |
+| `hardware/` (실물) | 실물 RPi bridge + 카메라 + config | Python (bridge_rpi, camera, config) |
 
 ## 사용 기술
 
-STM32 (CubeIDE) / Raspberry Pi 5 / Isaac Sim 5.1.0 / Webots (레거시) / Python / OpenCV (ArUco) / MQTT (paho-mqtt + Mosquitto) / WebSocket / UART
+STM32 (CubeIDE) / Raspberry Pi 5 / Isaac Sim 5.1.0 / Webots (레거시) / Python / OpenCV (ArUco) / MQTT (paho-mqtt + Mosquitto) / UART
 
 ---
 
@@ -98,7 +98,7 @@ python3 mqtt_test.py
 ### 테스트
 
 ```bash
-pytest                          # 전체 회귀 (21 passed)
+pytest                          # 전체 회귀 (83 passed)
 pytest -m "stg or deadlock"     # 특정 영역
 ```
 
@@ -109,38 +109,28 @@ pytest -m "stg or deadlock"     # 특정 영역
 ```
 TU_Capstone_Design/
 |
-+-- server/                         # AGV 서버 (시뮬레이터 무관, MQTT 기반)
-|   +-- main.py                     # 서버 진입점
-|   +-- config.py                   # 설정 관리
-|   +-- request_handler.py          # ★ 핵심: 요청 처리 + 로봇 배정 + 충돌/교착 알고리즘
-|   +-- task_manager.py             # 작업 분해/스케줄링
-|   +-- order_optimizer.py          # Nearest Neighbor 선반 방문 순서 최적화 (구 task_scheduler)
-|   +-- robot_manager.py            # 로봇 6단계 상태 머신
-|   +-- shelf_manager.py            # 선반 상태 관리 (IN_PLACE/CARRIED/AT_WORKSTATION)
-|   +-- staging_manager.py          # 작업대 회랑 게이팅 (STG/TRG/위치 기반 해제)
-|   +-- path_planner.py             # A* 시간 기반 경로 계획 (예약 기반 충돌 회피)
-|   +-- mqtt_client.py              # MQTT 클라이언트 (publish + subscribe)
-|   +-- websocket_handler.py        # WebSocket 서버 (Admin UI용, 선택적)
-|   +-- db_loader.py                # 엑셀 DB 로더
-|   +-- map.json                    # 8x6 그리드 맵 (48노드)
-|   +-- shelf_config.json           # 선반/물품/작업대 설정 (8개 선반)
-|   +-- robot_config.json           # 로봇 설정 (AGV-1 home=9(W2), AGV-2 home=33(W1))
-|   +-- Database/                   # 주문 엑셀 데이터
-|       +-- 데이터 베이스.xlsx
-|       +-- 사용자1주문.xlsx
-|       +-- 사용자2주문.xlsx
++-- server/                         # AGV 서버 (시뮬레이터 무관, MQTT 기반) — 2026-06-13 레이어별 분리
+|   +-- main.py  config.py  __init__.py
+|   +-- comm/                       # mqtt_client.py (publish+subscribe)
+|   +-- core/                       # ★ 핵심 알고리즘: request_handler.py + _movement/_marker/_workflow_mixin.py
+|   +-- planning/                   # path_planner / reservation_service / deadlock_detector / order_optimizer / command_queue
+|   +-- managers/                   # robot.py / shelf.py / task.py / staging.py (도메인 상태)
+|   +-- data/                       # db_loader.py + map.json / shelf_config.json / robot_config.json
+|   +-- docs/                       # README.md / DISPATCH_FLOW.md / REFACTOR_F.md
+|       # 주문 엑셀은 warehouse_gui_server/ 로 통합 (구 server/Database/는 archive)
 |
-+-- isaac_simulation/               # Isaac Sim 5.1.0 시뮬레이션 (현재 메인)
-|   +-- step6_visual.py             # 시각 개선 버전 (현재 메인 실행 파일)
-|   +-- step7_kinematic.py          # Kinematic physics (작업 보류)
++-- isaac_simulation/               # Isaac Sim 5.1.0 (현재 메인) — Isaac 전용
+|   +-- step6_visual.py             # 현재 메인 실행 파일 (시각 + 터치스크린)
+|   +-- step7_kinematic.py          # Kinematic Physics (구현 완료, 런타임 검증 남음)
+|   +-- bridge_isaac.py             # Isaac 전용 bridge (콜백) / isaac_hw.py / camera.py(IsaacCamera)
 |   +-- STEP8_PLAN.md               # Articulation 전환 계획
 |
-+-- hardware/                       # 시뮬/실물 공통 추상화 + AGV 실물 코드
-|   +-- bridge.py                   # MQTT <-> UART 브릿지 (Isaac Sim / RPi 공통)
-|   +-- camera.py                   # RpiCamera / IsaacCamera 공통 인터페이스
-|   +-- isaac_hw.py                 # IsaacMotors (시뮬레이터용 가상)
-|   +-- rpi_main.py                 # RPi 진입점
-|   +-- stm32/                      # STM32 펌웨어 (C)
++-- hardware/                       # AGV 실물(RPi) 전용
+|   +-- rpi_main.py                 # 실물 진입점 (camera+bridge, AGV_ID로 rid)
+|   +-- bridge_rpi.py               # MQTT <-> UART 브릿지 (주원이 STM ASCII 프로토콜)
+|   +-- camera.py                   # RpiCamera (주원이 opencv ArUco 비전)
+|   +-- config.py                   # 배포 설정 (서버IP/UART/카메라)
+|   +-- stm32/rpi_uart.c            # 주원이 STM UART 소스 / AGV_Control.zip (펌웨어 전체)
 |
 +-- warehouse_gui_server/           # 작업자 터치스크린 GUI + 재고 서버
 |   +-- warehouse_gui_v2.py         # KivyMD 작업자 UI (IP 입력 팝업 포함)
@@ -149,15 +139,14 @@ TU_Capstone_Design/
 |   +-- 사용자{1,2}주문.xlsx        # 주문 데이터
 |   +-- 데이터 베이스.xlsx          # 재고 마스터
 |
-+-- webots_simulation/              # Webots (레거시, 참조용)
++-- (webots는 archive/webots_simulation_old/ 로 이동 — 레거시)
 |
-+-- tests/                          # pytest 회귀 테스트 (21 passed)
-|   +-- conftest.py                 # MockMqttPublisher + handler 픽스처
-|   +-- test_smoke.py               # 픽스처 sanity
-|   +-- test_collision.py           # 충돌 회피
-|   +-- test_deadlock.py            # 교착 회피 (staging blocker 포함)
-|   +-- test_intercept.py           # Node U 인터셉트
-|   +-- test_stg.py                 # STG 게이팅
++-- virtual_test/                   # 실물 없이 도는 테스트 전부 (83 passed)
+|   +-- algorithm/                  # pytest 알고리즘 회귀 테스트 (구 tests/)
+|   |   +-- conftest.py             # MockMqttPublisher + handler 픽스처
+|   |   +-- test_*.py               # 충돌/교착/인터셉트/STG/예약/멱등 등
+|   +-- software_in_the_loop/       # SIL — 가짜 STM + 가상 UART 통신 검증 (구 hardware/sil/)
+|       +-- mock_stm.py  run_sil.py
 |
 +-- FLOWCHART.md                    # 알고리즘 플로우차트 + 수정 이력 (설계 단일 진실)
 +-- mqtt_test.py                    # CLI 테스트 도구 (MQTT 기반)
@@ -182,7 +171,7 @@ TU_Capstone_Design/
 - **맵**: 8×6 그리드 + 작업대 2개 (총 48노드), 선반/통로/작업대 타입 구분
 - **2대 AGV 동시 운영**: AGV-1 home=노드9(W2), AGV-2 home=노드33(W1)
 - **cmd-based 통신**: forward/turn_*/lift_* 단일 명령 단위, ArUco 마커 도착 시 자동 종료
-- **하드웨어 추상화**: `hardware/bridge.py` + `camera.py` ABC — Isaac Sim/RPi 코드 공유
+- **시뮬/실물 분리**: Isaac=`isaac_simulation/`(bridge_isaac, IsaacCamera), 실물=`hardware/`(bridge_rpi, RpiCamera, config) — 주원이 STM 프로토콜 대응
 - **선반 관리**: IN_PLACE/CARRIED/AT_WORKSTATION 상태 추적, 인터셉트(Node U) 지원
 - **작업 관리**: 배치 작업, 물품→선반 매핑, 서브태스크 분해, Nearest Neighbor 최적화
 - **포워딩**: 같은 선반이 두 작업대 모두 필요할 때 자동 포워딩
@@ -194,7 +183,7 @@ TU_Capstone_Design/
 ## 시스템 흐름 (cmd-based)
 
 ```
-[mqtt_test/GUI] --MQTT(agv/algorithm)--> [Server] --MQTT(/agv/cmd)--> [AGV]
+[GUI/mqtt_test] --MQTT(warehouse/order/*)--> [Server] --MQTT(/agv/cmd)--> [AGV]
                                             ^                          |
                                             |  /agv/marker (마커 도착)  |
                                             |  /agv/cmd_ack (turn/lift) |
@@ -214,10 +203,9 @@ TU_Capstone_Design/
 | 파일 | 내용 |
 |------|------|
 | [`FLOWCHART.md`](FLOWCHART.md) | 알고리즘 플로우차트 + 수정 이력 (설계 단일 진실) |
-| [`server/README.md`](server/README.md) | 서버 진입점 안내 + 모듈 구조 |
+| [`server/docs/README.md`](server/docs/README.md) | 서버 진입점 안내 + 모듈 구조 |
 | [`server/docs/DISPATCH_FLOW.md`](server/docs/DISPATCH_FLOW.md) | 주문→cmd 발행 디스패치 흐름 (한글) |
 | [`server/docs/REFACTOR_F.md`](server/docs/REFACTOR_F.md) | 경로/예약 재설계(REFACTOR F) 내역 |
 | [`isaac_simulation/README.md`](isaac_simulation/README.md) | Isaac Sim 5.1.0 시뮬레이션 상세 |
-| [`hardware/README.md`](hardware/README.md) | Bridge + Camera ABC + UART 프로토콜 |
-| [`webots_simulation/README.md`](webots_simulation/README.md) | Webots (레거시) 참조 |
-| [`warehouse_gui_server/Readme.md`](warehouse_gui_server/Readme.md) | 작업자 GUI + 재고 서버 |
+| [`hardware/README.md`](hardware/README.md) | 실물 RPi: bridge_rpi + RpiCamera + config + UART 프로토콜 |
+| `archive/webots_simulation_old/` | Webots (레거시, 아카이브) |

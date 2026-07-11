@@ -248,6 +248,16 @@ class MarkerMixin:
         # (return-home 등 태스크 없는 이동 중에도 heading을 정확히 유지해야 함)
         if cmd in ("turn_left", "turn_right", "turn_180"):
             self.robot_manager.apply_turn(robot.rid, cmd)
+
+            # 수정 58: 작업대 피킹 방향 회전 완료 → 보류했던 PICK 노드 진입을 마저 실행
+            orienting = self._ws_orienting.get(robot.rid)
+            if orienting is not None:
+                shelf_id, ws_node = orienting
+                self._ws_orienting.pop(robot.rid, None)
+                self._enter_wait_picking(robot, shelf_id, ws_node)
+                return {"type": "cmd_ack_response", "success": True,
+                        "action": "ws_oriented_wait_picking"}
+
             # B-selfguard flush: turn 완료로 heading fresh → 보류 재계획 우선 실행.
             # 보류분이 있으면 옛 큐의 다음 명령 대신 새 plan을 발행(옛 경로 폐기).
             if not self._flush_pending_replan(robot.rid):

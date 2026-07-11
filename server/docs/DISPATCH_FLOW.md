@@ -8,7 +8,7 @@
 
 | 단계 | 파일:라인 | 메서드 | 하는 일 |
 |------|-----------|--------|---------|
-| MQTT `agv/algorithm` 수신 | `mqtt_client.py` | `_on_algorithm_msg` | UI에서 `start_order` 등 받음 → request_handler로 전달 |
+| MQTT `warehouse/order/start` 수신 | `mqtt_client.py` → `main.py` 구독 | `handle_message` | GUI에서 `start_order`(작업대 포함) 등 받음 → request_handler로 전달 |
 | 라우팅 | `request_handler.py` `handle_message` | type 별로 분기 | `start_order` → `_handle_start_order` (WorkflowMixin) |
 | 주문 분해 | `_workflow_mixin.py` `_handle_start_order` | 엑셀 DB 조회 → 선반 리스트 → 태스크 N개 생성 | `T{user}_{order}_{idx}` 형식 |
 | 선반 방문 순서 최적화 | `order_optimizer.py` `optimize_shelf_order` | Nearest Neighbor — AGV 홈 기준 가까운 선반부터 |

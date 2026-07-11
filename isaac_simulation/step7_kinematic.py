@@ -77,6 +77,16 @@ CAM_HEIGHT        = 0.15
 DETECT_INTERVAL   = 5
 CAM_DETECT_RADIUS = 0.087  # m
 
+# ─── 디지털 트윈 모드 ─────────────────────────────────────────────────────────
+# TWIN=1 로 실행하면 Isaac이 'AGV 역할'을 그만두고 '관찰자'가 된다.
+#   일반(TWIN=0): Isaac이 곧 AGV — 가상 카메라로 마커를 발행하고 cmd_ack도 보낸다.
+#   트윈(TWIN=1): 실물 AGV(라파)가 마커를 발행. Isaac은 아무것도 발행하지 않고
+#                 서버의 /agv/cmd + 실물의 /agv/marker를 구독해 똑같이 움직인다.
+#                 → 발행자가 둘이 되면 서버가 같은 로봇의 도착을 두 번 받으므로 발행 금지.
+# 서버는 실물의 마커 보고가 와야 다음 명령을 내리므로, Isaac이 먼저 도착해도
+# 그 노드에서 기다린다 → 별도 동기화 장치 없이 실물과 보조가 맞는다.
+TWIN_MODE = os.environ.get("TWIN", "0") == "1"
+
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
 SHELF_PATH = os.path.join(_ROOT, "server", "data", "shelf_config.json")
@@ -104,6 +114,21 @@ for _e in map_cfg["edges"]:
 def node_xy(node_id: int) -> np.ndarray:
     n = nodes[node_id]
     return np.array([n["x"], n["y"]], dtype=float)
+
+
+def server_deg_to_rad(deg: float) -> float:
+    """서버 heading(0=N/90=E/180=S/270=W) → Isaac heading(라디안, 0=E/π/2=N).
+
+    camera.py의 역변환: heading_deg = (90 - degrees(rad)) % 360
+    """
+    return np.radians((90.0 - deg) % 360.0)
+
+
+# 트윈 모드 초기 heading — 서버가 '실물의 첫 마커'에서 가정하는 값과 반드시 같아야 한다.
+# 실물 라파는 heading을 안 보낸다(옵션 a) → 서버는 robot.heading 기본값 0°(북)를 유지.
+# 여기서 안 맞추면 서버는 '북쪽을 본다'고 믿고 회전을 계산하는데 Isaac 몸체는 동쪽을
+# 보고 있어, 같은 명령이 서로 다른 노드로 향한다 (트윈이 엉뚱한 데로 감).
+TWIN_INIT_HEADING_DEG = 0    # 서버 RobotManager의 heading 기본값과 일치
 
 
 def _normalize_angle(a: float) -> float:
@@ -138,8 +163,11 @@ class IsaacAGV:
         # ── 이동 상태 ──────────────────────────────────────────────────────
         # IDLE / TURNING / MOVING
         self.state            = "IDLE"
-        self.heading          = 0.0   # 현재 방향 (라디안, 0=East, π/2=North)
-        self.heading_target   = 0.0   # TURNING 목표 방향
+        # 일반 모드: 0 rad(동). Isaac이 자기 heading을 마커와 함께 발행 → 서버가 90°로 맞춤.
+        # 트윈 모드: 실물은 heading을 안 보내 서버가 0°(북)로 가정 → 몸체도 북을 봐야 일치.
+        self.heading          = (server_deg_to_rad(TWIN_INIT_HEADING_DEG)
+                                 if TWIN_MODE else 0.0)   # 라디안, 0=East, π/2=North
+        self.heading_target   = self.heading   # TURNING 목표 방향
 
         home = node_xy(home_node)
         self.pos             = home.copy()
@@ -171,6 +199,8 @@ class IsaacAGV:
 
         # MQTT 스레드 → main loop 핸드오프
         self._pending_cmd: str | None = None   # 실행할 다음 명령
+        self._pending_shelf_id: int | None = None  # lift_up 대상 선반 (서버 지정, 약점 3)
+        self._pending_marker: int | None = None    # 트윈: 실물이 보고한 마커 (동기화 대기)
         self._current_turn_cmd: str | None = None  # 실행 중인 turn 명령 이름
 
     def set_bridge(self, bridge):
@@ -181,12 +211,15 @@ class IsaacAGV:
         """Camera 인스턴스 연결"""
         self.camera = camera
 
-    def _on_cmd_from_bridge(self, rid: int, cmd: str):
-        """Bridge cmd_handler 콜백 — main loop 핸드오프"""
+    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None):
+        """Bridge cmd_handler 콜백 — main loop 핸드오프 (shelf_id: lift 대상, 약점 3)"""
         self._pending_cmd = cmd
+        self._pending_shelf_id = shelf_id
 
     def poll_camera(self):
         """카메라 감지 → marker 보고 (main loop에서 호출)"""
+        if TWIN_MODE:
+            return          # 트윈: 마커는 실물이 보고한다 (이중 발행 금지)
         if self.camera is None or self.bridge is None:
             return
         if self.state not in ("MOVING", "IDLE"):
@@ -195,10 +228,42 @@ class IsaacAGV:
         if marker_id is not None:
             self.bridge.publish_marker(marker_id, heading_deg)
 
+    def _ack(self, cmd: str, *shelf_id):
+        """cmd_ack 발행 — 트윈 모드에선 실물이 보고하므로 침묵한다.
+
+        shelf_id는 그대로 통과시킨다(가변인자). lift의 shelf_id=None은 '빈 리프트'라는
+        의미 있는 값이라 생략과 구분돼야 한다 (약점 4 — 서버가 선반 분실을 감지).
+        """
+        if TWIN_MODE or self.bridge is None:
+            return
+        self.bridge.publish_cmd_ack(cmd, *shelf_id)
+
+    def _on_marker_from_real(self, rid: int, marker_id: int):
+        """트윈 모드 — 실물 AGV의 마커 보고 수신 (MQTT 스레드). main loop로 핸드오프."""
+        self._pending_marker = marker_id
+
+    def sync_to_node(self, nid: int):
+        """트윈 모드 — 실물이 보고한 노드로 위치 보정 (main loop에서 호출).
+
+        회전/리프트 중에는 건드리지 않는다 (그 동작은 명령으로 이미 재현 중).
+        """
+        if nid not in nodes:
+            print(f"[AGV {self.rid}] (트윈) 알 수 없는 마커 {nid} — 무시")
+            return
+        if self.state not in ("MOVING", "IDLE"):
+            return
+        self.pos             = node_xy(nid).copy()
+        self.current_node    = nid
+        self._moving_to_node = None
+        self.target_pos      = None
+        self.state           = "IDLE"
+        self.motors.stop()
+        print(f"[AGV {self.rid}] (트윈) 실물 마커 {nid} → 위치 동기화")
+
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
 
-    def execute_cmd(self, cmd: str):
-        """서버 명령 수신 → 상태 전환"""
+    def execute_cmd(self, cmd: str, target_shelf: int | None = None):
+        """서버 명령 수신 → 상태 전환 (target_shelf: lift_up 대상 선반, 약점 3)"""
         if cmd == "forward":
             target = self._find_forward_target()
             if target is None:
@@ -236,17 +301,28 @@ class IsaacAGV:
             print(f"[AGV {self.rid}] <- turn_180")
 
         elif cmd == "lift_up":
-            shelf_id = self._find_nearby_shelf()
-            self.carrying_shelf = shelf_id
+            # 약점 3: 서버가 지정한 선반을 직접 든다 (좌표 추측 금지).
+            # teleport 방지 — 지정 선반이 실제로 근처에 있을 때만 집고, 없으면
+            # 빈 리프트로 보고(약점 4). 엉뚱한 이웃 선반을 집지 않는다.
+            if target_shelf is not None:
+                picked = target_shelf if self._shelf_is_near(target_shelf) else None
+                if picked is None:
+                    print(f"[AGV {self.rid}] lift_up: 서버지정 선반 {target_shelf}이 "
+                          f"근처에 없음 → 빈 리프트(보고)")
+            else:
+                picked = self._find_nearby_shelf()  # 폴백 (서버 미지정 / 수동)
+            self.carrying_shelf = picked
+            if picked is not None:
+                shelf_origins.pop(picked, None)
             self.lift_target_z  = self.LIFT_PLATE_UP
             self.lift_state     = "RAISING"
             # 픽업 순간: 선반의 현재 orient와 AGV heading의 offset 저장
             # _sync_shelf에서 q_agv * shelf_offset으로 선반이 AGV와 함께 회전
-            q_shelf = self._read_shelf_orient(shelf_id)
+            q_shelf = self._read_shelf_orient(picked)
             q_agv   = self._heading_quat(self.heading)
             q_inv   = Gf.Quatf(q_agv.GetReal(), -q_agv.GetImaginary())
             self.shelf_offset = q_inv * q_shelf
-            print(f"[AGV {self.rid}] <- lift_up → shelf {shelf_id}")
+            print(f"[AGV {self.rid}] <- lift_up → shelf {picked}")
 
         elif cmd == "lift_down":
             self.lift_target_z = self.LIFT_PLATE_Z
@@ -277,16 +353,27 @@ class IsaacAGV:
         return best_node
 
     def _find_nearby_shelf(self) -> int | None:
-        """현재 위치 근처 선반 노드 탐색 (lift_up 시 어떤 선반인지 결정)"""
+        """현재 위치 근처 선반 탐색 (lift_up 시 어떤 선반인지 결정)
+
+        shelf_origins는 _place_shelf에서 actual 위치로 갱신되므로,
+        선반이 작업대(W) 등 home 외 노드에 놓여있어도 정확히 찾음 (포워딩 재픽업).
+        """
         best_nid  = None
         best_dist = POSITION_TOLERANCE * 3
-        for nid in shelf_node_ids:
-            n = nodes[nid]
-            dist = float(np.linalg.norm(self.pos - np.array([n["x"], n["y"]])))
+        for sid, (sx, sy) in shelf_origins.items():
+            dist = float(np.linalg.norm(self.pos - np.array([sx, sy])))
             if dist < best_dist:
                 best_dist = dist
-                best_nid  = nid
+                best_nid  = sid
         return best_nid
+
+    def _shelf_is_near(self, sid: int) -> bool:
+        """선반 sid가 현재 AGV 위치 근처(tolerance*3)에 실제로 놓여 있는지 (약점 3).
+        든 선반은 shelf_origins에서 빠져 있어 False → 중복/오발 lift_up을 빈 리프트로 처리."""
+        if sid not in shelf_origins:
+            return False
+        sx, sy = shelf_origins[sid]
+        return float(np.linalg.norm(self.pos - np.array([sx, sy]))) < POSITION_TOLERANCE * 3
 
     # ─── 업데이트 ────────────────────────────────────────────────────────────
 
@@ -305,8 +392,8 @@ class IsaacAGV:
                 turn_cmd = self._current_turn_cmd
                 self._current_turn_cmd = None
                 print(f"[AGV {self.rid}] Turn done ({turn_cmd})")
-                if self.bridge and turn_cmd:
-                    self.bridge.publish_cmd_ack(turn_cmd)
+                if turn_cmd:
+                    self._ack(turn_cmd)
             else:
                 # 목표에 가까울수록 속도 감소 (오버슈트 방지)
                 speed = min(1.0, abs(diff) / 0.5) * TURN_SPEED
@@ -360,15 +447,14 @@ class IsaacAGV:
 
             if prev_state == "RAISING":
                 print(f"[AGV {self.rid}] Lift UP done (shelf {self.carrying_shelf})")
-                if self.bridge:
-                    self.bridge.publish_cmd_ack("lift_up")
+                # 약점 4: 실제 든 선반 보고 (None이면 빈 리프트 → 서버 감지)
+                self._ack("lift_up", self.carrying_shelf)
             elif prev_state == "LOWERING":
                 shelf_id = self.carrying_shelf
                 self.carrying_shelf = None
                 self._place_shelf(stage, shelf_id)
                 print(f"[AGV {self.rid}] Lift DOWN done (shelf {shelf_id})")
-                if self.bridge:
-                    self.bridge.publish_cmd_ack("lift_down")
+                self._ack("lift_down", shelf_id)
         else:
             self.lift_z += step if diff > 0 else -step
             self._sync_lift(stage)
@@ -929,6 +1015,67 @@ def build_agv(stage, rid: int, x: float, y: float) -> bool:
     return True  # 기본 도형 모드
 
 
+def build_inbound_station(stage, node_id: int, x: float, y: float):
+    """입고 스테이션 빌드 — 노드 동쪽(+X, 창고 밖)에 공급대 + 작업자.
+
+    출고 작업대(build_workstation)는 -X 쪽에 컨베이어가 붙는 반대 배치라 재사용 안 함.
+    AGV는 이 노드에 선반을 대고 heading 90°(동쪽)로 멈춘다(shelf_config pick_heading)
+    → 선반 면이 창고 밖 작업자를 향함.
+
+    배치:
+      (x,       y)   AGV/선반 도착 (입고 노드)
+      (x+0.95,  y)   공급대 (입고할 물건이 놓인 테이블)
+      (x+1.75,  y)   작업자 (창고 밖 동쪽에 서서 선반에 채워 넣음)
+    """
+    root = f"/World/IN_{node_id}"
+    UsdGeom.Xform.Define(stage, root)
+
+    TBL_H  = 0.80
+    TBL_CX = x + 0.95
+
+    # 공급대 상판 + 다리 4개
+    VisualCuboid(
+        prim_path=f"{root}/table_top", name=f"in_{node_id}_table_top",
+        position=np.array([TBL_CX, y, TBL_H]),
+        scale=np.array([0.70, 1.00, 0.06]), color=C_TABLE_LEG,
+    )
+    for li, (ldx, ldy) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        VisualCylinder(
+            prim_path=f"{root}/table_leg_{li}", name=f"in_{node_id}_table_leg_{li}",
+            position=np.array([TBL_CX + ldx * 0.29, y + ldy * 0.44, (TBL_H - 0.03) / 2]),
+            radius=0.025, height=TBL_H - 0.03, color=C_TABLE_LEG,
+        )
+    # 입고할 물건 상자 3개 (공급대 위)
+    for bi, (by_off, bcol) in enumerate([
+        (-0.32, np.array([0.85, 0.55, 0.15])),
+        ( 0.00, np.array([0.80, 0.30, 0.25])),
+        ( 0.32, np.array([0.30, 0.60, 0.80])),
+    ]):
+        VisualCuboid(
+            prim_path=f"{root}/box_{bi}", name=f"in_{node_id}_box_{bi}",
+            position=np.array([TBL_CX, y + by_off, TBL_H + 0.10]),
+            scale=np.array([0.26, 0.24, 0.16]), color=bcol,
+        )
+
+    # 작업자 (창고 밖 동쪽) — 몸통 + 머리
+    VisualCylinder(
+        prim_path=f"{root}/worker_body", name=f"in_{node_id}_worker_body",
+        position=np.array([x + 1.75, y, 0.45]),
+        radius=0.16, height=0.90, color=np.array([0.20, 0.35, 0.55]),
+    )
+    VisualSphere(
+        prim_path=f"{root}/worker_head", name=f"in_{node_id}_worker_head",
+        position=np.array([x + 1.75, y, 1.02]),
+        radius=0.12, color=np.array([0.90, 0.75, 0.62]),
+    )
+    # 입고 표시등 (초록) — 공급대 모서리
+    VisualCylinder(
+        prim_path=f"{root}/in_led", name=f"in_{node_id}_led",
+        position=np.array([TBL_CX - 0.30, y + 0.44, TBL_H + 0.12]),
+        radius=0.022, height=0.05, color=C_WS,
+    )
+
+
 def build_warehouse_env(stage):
     pass
 
@@ -993,12 +1140,12 @@ _dome.CreateIntensityAttr(1500.0)
 _dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
 _dome.CreateTextureFileAttr("")
 
-# 그리드(x=0~8, y=-0.5~4.5) + 작업대/작업자 영역(x≈-2.5) 포함 바닥
-# x: -2.5 ~ 8.5 → 중심 3.0, 폭 11.0 / y: -1.0 ~ 5.0 → 중심 2.0, 깊이 6.0
+# 그리드(x=0~8, y=-0.5~4.5) + 작업대/작업자 영역(x≈-2.5) + 입고 스테이션(x≈9.3) 포함 바닥
+# x: -2.5 ~ 9.5 → 중심 3.5, 폭 12.0 / y: -1.0 ~ 5.0 → 중심 2.0, 깊이 6.0
 VisualCuboid(
     prim_path="/World/Floor", name="floor",
-    position=np.array([3.0, 2.0, -0.01]),
-    scale=np.array([11.0, 6.0, 0.02]),
+    position=np.array([3.5, 2.0, -0.01]),
+    scale=np.array([12.0, 6.0, 0.02]),
     color=np.array([0.25, 0.25, 0.25]),
 )
 
@@ -1009,6 +1156,11 @@ for node_id in shelf_node_ids:
 for node_id in ws_node_ids:
     node = nodes[node_id]
     build_workstation(stage, node_id, node["x"], node["y"])
+
+# 입고 스테이션 (shelf_config.json inbound_station — 현재 노드 48, 동쪽 밖 작업자)
+for node_str in shelf_cfg.get("inbound_station", {}):
+    node = nodes[int(node_str)]
+    build_inbound_station(stage, int(node_str), node["x"], node["y"])
 
 build_warehouse_env(stage)
 
@@ -1075,6 +1227,9 @@ for agv in agvs.values():
     bridge = Bridge(
         rid=agv.rid,
         cmd_handler=agv._on_cmd_from_bridge,
+        # 트윈 모드에서만 /agv/marker 구독 (실물 위치 추종). 일반 모드는 구독 안 함 —
+        # 자기가 발행한 마커를 되받으면 자기 위치를 자기가 덮어쓴다.
+        marker_handler=(agv._on_marker_from_real if TWIN_MODE else None),
     )
     cam = IsaacCamera(
         get_pos_fn=lambda a=agv: a.pos,
@@ -1100,6 +1255,7 @@ print()
 print("=" * 60)
 print("  Isaac Sim 5.1.0 — Step 7: Kinematic Physics + cmd-based 제어")
 print("=" * 60)
+print(f"  모드: {'디지털 트윈 (실물 마커 추종 · 발행 안 함)' if TWIN_MODE else '일반 시뮬 (Isaac이 AGV 역할)'}")
 print(f"  AGV-1 홈: {robot_homes[1]}  AGV-2 홈: {robot_homes[2]}")
 print(f"  이동 방식: TURNING({TURN_SPEED:.2f}m/s) -> MOVING({MOVE_SPEED}m/s)")
 print(f"  물리: AGV 바디(kinematic) + 선반(kinematic+collision) + 바닥(static)")
@@ -1143,12 +1299,20 @@ while simulation_app.is_running():
     dt = world.get_physics_dt()
 
     for agv in agvs.values():
+        # 트윈: 실물 마커 보고 → 위치 동기화 (명령 실행보다 먼저 — 위치가 최신이어야 함)
+        if agv._pending_marker is not None:
+            nid = agv._pending_marker
+            agv._pending_marker = None
+            agv.sync_to_node(nid)
+
         # MQTT 스레드 → main loop: IDLE 상태일 때만 명령 실행
         # (이동/회전 중 명령 수신 시 현재 동작 완료 후 실행)
         if agv._pending_cmd is not None and agv.state == "IDLE":
-            cmd = agv._pending_cmd
-            agv._pending_cmd = None
-            agv.execute_cmd(cmd)
+            cmd      = agv._pending_cmd
+            shelf_id = agv._pending_shelf_id
+            agv._pending_cmd      = None
+            agv._pending_shelf_id = None
+            agv.execute_cmd(cmd, shelf_id)
 
         agv.update(dt, stage)
 

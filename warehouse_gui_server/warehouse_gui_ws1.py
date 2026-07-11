@@ -25,14 +25,14 @@ except ImportError:
     mqtt = None
 
 # 설정
-SERVER_IP = '10.37.235.105'
+SERVER_IP = '10.220.55.38'
 MQTT_PORT = 1883
 HTTP_PORT = 5000
 
 # 이 파이가 설치된 작업대 번호 (작업대-파이 고정: 파이1=1, 파이2=2)
 # 사용자는 파이에서 1·2 모두 선택 가능하지만 작업대는 파이에 고정된다.
 # AGV가 선반을 어느 작업대로 보낼지 알 수 있도록 모든 발행 메시지에 실어 보낸다.
-WORKSTATION_ID = 2
+WORKSTATION_ID = 1
 
 Window.size = (800, 448)
 Window.borderless = True

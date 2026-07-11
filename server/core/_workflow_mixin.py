@@ -357,6 +357,40 @@ class WorkflowMixin:
 
     # ─── 도착 / lift_up / lift_down 처리 ───
 
+    def _pick_heading(self, station_node: int):
+        """스테이션에서 선반을 작업자 쪽으로 향하게 하는 heading (없으면 None = 회전 안 함).
+
+        출고 작업대(9·33 → 270=서쪽, 맵 서쪽 끝 열이라 작업자가 서쪽)와
+        입고 스테이션(48 → 90=동쪽) 둘 다 조회한다.
+        """
+        station = (self.shelf_manager.workstations.get(station_node)
+                   or self.shelf_manager.inbound_station.get(station_node)
+                   or {})
+        return station.get("pick_heading")
+
+    def _orient_for_picking(self, robot, shelf_id: int, ws_node: int) -> bool:
+        """수정 58: 작업대 도착 → 피킹 방향으로 제자리 회전. 회전이 필요하면 True.
+
+        선반은 리프트에 얹혀 AGV heading을 따라 돌므로(실물·시뮬 동일), AGV를 돌리면
+        선반 면이 작업자를 향한다. 회전이 끝나기 전엔 WAITING_FOR_PICK 전이도
+        GUI 셀 활성(파란불)도 하지 않는다 — 작업자가 옆면을 보고 집는 상황 방지.
+        """
+        target = self._pick_heading(ws_node)
+        if target is None or robot.heading == target:
+            return False
+        delta = (target - robot.heading) % 360
+        turn_cmd = {90: "turn_right", 180: "turn_180", 270: "turn_left"}.get(delta)
+        if turn_cmd is None:                       # 격자 밖 heading — 회전 불가, 그냥 진행
+            print(f"[RequestHandler] Robot {robot.rid}: 피킹 회전 불가 "
+                  f"(heading={robot.heading}° → {target}°, delta={delta}°)")
+            return False
+        self._ws_orienting[robot.rid] = (shelf_id, ws_node)
+        robot.command_queue.append(turn_cmd)
+        self._send_next_command(robot.rid)
+        print(f"[RequestHandler] Robot {robot.rid}: WS {ws_node} 도착 → 피킹 방향 회전 "
+              f"({robot.heading}° → {target}°, {turn_cmd})")
+        return True
+
     def _enter_wait_picking(self, robot, shelf_id: int, ws_node: int) -> None:
         """FLOWCHART 'PICK' 노드: 선반이 작업대에 도착해 피킹 대기 진입.
 
@@ -364,7 +398,14 @@ class WorkflowMixin:
         부수효과(상태 전이 + PENDING 재배정 + GUI 셀 활성)를 한 곳에 모아,
         경로별로 한쪽만 빠뜨리는 분기 누락을 구조적으로 차단한다 (플로우차트 PICK 노드 1:1 대응).
         user_id는 task 소유자가 아니라 선반이 놓인 WS(ws_node) 기준 — 포워딩 시 둘이 다르다.
+
+        수정 58: 피킹 방향 회전이 먼저다. 회전이 필요하면 여기서 중단하고,
+        회전 cmd_ack(_handle_cmd_ack)가 이 함수를 다시 불러 나머지를 마저 실행한다.
         """
+        if self._orient_for_picking(robot, shelf_id, ws_node):
+            return
+
+        self._ws_orienting.pop(robot.rid, None)
         self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
         # CARRIED → AT_WORKSTATION 전환 → 이 선반을 기다리던 PENDING 태스크 재배정
         self._try_assign_pending_tasks()

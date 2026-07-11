@@ -52,6 +52,9 @@ class ShelfManager:
         self.item_to_shelf: Dict[str, int] = {}      # item_name -> shelf_id
         self.all_shelf_nodes: Set[int] = set()        # 모든 선반 노드 ID
         self.workstations: Dict[int, Dict] = {}       # ws_node -> config
+        # 입고 스테이션 (node 48) — 출고 작업대와 별개 개념이라 workstations에 안 섞는다.
+        # 회랑/스테이징/GUI 매핑은 출고 작업대 전용 → 여기 넣으면 그 로직이 딸려 들어감.
+        self.inbound_station: Dict[int, Dict] = {}    # node -> config
         self._ws_id_to_node: Dict[int, int] = {}      # 작업대번호(1/2) -> ws_node(33/9)
         self._load_config()
 
@@ -83,9 +86,13 @@ class ShelfManager:
                 if "ws_id" in ws_info:
                     self._ws_id_to_node[int(ws_info["ws_id"])] = ws_node
 
+            for node_str, info in data.get("inbound_station", {}).items():
+                self.inbound_station[int(node_str)] = info
+
             print(f"[ShelfManager] Loaded {len(self.shelves)} shelves, "
                   f"{len(self.item_to_shelf)} items, "
-                  f"{len(self.workstations)} workstations")
+                  f"{len(self.workstations)} workstations, "
+                  f"{len(self.inbound_station)} inbound station(s)")
 
         except FileNotFoundError:
             print(f"[ShelfManager] Config not found: {self.shelf_config_file}")
