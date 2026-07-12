@@ -20,6 +20,17 @@ from dataclasses import dataclass
 class Config:
     """서버 설정 — 모든 필드는 기본값을 가지므로 Config() 만으로 즉시 사용 가능."""
 
+    # 수정 69 (A 배관) — 실물 카메라가 보고한 heading을 **제어에 쓸지**의 밸브.
+    #
+    # False(기본): 보고만 받고 장부와 비교해 로그만 찍는다. robot.heading은 안 건드린다.
+    # True: 카메라 heading을 그대로 믿는다 → 서버가 방향을 추측(dead reckoning)하지 않게 된다.
+    #
+    # ⚠️**hardware/config.py의 HEADING_OFFSET을 실물에서 실측한 뒤에만 켤 것.**
+    # 상수가 틀린 채로 켜면 서버가 매 마커마다 방향을 잘못 갱신해 지금보다 나빠진다.
+    # 켜기 전 절차: 실물 주행 → 서버 로그의 `[heading] ... 차이 N°` 가 일정한지 본다 →
+    #   그 N만큼 HEADING_OFFSET 보정 → 경고가 안 뜨면 맞은 것 → 그때 True.
+    TRUST_CAMERA_HEADING: bool = False
+
     # ─── MQTT 설정 (AGV ↔ 서버, GUI ↔ 서버 메시징) ───
     mqtt_host: str = "localhost"              # 브로커 주소. 라파/노트북 분리 배치 시 from_env로 변경
     mqtt_port: int = 1883                     # mosquitto 기본 포트

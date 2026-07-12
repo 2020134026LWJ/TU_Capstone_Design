@@ -15,6 +15,24 @@ bridge_rpi 연동:
 """
 
 import pickle
+
+from hardware.config import HEADING_OFFSET
+
+
+def yaw_to_heading(yaw_deg: float) -> int:
+    """카메라 yaw → 서버 heading (0=N / 90=E / 180=S / 270=W).
+
+    실측(2026-07-12): **카메라가 시계방향으로 돌면 yaw가 증가한다. 1:1.**
+    서버 heading도 나침반(시계방향 +)이라 **부호가 같다** → 덧셈만 하면 된다.
+
+    4방향으로 반올림하는 이유: 우리는 90° 단위만 구분하면 되고, 그러면 **±45° 여유**가 생겨
+    yaw 노이즈(실측 프레임간 중앙값 0.2°, 초점 나빠도 수 도)가 완전히 묻힌다.
+
+    [주의] HEADING_OFFSET 은 실물에서 1회 실측해야 하는 값이다 (config 주석 참고).
+    확정 전엔 서버가 이 값을 제어에 쓰지 않는다 — 비교/로그만 한다.
+    """
+    h = (float(yaw_deg) + HEADING_OFFSET) % 360.0
+    return int(round(h / 90.0)) % 4 * 90
 import numpy as np
 
 
@@ -28,10 +46,20 @@ class RpiCamera:
             - dist_coeffs: 왜곡 계수
     """
 
-    def __init__(self, calibration_file="camera_calibration.pkl", show_preview=True):
+    def __init__(self, calibration_file="camera_calibration.pkl", show_preview=True,
+                 keep_frame=False):
+        """keep_frame=True 면 detect()가 그린 프레임을 self.last_frame 에 남긴다.
+
+        camera_preview(웹 프리뷰)가 **이 검출 결과를 그대로** 보여주기 위한 것.
+        프리뷰가 자체적으로 다시 계산하면 화면의 숫자와 서버로 가는 숫자가 갈릴 수 있다.
+        운용(rpi_main)에서는 기본 False라 비용 없음.
+        """
         import cv2
         from picamera2 import Picamera2
         import time
+
+        self.keep_frame = keep_frame
+        self.last_frame = None
 
         # 캘리브레이션 데이터 추출
         with open(calibration_file, "rb") as f:
@@ -171,6 +199,10 @@ class RpiCamera:
                 #     UART 송신은 bridge_rpi 담당 → 여기선 첫 마커 (id, x, y, yaw)만 반환.
                 if result[0] is None:
                     result = (int(marker_ids[i]), float(x), float(y), float(yaw_deg))
+
+        # 웹 프리뷰용 — 이 검출 결과가 그려진 프레임을 그대로 넘긴다
+        if self.keep_frame:
+            self.last_frame = frame_undistorted
 
         # 프레임 표시
         if self.show_preview:

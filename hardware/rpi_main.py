@@ -27,7 +27,7 @@ import sys
 import time
 
 from hardware.bridge_rpi import Bridge
-from hardware.camera import RpiCamera
+from hardware.camera import RpiCamera, yaw_to_heading
 from hardware.config import CALIB_FILE, SHOW_PREVIEW   # 배포 설정은 config.py만 수정
 
 
@@ -76,10 +76,13 @@ def main():
             if camera:
                 marker_id, x_mm, y_mm, yaw_deg = camera.detect()
                 if marker_id is not None:
-                    bridge.set_marker_offset(x_mm, y_mm, yaw_deg)   # STM: 매 프레임 (PID offset, yaw 포함)
+                    bridge.set_marker_offset(x_mm, y_mm, yaw_deg)   # STM: PID offset (UART_OFFSET_HZ 상한)
+                    bridge.publish_pose(marker_id, x_mm, y_mm, yaw_deg)  # 트윈: 연속 자세 (수정 68)
                     if marker_id != prev_marker:                    # 서버: 새 마커일 때만 (시뮬과 동일)
-                        # heading 미전송(옵션 a) → 서버가 경로 기반 계산. 카메라 yaw는 STM에만.
-                        bridge.publish_marker(marker_id)
+                        # 수정 69(A 배관): heading을 '관찰용'으로만 보낸다.
+                        # HEADING_OFFSET이 실측 전이라 서버는 비교/로그만 하고 제어엔 안 쓴다.
+                        bridge.publish_marker(marker_id,
+                                              heading_observed=yaw_to_heading(yaw_deg))
                         prev_marker = marker_id
             time.sleep(0.05)  # 20Hz
     except KeyboardInterrupt:

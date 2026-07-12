@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."          # 어디서 실행하든 TU_Capstone_Design 기
 
 export TWIN=1
 export TWIN_EDGE_SECS="${1:-3.0}"   # 첫 칸 추정 (실측 1회면 바로 대체됨)
+export PYTHONUNBUFFERED=1           # 로그를 파일로 넘길 때 print가 묻히지 않게
 
 echo "[트윈] TWIN=1  TWIN_EDGE_SECS=${TWIN_EDGE_SECS}초 (첫 칸 추정)"
 exec ~/isaacsim/_build/linux-x86_64/release/python.sh isaac_simulation/step7_kinematic.py

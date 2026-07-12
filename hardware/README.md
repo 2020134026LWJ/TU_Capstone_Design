@@ -30,6 +30,7 @@ hardware/
 ├── camera.py         ★ 실물 카메라 — 비전 전용 (주원이 opencv 비전 그대로, detect→id/x/y/yaw)
 ├── bridge_rpi.py     ★ 실물 bridge — MQTT ↔ UART (주원이 STM ASCII 프로토콜 + 카메라 offset)
 ├── config.py         ★ 배포 설정 한 곳 (MQTT_HOST / UART_* / CALIB_FILE / SHOW_PREVIEW)
+├── camera_preview.py ★ 초점 맞추기용 웹 프리뷰 (라파에 모니터 없어도 PC 브라우저로 봄)
 ├── stm32/
 │   └── rpi_uart.c                      (주원이) STM UART 송수신 — 신호 3회 반복 반영본 (660a43e)
 ├── AGV_Control.zip                     (주원이) 실제 STM32F7 CubeIDE 펌웨어 (전체 프로젝트)
@@ -159,6 +160,38 @@ echo "/usr/local/lib/aarch64-linux-gnu/python3.12/site-packages" >  ~/.local/lib
 2. 우분투는 `/usr/local/lib/python3/dist-packages`와 `.../python3.12/site-packages`를 **sys.path에 안 넣는다** → `.pth` 필수.
 3. `video` 그룹 미가입 → `/dev/media*` **Permission denied** → 카메라 0대.
 4. OpenCV 5.0은 `detectMarkers`의 `ids` 모양이 4.x와 다르다(`[[9]]` → `[9]`). `camera.py`는 양쪽 호환(`np.ravel`).
+
+---
+
+## ★ 카메라 초점 맞추기 — 제일 먼저 할 것 (2026-07-12)
+
+**초점이 안 맞으면 ArUco가 없는 마커를 지어낸다.** 흐린 영상 + `DICT_4X4_250`(4×4=16비트라
+ID 간 패턴 차이가 작음) 조합은 오검출의 온상이다. 실제로 겪은 사고:
+
+> 카메라 앞에 **아무것도 없는데** 마커 37 → 3 → 4가 차례로 검출됨 → 서버가 로봇을 그 노드로
+> 순간이동시킴 → heading 장부가 실제와 어긋남 → `turn_left`를 냈는데 차가 엉뚱한 방향을 봄.
+> 트윈이 `heading 방향 노드 없음`으로 신고해서 발각. **뿌리는 전부 초점이었다.**
+
+`ov5647`은 **수동 초점**이라 렌즈 경통을 손으로 돌려야 한다. 라파에 모니터가 없어도 된다:
+
+```bash
+# 라파에서
+python3 -m hardware.camera_preview
+
+# PC 브라우저에서 (주소는 실행 시 콘솔에 찍힌다)
+http://<라파IP>:8000
+```
+
+- **`sharpness`(라플라시안 분산)가 최대가 되는 지점이 초점이다.** 눈대중보다 정확하다.
+  절대값이 아니라 "돌렸을 때 최대가 되는 지점"을 보는 것
+- 검출된 마커는 초록 테두리 + ID로 표시. **아무것도 안 댔는데 ID가 뜨면 그게 오검출**
+- 카메라를 독점하므로 `run_bench` / `rpi_main`과 **동시 실행 불가**
+
+> [주의] 수정 59의 "맵 밖 마커 무시" 필터는 오검출의 **약 80%만** 막는다.
+> `DICT_4X4_250`의 오검출은 ID 0~249에 흩어지는데 우리 유효 노드는 1~48이라,
+> **5번 중 1번은 유효 노드로 위장해 필터를 통과한다.** 위 사고의 37/3/4가 그 경우.
+> → 근본 처방은 `DICT_6X6_50`(ID 48개만 필요한데 250개짜리를 쓸 이유가 없다).
+>   마커 재인쇄가 필요하므로 바닥에 마커 깔 때 같이 할 것.
 
 ---
 
