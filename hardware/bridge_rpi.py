@@ -35,8 +35,10 @@ UART 프로토콜 (RPi ↔ STM32, 주원이 rpi_uart.c / main.c 기준):
 """
 
 import json
+import os
 import time
 import threading
+import uuid
 from typing import Optional
 
 import paho.mqtt.client as mqtt
@@ -46,7 +48,8 @@ import paho.mqtt.client as mqtt
 from hardware.config import (
     MQTT_HOST, MQTT_PORT,
     TOPIC_CMD, TOPIC_MARKER, TOPIC_CMD_ACK,
-    UART_PORT, UART_BAUD, UART_ENABLED,
+    UART_PORT, UART_BAUD, UART_ENABLED, UART_OFFSET_HZ,
+    TOPIC_POSE, POSE_PUBLISH_HZ,
 )
 
 
@@ -73,7 +76,12 @@ class Bridge:
     def __init__(self, rid: int):
         self.rid = rid
 
-        self._client = mqtt.Client(client_id=f"bridge_{rid}_{int(time.time())}")
+        # 수정 63: client_id 전역 유일성. 초 단위 타임스탬프로는 부족하다 —
+        # 트윈(Isaac)과 같은 초에 뜨면 id가 겹쳐 브로커가 서로를 끊어내는
+        # 무한 재연결 루프에 빠진다(명령 유실). pid+uuid로 확실히 분리한다.
+        # 접두사도 역할별로 다르게: 실물/벤치="bridge_", 트윈="twin_".
+        self._client = mqtt.Client(
+            client_id=f"bridge_{rid}_{os.getpid()}_{uuid.uuid4().hex[:6]}")
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
@@ -92,6 +100,14 @@ class Bridge:
         # 카메라 스레드가 갱신하는 최신 ArUco offset (x_mm, y_mm, yaw_deg)
         # → UART 송신 시 command과 합쳐 패킷에 실림
         self._latest_offset = (0.0, 0.0, 0.0)
+
+        # 수정 67 — UART 오프셋 스트리밍 주기 제한 (카메라 프레임률과 분리)
+        self._offset_period = 1.0 / UART_OFFSET_HZ if UART_OFFSET_HZ > 0 else 0.0
+        self._last_offset_tx = 0.0
+
+        # 수정 68 — /agv/pose 연속 스트림 (트윈 전용) 발행 주기 제한
+        self._pose_period = 1.0 / POSE_PUBLISH_HZ if POSE_PUBLISH_HZ > 0 else 0.0
+        self._last_pose_tx = 0.0
 
     # ─── MQTT ─────────────────────────────────────────────────────────────────
 
@@ -137,22 +153,38 @@ class Bridge:
     # ─── 카메라 offset 공급 (같은 라파 카메라 스레드가 호출) ───────────────────
 
     def set_marker_offset(self, x_mm: float, y_mm: float, yaw_deg: float):
-        """카메라 스레드가 최신 ArUco offset 갱신 → 즉시 STM으로 패킷 스트리밍.
+        """카메라 스레드가 최신 ArUco offset 갱신 → STM으로 패킷 스트리밍.
 
         주원이 카메라가 매 프레임 UART에 쓰던 것을 bridge가 인수받음.
         command은 평소 0(carrier), MQTT 명령 수신 시에만 실림.
         같은 라파 안 메모리 공유라 MQTT 불필요. 단순 변수 대입(원자적)이라 락 불요.
+
+        수정 67: **UART 전송 주기를 카메라 프레임률에서 분리한다** (UART_OFFSET_HZ 상한).
+        예전엔 매 프레임 무조건 쐈다 → 카메라를 빠르게 만들면 STM 부하가 조용히 따라 올랐다.
+        최신 값은 항상 갱신해두고, 실제 전송만 제한한다 (오래된 값을 보내는 일은 없다).
         """
         self._latest_offset = (float(x_mm), float(y_mm), float(yaw_deg))
+
+        now = time.time()
+        if now - self._last_offset_tx < self._offset_period:
+            return                      # 아직 주기 안 됨 — 값만 갱신하고 전송은 생략
+        self._last_offset_tx = now
         self._uart_send_packet()
 
     # ─── 발행 ─────────────────────────────────────────────────────────────────
 
-    def publish_marker(self, marker_id: int, heading_deg: Optional[int] = None):
+    def publish_marker(self, marker_id: int, heading_deg: Optional[int] = None,
+                       heading_observed: Optional[int] = None):
         """ArUco 마커 감지 결과 서버에 보고 (카메라 스레드가 호출).
 
-        옵션 a: heading_deg 미전달 → 서버가 경로 기반으로 heading 계산.
-        (카메라 yaw는 마커 대비 회전 오프셋이지 절대방위가 아니므로 heading으로 안 보냄)
+        heading_deg: **서버가 제어에 그대로 쓴다.** 시뮬(IsaacCamera)이 보내는 신뢰된 값.
+
+        heading_observed (수정 69, A 배관): **서버가 비교/로그만 하고 제어엔 안 쓴다.**
+          실물 카메라가 계산한 heading. HEADING_OFFSET이 아직 실측 전이라 믿을 수 없다.
+          → 보내되 믿지는 않는다. 서버 로그에 '카메라 X° vs 장부 Y°'가 찍히므로,
+            그 차이가 일정하면 그게 곧 HEADING_OFFSET 보정값이다.
+            **캘리브레이션이 '코드 짜기'가 아니라 '로그 읽기'가 된다.**
+          확정되면 server.config.TRUST_CAMERA_HEADING = True 로 밸브를 연다.
         """
         msg = {
             "rid": self.rid,
@@ -161,8 +193,32 @@ class Bridge:
         }
         if heading_deg is not None:
             msg["heading"] = heading_deg
+        if heading_observed is not None:
+            msg["heading_observed"] = heading_observed
         self._client.publish(TOPIC_MARKER, json.dumps(msg))
         print(f"[Bridge-{self.rid}] -> /agv/marker  id={marker_id}")
+
+    def publish_pose(self, marker_id: int, x_mm: float, y_mm: float, yaw_deg: float):
+        """연속 자세 스트림 (수정 68, B) — **트윈 전용. 서버는 구독하지 않는다.**
+
+        카메라가 매 프레임 계산하는 (x, y, yaw)를 MQTT로도 흘린다. 지금까지는 STM으로만 갔다.
+        트윈이 이걸 받아 **회전을 실시간으로 따라간다** (마커·cmd_ack 사이를 시간으로
+        보간하던 것 → 실제 측정값으로 대체).
+
+        POSE_PUBLISH_HZ 상한으로 제한 — 카메라가 빨라져도 발행량이 따라 늘지 않는다.
+        """
+        now = time.time()
+        if now - self._last_pose_tx < self._pose_period:
+            return
+        self._last_pose_tx = now
+        msg = {
+            "rid": self.rid,
+            "marker_id": marker_id,
+            "x": round(float(x_mm), 1),
+            "y": round(float(y_mm), 1),
+            "yaw": round(float(yaw_deg), 1),
+        }
+        self._client.publish(TOPIC_POSE, json.dumps(msg), qos=0)
 
     def publish_cmd_ack(self, cmd: str):
         """명령 완료 서버에 보고"""

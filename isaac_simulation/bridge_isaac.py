@@ -12,7 +12,9 @@ MQTT 토픽:
 """
 
 import json
+import os
 import time
+import uuid
 from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
@@ -25,6 +27,7 @@ MQTT_PORT = 1883
 TOPIC_CMD     = "/agv/cmd"
 TOPIC_MARKER  = "/agv/marker"
 TOPIC_CMD_ACK = "/agv/cmd_ack"
+TOPIC_POSE    = "/agv/pose"   # 수정 68 — 연속 자세 (트윈 전용)
 
 # cmd_ack의 shelf_id "미지정" 센티넬 (lift_up/down만 대상 선반 명시)
 _ACK_SHELF_UNSET = object()
@@ -45,7 +48,8 @@ class Bridge:
 
     def __init__(self, rid: int, cmd_handler: Callable,
                  marker_handler: Optional[Callable] = None,
-                 ack_handler: Optional[Callable] = None):
+                 ack_handler: Optional[Callable] = None,
+                 pose_handler: Optional[Callable] = None):
         self.rid = rid
         self._cmd_handler = cmd_handler
         # 트윈 모드 전용: 실물 AGV가 발행한 /agv/marker를 구독해 위치를 따라간다.
@@ -54,8 +58,22 @@ class Bridge:
         # 트윈 모드 전용: 실물의 /agv/cmd_ack(회전·리프트 완료)를 구독 → 그 시간에 맞춰
         # 애니메이션을 끝낸다 (수정 60). 일반 모드는 자기가 발행하므로 구독하면 되받는다.
         self._ack_handler = ack_handler
+        # 트윈 모드 전용 (수정 68): 실물의 /agv/pose(연속 자세)를 구독 → 회전을 **실시간으로**
+        # 따라간다. 마커·cmd_ack 사이를 시간으로 보간하던 것을 실제 측정값으로 대체.
+        self._pose_handler = pose_handler
 
-        self._client = mqtt.Client(client_id=f"bridge_{rid}_{int(time.time())}")
+        # 수정 63: client_id는 반드시 전역 유일해야 한다.
+        #
+        # 예전엔 f"bridge_{rid}_{int(time.time())}" 였는데, 초 단위 타임스탬프라
+        # **트윈과 실물/벤치가 같은 초에 뜨면 id가 똑같아진다**. MQTT는 같은 client_id를
+        # 허용하지 않아 브로커가 먼저 붙은 쪽을 끊고, 끊긴 쪽이 재연결하며 상대를 다시
+        # 끊는 **무한 재연결 루프**에 빠진다 (실측: 10초에 4회씩, 명령 유실).
+        # 재현이 타이밍에 달려 있어 잡기 어려운 종류의 버그다.
+        #
+        # 트윈은 실물과 **역할이 다르므로 접두사도 다르게** 한다("twin_" vs "bridge_").
+        # 같은 초에 떠도 절대 겹치지 않고, 브로커 쪽에서 누가 누군지 구분도 된다.
+        self._client = mqtt.Client(
+            client_id=f"twin_{rid}_{os.getpid()}_{uuid.uuid4().hex[:6]}")
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
@@ -73,6 +91,8 @@ class Bridge:
         client.subscribe(TOPIC_CMD)
         if self._marker_handler is not None:
             client.subscribe(TOPIC_MARKER)   # 트윈 모드 — 실물의 위치 보고를 따라감
+        if self._pose_handler is not None:
+            client.subscribe(TOPIC_POSE)     # 트윈 모드 — 실물의 연속 자세
         if self._ack_handler is not None:
             client.subscribe(TOPIC_CMD_ACK)  # 트윈 모드 — 실물의 회전/리프트 완료를 따라감
         print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})")
@@ -87,6 +107,12 @@ class Bridge:
             cmd = data.get("cmd", "")
             if rid == self.rid and cmd:
                 self._dispatch_cmd(cmd, data.get("shelf_id"))
+
+        elif msg.topic == TOPIC_POSE and self._pose_handler is not None:
+            rid = int(data.get("rid", -1))
+            if rid == self.rid and data.get("marker_id") is not None:
+                self._pose_handler(self.rid, int(data["marker_id"]),
+                                   float(data.get("yaw", 0.0)))
 
         elif msg.topic == TOPIC_MARKER and self._marker_handler is not None:
             rid = int(data.get("rid", -1))
