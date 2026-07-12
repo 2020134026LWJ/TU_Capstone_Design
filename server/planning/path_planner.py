@@ -60,6 +60,10 @@ class PathPlanner:
         """노드 유효성 검사"""
         return node_id in self.nodes
 
+    def neighbors(self, node_id: int) -> List[int]:
+        """한 칸 안에 갈 수 있는 노드들 (비용 제외)"""
+        return [n for n, _ in self.graph.get(node_id, [])]
+
     def get_node_type(self, node_id: int) -> str:
         """노드 타입 반환"""
         return self.node_types.get(node_id, "M")

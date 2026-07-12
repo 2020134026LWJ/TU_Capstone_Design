@@ -102,11 +102,40 @@ TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "4.0"))
 TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "1.0"))
 TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.0"))
 TWIN_EMA_ALPHA      = 0.4    # 실측 반영 비율 (0=고정, 1=직전값만)
-# 엣지의 이 지점까지만 가고 실물 마커를 기다린다. 노드에 바짝 붙일수록(→1.0) 마지막
-# 스냅이 작아져 끊김이 안 보인다(0.99 = 1cm). 페이싱 정확도와는 무관 — 홀드 비율은
-# '트윈이 먼저 도착했을 때 어디서 기다리나'만 정한다.
-TWIN_HOLD_RATIO     = float(os.environ.get("TWIN_HOLD_RATIO", "0.99"))
+# 엣지의 이 지점까지만 가고 실물 마커를 기다린다. 1.0 = 노드까지 완전히 가서 기다린다.
+TWIN_HOLD_RATIO     = float(os.environ.get("TWIN_HOLD_RATIO", "1.0"))
 TWIN_SPEED_MIN      = 0.05   # m/s — 페이싱 속도 하한 (실물이 오래 멈춰도 기어가지 않게)
+
+# 수정 65 — 페이싱을 '일부러 빠른 쪽으로' 편향한다.
+#
+# 보간하는 이상 추정은 반드시 틀린다. 그러면 문제는 "안 틀리는 법"이 아니라
+# **"어느 방향으로 틀릴 것인가"** 다. 실패 모양이 둘인데 무게가 전혀 다르다:
+#   · 너무 빠름 → 트윈이 먼저 도착해 **기다린다**.  사람 눈: "잠깐 멈췄네" (자연스러움)
+#   · 너무 느림 → 마커가 왔는데 트윈은 엣지 중간 → **순간이동으로 끌려간다**.
+#                                                 사람 눈: "고장났네" (신뢰 붕괴)
+# 게다가 순간이동은 **정보를 파괴한다** — 언제 얼마나 틀렸는지가 그냥 사라진다.
+# 반면 기다림은 **대기 시간이 곧 오차의 크기**라 그대로 읽을 수 있다.
+# 그래서 실측 평균을 그대로 쓰지 않고 이 비율만큼 짧게 잡아 항상 조금 일찍 닿게 한다.
+TWIN_SPEED_BIAS     = float(os.environ.get("TWIN_SPEED_BIAS", "0.85"))
+
+# 먼저 도착해 기다리는 게 이 시간을 넘으면 경고한다.
+#
+# [주의] 일찍 도착하는 것 자체가 위험을 하나 만든다: **실물이 중간에 끼어 멈춰도 트윈은
+# 목적지에 얌전히 서 있어서 멀쩡해 보인다.** 트윈의 값어치는 '예쁨'이 아니라 '정직함'인데
+# (실제로 오늘 트윈이 서버의 heading 오류를 잡아냈다), 매끄럽게 보이려다 그걸 잃으면 안 된다.
+# → 먼저 도착하되, **기다리고 있다는 사실을 로그로 드러낸다.**
+TWIN_WAIT_WARN_SECS = float(os.environ.get("TWIN_WAIT_WARN", "5.0"))
+# 도착 스냅이 이만큼 넘게 튀면 경고 — "추정이 틀렸다" 또는 "서버가 현실과 어긋났다"는 신호.
+TWIN_SNAP_WARN_M    = 0.30
+
+# 수정 68 (B) — 회전 실시간 추종.
+#
+# **직진과 회전은 비대칭이다.** 직진 중엔 마커가 시야를 벗어나 보간이 불가피하지만,
+# 회전은 노드 위에서 제자리로 도니 **발밑 마커가 계속 보인다** → 추정이 아니라 **측정**이 가능하다.
+# 그래서 회전만 /agv/pose(카메라 yaw)로 직접 따라간다. 직진은 그대로 시간 보간(수정 60/65).
+#
+# 마커가 시야에서 사라지면 pose가 끊긴다 → 이 시간을 넘으면 다시 시간 보간으로 되돌아간다.
+POSE_STALE_SECS = 0.5
 
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
@@ -229,8 +258,15 @@ class IsaacAGV:
         self._twin_edge_secs   = TWIN_EDGE_SECS_INIT  # 실측 1칸 소요시간 (EMA)
         self._twin_edge_n      = 0                    # 실측 횟수
         self._twin_forward_t: float | None = None     # forward 실행 시각 (실측 시작점)
-        self._twin_hold_pos = None                    # 홀드 지점 (엣지 99%)
+        self._twin_hold_pos = None                    # 홀드 지점 (엣지 끝)
         self._twin_holding  = False                   # 홀드 중 = 실물 마커 대기
+        self._twin_hold_t: float | None = None        # 홀드 진입 시각 (대기 시간 = 추정 오차)
+        self._twin_localized = False                  # 첫 마커를 받았나 (수정 66 — 그 전엔 위치를 모른다)
+
+        # 수정 68 — 실물 연속 자세 (/agv/pose). 회전을 실시간으로 따라가는 데 쓴다.
+        self._pose_latest = None    # (marker_id, yaw_deg, 수신시각) — MQTT 스레드가 갱신
+        self._pose_ref    = None    # (marker_id, yaw 기준, heading 기준) — 회전량 계산 원점
+        self._pose_log_t  = 0.0     # 추종 로그 rate limit
         self._move_speed    = MOVE_SPEED              # 이번 엣지에 쓸 속도
 
         self._twin_turn_secs = TWIN_TURN_SECS_INIT    # 실측 회전 소요시간 (EMA)
@@ -289,23 +325,100 @@ class IsaacAGV:
         """트윈 모드 — 실물의 회전/리프트 완료(cmd_ack) 수신. main loop로 핸드오프."""
         self._pending_ack = cmd
 
+    def _on_pose_from_real(self, rid: int, marker_id: int, yaw_deg: float):
+        """트윈 모드 — 실물의 연속 자세(/agv/pose) 수신 (수정 68). main loop가 소비."""
+        self._pose_latest = (marker_id, float(yaw_deg), time.time())
+
+    def _apply_pose_heading(self) -> bool:
+        """실물 카메라 yaw로 heading을 **직접** 갱신. 적용했으면 True.
+
+        **회전 중에만 쓴다.** 직진 중엔 로봇이 돌지 않으므로 yaw 변화는 노이즈일 뿐이고,
+        그걸 heading에 먹이면 트윈이 슬금슬금 틀어진다.
+
+        yaw는 '마커 대비 상대 각도'라 절대값은 못 믿는다(HEADING_OFFSET 미확정).
+        하지만 **변화량은 믿을 수 있다** — 같은 마커를 보는 동안의 yaw 변화 = 실제 회전량.
+        그래서 마커가 바뀌면 기준을 다시 잡는다.
+
+        부호: 실측(2026-07-12) **카메라가 시계방향으로 돌면 yaw 증가**.
+        트윈 내부 heading은 수학 규약(0=East, 반시계 +)이라 **시계방향 = heading 감소** → 뺀다.
+        """
+        if not TWIN_MODE or self._pose_latest is None:
+            return False
+        mid, yaw, ts = self._pose_latest
+        if time.time() - ts > POSE_STALE_SECS:
+            return False                    # 마커가 시야에서 사라짐 → 시간 보간으로 폴백
+
+        if self._pose_ref is None or self._pose_ref[0] != mid:
+            self._pose_ref = (mid, yaw, self.heading)   # 마커 바뀜 → 기준 재설정
+            return False
+
+        _, yaw_ref, head_ref = self._pose_ref
+        d_cw = np.radians((yaw - yaw_ref + 180.0) % 360.0 - 180.0)   # 시계방향 회전량
+        self.heading = _normalize_angle(head_ref - d_cw)
+
+        # 추종하고 있다는 걸 눈으로 확인할 창구 (0.5초에 한 번).
+        # 없으면 "시간 보간으로 돌았는지 실물을 따라갔는지" 구분할 방법이 없다.
+        now = time.time()
+        if now - self._pose_log_t > 0.5:
+            self._pose_log_t = now
+            print(f"[AGV {self.rid}] (트윈) 회전 추종 — 실물 yaw {yaw:.0f}° "
+                  f"(기준 {yaw_ref:.0f}°, 시계 {np.degrees(d_cw):+.0f}°) "
+                  f"→ heading {np.degrees(self.heading) % 360:.0f}°")
+        return True
+
     # ─── 트윈 페이싱 (수정 60) ───────────────────────────────────────────────
 
     def _start_twin_pacing(self):
         """forward 시작 — 실측 시간에 맞춰 이번 엣지 속도를 정하고 홀드 지점을 잡는다."""
+        # 수정 65: 출발점을 진실로 맞춘다(원점 리셋).
+        #
+        # 동기화는 두 번 하고 **역할이 다르다**:
+        #   · 출발 시(여기)  = 보간이 시작되는 원점을 노드에 정확히 박는다
+        #                      → 오차가 다음 엣지로 **누적되지 않는다**
+        #   · 도착 시(sync_to_node) = 최종 위치를 진실로 맞춘다
+        # 정상 상황에선 이미 노드에 있으므로 아무 일도 안 일어난다(공짜).
+        # 뭔가 어긋나 있었다면 여기서 조용히 바로잡힌다.
+        drift = float(np.linalg.norm(self.pos - node_xy(self.current_node)))
+        if drift > 1e-3:
+            print(f"[AGV {self.rid}] (트윈) 출발 동기화 — 노드 {self.current_node}에서 "
+                  f"{drift:.3f}m 어긋나 있었음")
+        self.pos = node_xy(self.current_node).copy()
+
         edge = self.target_pos - self.pos
         edge_len = float(np.linalg.norm(edge))
         if edge_len < 1e-6:
             return
-        # 실측 1칸 소요시간에 맞춘 속도 (아직 실측 전이면 INIT 추정값)
+        # 실측 1칸 소요시간에 맞춘 속도 (아직 실측 전이면 INIT 추정값).
+        # BIAS를 곱해 **일부러 빠르게** → 항상 조금 먼저 도착해서 기다린다 (순간이동 방지).
+        paced_secs = self._twin_edge_secs * TWIN_SPEED_BIAS
         self._move_speed    = max(TWIN_SPEED_MIN,
-                                  min(MOVE_SPEED, edge_len / self._twin_edge_secs))
+                                  min(MOVE_SPEED, edge_len / paced_secs))
         self._twin_hold_pos = self.pos + edge * TWIN_HOLD_RATIO
         self._twin_holding  = False
+        self._twin_hold_t   = None       # 홀드 진입 시각 (대기 시간 = 추정 오차)
         self._twin_forward_t = time.time()
 
     def _start_twin_turn_pacing(self):
         """turn 시작 — 실측 회전시간에 맞춰 각속도를 정한다."""
+        # 수정 68: **회전을 시작할 때마다 pose 기준을 다시 잡는다.**
+        #
+        # yaw는 '마커 대비 상대 각도'라 절대값을 못 믿는다. 그래서 (yaw 기준, heading 기준)
+        # 쌍을 잡아두고 그 차이로 회전량을 만든다. 그런데 그 기준을 **회전이 끝난 뒤에도
+        # 그대로 두면** 다음 회전이 낡은 기준 위에서 계산된다.
+        # (실측 버그: 1차 회전 후 heading이 목표로 스냅됐는데 기준은 안 바뀌어서,
+        #  2차 회전이 28° 틀어진 채로 시작했다. 회전할수록 오차가 쌓인다.)
+        #
+        # 회전 직전이 재기준을 잡기 가장 좋은 시점이다 — 이때 트윈 heading은 확실히 맞다
+        # (직전 동작이 끝나 스냅/동기화된 상태).
+        #
+        # 이미 손에 있는 최신 pose로 **즉시** 기준을 잡는다. 다음 pose를 기다리면 그 사이
+        # 트윈이 시간 적분으로 자유주행해 그만큼 어긋난 채로 기준이 잡힌다.
+        self._pose_ref = None
+        if self._pose_latest is not None:
+            mid, yaw, ts = self._pose_latest
+            if time.time() - ts <= POSE_STALE_SECS:
+                self._pose_ref = (mid, yaw, self.heading)   # 지금 heading이 정답
+
         total = abs(_normalize_angle(self.heading_target - self.heading))
         if total < 1e-6:
             total = np.pi          # turn_180 (diff가 ±π라 부호에 따라 0에 가까울 수 있음)
@@ -405,10 +518,51 @@ class IsaacAGV:
         if nid not in nodes:
             print(f"[AGV {self.rid}] (트윈) 알 수 없는 마커 {nid} — 무시")
             return
+
+        # 수정 66: 서버와 같은 판단 기준을 트윈에도 적용한다 (수정 62/64와 동일 논리).
+        #
+        # 왜: 지금까지 **서버는 이상한 마커를 거부하는데 트윈은 그냥 믿었다.**
+        #   서버: 불가능한 마커 3 무시 (현재 10, 이웃 [9,11,2,18])
+        #   트윈: 실물 마커 3 → 위치 동기화          ← 따라가버림
+        # 그 순간부터 둘은 다른 위치를 믿는다. 트윈은 현실도 아니고 서버 생각도 아닌
+        # 아무것도 아닌 걸 그리게 된다. 실물 카메라가 마커를 한 번 잘못 읽으면 바로 이 상태다.
+        #
+        # "로봇은 한 칸씩 굴러가지 순간이동하지 않는다"는 서버만의 상식이 아니라 **물리 법칙**이다.
+        # 트윈도 물리적으로 불가능한 보고는 믿지 않아야 한다.
+        if not self._twin_localized:
+            # 첫 마커만 무조건 받는다 — 트윈을 서버 도중에 켜면 자기 위치를 모르기 때문.
+            # (서버에는 이 예외가 없다. 서버는 AGV가 홈에서 시작한다고 전제한다.
+            #  트윈은 아무것도 제어하지 않으므로 첫 보고를 믿어도 위험하지 않다.)
+            self._twin_localized = True
+            print(f"[AGV {self.rid}] (트윈) 첫 마커 {nid} — 위치 확정")
+        elif self.state == "MOVING" and self._moving_to_node is not None:
+            # forward 중이면 도착할 수 있는 곳은 목표 노드 하나뿐 (수정 64와 동일)
+            if nid != self._moving_to_node:
+                print(f"[AGV {self.rid}] (트윈) 목표와 다른 마커 {nid} 무시 "
+                      f"(forward 목표={self._moving_to_node})")
+                return
+        elif nid != self.current_node and nid not in adjacency.get(self.current_node, []):
+            # 정지 중이면 현재 노드 아니면 이웃뿐 (수정 62와 동일)
+            print(f"[AGV {self.rid}] (트윈) 불가능한 마커 {nid} 무시 "
+                  f"(현재 {self.current_node}, 이웃 {adjacency.get(self.current_node, [])})")
+            return
+
         self._heal_heading(nid)     # 방향 자가복구 (트윈을 중간에 켜도 한 칸이면 정렬)
         if self.state not in ("MOVING", "IDLE"):
             return
         self._record_twin_edge(nid)     # 실물 1칸 소요시간 실측 (다음 엣지 속도에 반영)
+
+        # 수정 65: 불일치를 숨기지 말고 드러낸다.
+        #   · 스냅 거리 = 트윈이 얼마나 틀린 위치에 있었나 (추정 오차 / 서버-현실 괴리)
+        #   · 대기 시간 = 얼마나 일찍 도착해 기다렸나 (= 추정이 빠른 쪽으로 틀린 정도)
+        # 비정상적으로 길게 기다렸다면 실물이 중간에 끼었다는 뜻이다. 그건 트윈이
+        # 목적지에 얌전히 서 있어서 화면상 멀쩡해 보이므로, 로그가 유일한 창구다.
+        snap = float(np.linalg.norm(node_xy(nid) - self.pos))
+        waited = (time.time() - self._twin_hold_t) if self._twin_hold_t else 0.0
+        # 주행 중이 아니었는데 마커가 왔다 = 트윈이 페이싱할 근거 자체가 없었다.
+        # (실물로 치면 "명령도 없이 혼자 옆 칸으로 갔다"는 보고. 순간이동 외엔 그릴 방법이 없다)
+        was_driving = self.state == "MOVING"
+
         self.pos             = node_xy(nid).copy()
         self.current_node    = nid
         self._moving_to_node = None
@@ -416,10 +570,24 @@ class IsaacAGV:
         self.state           = "IDLE"
         self._twin_hold_pos  = None     # 홀드 해제 — 실물이 도착했으므로 노드에 안착
         self._twin_holding   = False
+        self._twin_hold_t    = None
         self.motors.stop()
         self._sync_prim(stage)      # ← 화면 반영 (없으면 좌표만 바뀌고 안 움직임)
         self._sync_shelf(stage)     # 선반을 들고 있으면 같이 따라오게
-        print(f"[AGV {self.rid}] (트윈) 실물 마커 {nid} → 위치 동기화")
+
+        msg = f"[AGV {self.rid}] (트윈) 실물 마커 {nid} → 위치 동기화"
+        if waited > 0.05:
+            msg += f" (먼저 도착해 {waited:.1f}초 대기)"
+        if snap > TWIN_SNAP_WARN_M:
+            if not was_driving:
+                # 원인이 다르다. 페이싱이 틀린 게 아니라 **페이싱할 기회가 없었다.**
+                msg += (f"  ⚠ 스냅 {snap:.2f}m — forward 명령 없이 마커만 들어옴 "
+                        f"(트윈은 주행 중이 아니었음 → 순간이동 외엔 방법이 없다)")
+            else:
+                msg += f"  ⚠ 스냅 {snap:.2f}m — 추정이 느렸거나 서버가 현실과 어긋남"
+        if waited > TWIN_WAIT_WARN_SECS:
+            msg += f"  ⚠ 대기 {waited:.0f}초 — 실물이 끼었을 수 있음"
+        print(msg)
 
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
 
@@ -572,6 +740,10 @@ class IsaacAGV:
             if self._twin_holding_turn:
                 return
 
+            # 수정 68 — 실물 yaw가 살아있으면 **측정이 추정을 대체한다.**
+            # 회전 중엔 발밑 마커가 계속 보이므로 시간 보간할 이유가 없다.
+            pose_driven = self._apply_pose_heading()
+
             diff = _normalize_angle(self.heading_target - self.heading)
             # 트윈은 남은 각도가 총각도의 1% 이내면 홀드 (일반은 ANGLE_TOLERANCE에서 완료)
             limit = ANGLE_TOLERANCE
@@ -595,8 +767,11 @@ class IsaacAGV:
                     self.motors.set_speeds(-speed,  speed)  # 반시계
                 else:
                     self.motors.set_speeds( speed, -speed)  # 시계
-                _, omega = self.motors.get_velocity()
-                self.heading = _normalize_angle(self.heading + omega * dt)
+                if not pose_driven:
+                    # pose가 없을 때만 시간 적분으로 heading을 만든다(추정).
+                    # pose가 있으면 heading은 이미 실측으로 정해졌다 — 여기서 또 더하면 이중 적용.
+                    _, omega = self.motors.get_velocity()
+                    self.heading = _normalize_angle(self.heading + omega * dt)
                 self._sync_prim(stage)
 
         elif self.state == "MOVING":
@@ -617,7 +792,9 @@ class IsaacAGV:
                 self._sync_prim(stage)
 
                 if TWIN_MODE and self._twin_hold_pos is not None:
-                    self._twin_holding = True
+                    if not self._twin_holding:
+                        self._twin_holding = True
+                        self._twin_hold_t = time.time()   # 대기 시작 (= 추정이 빨랐던 만큼)
                     return              # 노드 안착은 실물 마커가 왔을 때만
 
                 self.current_node = self._moving_to_node
@@ -1457,6 +1634,8 @@ for agv in agvs.values():
         # 자기가 발행한 마커를 되받으면 자기 위치를 자기가 덮어쓴다.
         marker_handler=(agv._on_marker_from_real if TWIN_MODE else None),
         ack_handler=(agv._on_ack_from_real if TWIN_MODE else None),
+        # 수정 68 — 실물의 연속 자세(/agv/pose) 구독 → 회전을 실시간으로 따라간다
+        pose_handler=(agv._on_pose_from_real if TWIN_MODE else None),
     )
     cam = IsaacCamera(
         get_pos_fn=lambda a=agv: a.pos,

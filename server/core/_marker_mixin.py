@@ -100,14 +100,48 @@ class MarkerMixin:
             print(f"[RequestHandler] Robot {rid}: 맵에 없는 마커 {node} 무시 (오검출)")
             return {"type": "marker_ack", "success": False, "action": "unknown_marker"}
 
+        # 수정 62: 인접성 검사 — 물리적으로 갈 수 없는 곳에서 온 마커는 버린다.
+        #
+        # 위의 수정 59 필터는 "맵에 있는 번호냐"만 본다. 그런데 ArUco 오검출은 ID 0~249에
+        # 흩어지고 우리 유효 노드는 1~48이라, **5번 중 1번은 유효 노드로 위장해 통과한다**.
+        # (실측 2026-07-12: 카메라 앞에 아무것도 없는데 37 → 3 → 4 검출. 145는 걸렀지만
+        #  37은 못 걸렀다. 서버가 이걸 믿고 로봇을 맵 반대편으로 순간이동시켰다.)
+        #
+        # 로봇은 한 칸씩 굴러가지 순간이동하지 않는다. 따라서 다음에 올 수 있는 마커는
+        # '현재 노드'(아직 안 떠남) 아니면 '이웃 노드'(도착)뿐이다. 통과 가능한 문이
+        # 48개에서 3~4개로 줄고, 설령 뚫려도 피해가 한 칸에 그친다.
+        #
+        # 마커를 놓쳐서 서버가 뒤처진 경우에도 버리는 게 맞다 — 위치는 '모르는 값'보다
+        # '직전 값'이 안전하다 (수정 59와 같은 논리).
+        if robot.current_node is not None and node != robot.current_node:
+            adjacent = self.path_planner.neighbors(robot.current_node)
+            if node not in adjacent:
+                print(f"[RequestHandler] Robot {rid}: 불가능한 마커 {node} 무시 "
+                      f"(현재 {robot.current_node}, 이웃 {adjacent})")
+                return {"type": "marker_ack", "success": False, "action": "non_adjacent_marker"}
+
         # REFACTOR E 3.2: forward의 ACK = 마커. 큐 ack가 in_flight + reservation 한 번에 해제.
         # I4 일치성: in_flight이 forward이고 target_node가 marker와 일치해야 정상.
         queue = self.command_queues.get(rid)
         if queue is not None and queue.in_flight is not None:
             in_flight = queue.in_flight
+
+            # 수정 64: forward 중이면 도착할 수 있는 곳은 **목표 노드 하나뿐**이다.
+            #
+            # 예전엔 불일치를 감지하고도 WARN만 찍고 **그대로 믿었다**. 실측(2026-07-12):
+            # 서버가 "17번으로 forward"를 명령해둔 상태에서 마커 10이 들어오자
+            # 로봇을 10번으로 옮기고 거기서 경로를 다시 짰다. AGV가 한 칸 순간이동한 셈.
+            # (원인은 마커 시트 — A4 한 장에 15~20개가 격자로 인쇄돼 있어 9번을 보여줄 때
+            #  옆칸 10번이 같이 잡혔다. camera.py는 여러 개면 첫 번째를 반환한다.)
+            #
+            # 수정 62(인접성)보다 강하다: 통과 가능한 문이 '이웃 3~4개' → '목표 1개'.
+            # 실물에서도 마커를 놓치거나 잘못 읽으면 같은 사고가 나므로 시트와 무관하게 필요.
+            # 위치는 '틀린 값'보다 '직전 값'이 안전하다 (수정 59/62와 같은 논리).
             if in_flight.cmd == "forward" and in_flight.target_node != node:
-                print(f"[REFACTOR E] WARN marker mismatch: rid={rid}, "
-                      f"in_flight.target={in_flight.target_node}, marker={node}")
+                print(f"[RequestHandler] Robot {rid}: 목표와 다른 마커 {node} 무시 "
+                      f"(forward 목표={in_flight.target_node})")
+                return {"type": "marker_ack", "success": False, "action": "marker_target_mismatch"}
+
             queue.ack()
         self.robot_manager.update_robot_position(rid, node)
 
@@ -122,6 +156,27 @@ class MarkerMixin:
             robot.heading = self.path_planner.calc_heading_from_path(
                 robot.planned_path, node
             ) or robot.heading
+
+        # 수정 69 (A 배관) — 실물 카메라 heading은 **보고만 받고 믿지 않는다.**
+        #
+        # 카메라가 절대방위를 줄 수 있다는 건 실측으로 확인했다(시계방향=yaw 증가, 서버와 같은 부호).
+        # 그런데 변환 상수 HEADING_OFFSET은 **실물에서 재야** 확정된다 (카메라 장착각 + 바닥 마커
+        # 방향으로 정해짐). 상수가 틀린 채로 제어에 쓰면 **서버가 매 마커마다 방향을 잘못 갱신하며
+        # 계속 엉뚱한 명령을 낸다** — 지금의 dead reckoning보다 나빠진다.
+        #
+        # → 배관은 깔되 밸브는 잠가둔다. 차이를 로그로만 찍는다.
+        #   실물에서 이 로그의 차이가 일정하면 그게 곧 HEADING_OFFSET 보정값이다.
+        #   **캘리브레이션이 '코드 짜기'가 아니라 '로그 읽기'가 된다.**
+        #   확정되면 Config.TRUST_CAMERA_HEADING = True 로 밸브를 연다.
+        observed = data.get("heading_observed")
+        if observed is not None:
+            observed = int(observed)
+            if getattr(self.config, "TRUST_CAMERA_HEADING", False):
+                robot.heading = observed
+            elif observed != robot.heading:
+                diff = (observed - robot.heading) % 360
+                print(f"[heading] Robot {rid}: 카메라 {observed}° vs 장부 {robot.heading}° "
+                      f"— 차이 {diff}° (제어엔 미반영. 차이가 일정하면 그게 HEADING_OFFSET 보정값)")
         # 첫 마커 = heading 확인 완료. heading 출처(보고/경로)와 무관하게 가용 게이트 해제.
         # (이 블록이 reported_heading 분기 안에 있으면 옵션 a에서 영영 False → 배차 안 됨)
         if not robot.heading_initialized:
