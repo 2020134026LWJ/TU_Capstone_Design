@@ -8,7 +8,7 @@
 import json
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 from ..config import Config
 
@@ -66,7 +66,14 @@ class RobotManager:
     def __init__(self, config: Config):
         self.config = config
         self.robots: Dict[int, Robot] = {}
+        # 수정 74: IDLE 전이 시 호출될 콜백 (core가 등록 → 예약 청소).
+        # 호출부마다 청소를 붙이면 반드시 빠뜨린다 → 상태 전이 한 곳에서 발화시킨다.
+        self._on_idle: Optional[Callable[[int], None]] = None
         self._load_robot_config()
+
+    def on_idle(self, callback: Callable[[int], None]) -> None:
+        """로봇이 IDLE로 전이할 때 호출될 콜백 등록. 인자: rid."""
+        self._on_idle = callback
 
     def _load_robot_config(self) -> None:
         """robot_config.json 로드"""
@@ -154,6 +161,10 @@ class RobotManager:
             old_status = robot.status
             robot.status = status
             print(f"[RobotManager] Robot {rid}: {old_status.value} -> {status.value}")
+            # 수정 74: 멈추는 순간 = 예약을 반납해야 하는 순간.
+            # IDLE 로봇은 다시 계획하지 않으므로 아무도 그 예약을 대신 지워주지 않는다.
+            if status == RobotStatus.IDLE and self._on_idle is not None:
+                self._on_idle(rid)
             return True
         return False
 
@@ -230,8 +241,9 @@ class RobotManager:
             robot.status = RobotStatus.MOVING_TO_SHELF
             print(f"[RobotManager] Robot {rid}: starting next task from queue")
         else:
-            robot.status = RobotStatus.IDLE
+            # 수정 74: 직접 대입 금지 — set_robot_status를 거쳐야 IDLE 콜백(예약 청소)이 발화한다
             print(f"[RobotManager] Robot {rid}: now idle")
+            self.set_robot_status(rid, RobotStatus.IDLE)
 
         return completed_task
 

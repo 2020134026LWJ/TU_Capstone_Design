@@ -128,6 +128,12 @@ TWIN_WAIT_WARN_SECS = float(os.environ.get("TWIN_WAIT_WARN", "5.0"))
 # 도착 스냅이 이만큼 넘게 튀면 경고 — "추정이 틀렸다" 또는 "서버가 현실과 어긋났다"는 신호.
 TWIN_SNAP_WARN_M    = 0.30
 
+# 수정 72 — 1칸 주행 시간의 물리적 상한 [s]. 이걸 넘으면 '주행'이 아니라 '대기'로 보고
+# 학습에서 제외한다. 실물 AGV가 1m를 이보다 오래 걸릴 이유가 없다.
+# (실물이 정말 더 느리면 이 값을 올려라. 카메라 벤치처럼 사람이 마커를 드는 모드에서는
+#  이 상한이 트윈을 사람 반응속도로 끌어내리지 않게 막아준다.)
+TWIN_EDGE_MAX = float(os.environ.get("TWIN_EDGE_MAX", "8.0"))
+
 # 수정 68 (B) — 회전 실시간 추종.
 #
 # **직진과 회전은 비대칭이다.** 직진 중엔 마커가 시야를 벗어나 보간이 불가피하지만,
@@ -180,6 +186,27 @@ def server_deg_to_rad(deg: float) -> float:
 # 보고 있어, 같은 명령이 서로 다른 노드로 향한다 (트윈이 엉뚱한 데로 감).
 TWIN_INIT_HEADING_DEG = 0    # 서버 RobotManager의 heading 기본값과 일치
 
+# 수정 71 — 트윈을 **서버 도중에** 붙일 때 AGV의 실제 위치를 명시한다.
+#   TWIN_START_NODE="1:19,2:27"  → AGV-1은 19번, AGV-2는 27번에 있다
+# 안 주면 홈 노드에서 시작한다(서버와 동일 전제).
+#
+# 예전엔 "첫 마커는 무조건 믿는다"로 때웠는데, 유령 마커가 첫 마커로 들어오면
+# 트윈이 그대로 순간이동해버렸다(실측: 마커 37 → 5m 점프). **추측 대신 명시한다.**
+def _parse_twin_start_nodes() -> dict[int, int]:
+    raw = os.environ.get("TWIN_START_NODE", "").strip()
+    out: dict[int, int] = {}
+    for part in raw.split(","):
+        if ":" in part:
+            r, n = part.split(":", 1)
+            try:
+                out[int(r)] = int(n)
+            except ValueError:
+                pass
+    return out
+
+
+TWIN_START_NODES = _parse_twin_start_nodes()
+
 
 def _normalize_angle(a: float) -> float:
     while a >  np.pi: a -= 2.0 * np.pi
@@ -202,7 +229,8 @@ class IsaacAGV:
 
     def __init__(self, rid: int, home_node: int):
         self.rid          = rid
-        self.current_node = home_node
+        # 수정 71: 트윈을 서버 도중에 붙였다면 TWIN_START_NODE로 실제 위치를 받는다.
+        self.current_node = TWIN_START_NODES.get(rid, home_node)
 
         # ── 모터 드라이버 (교체 포인트) ──────────────────────────────────────
         # 실물 전환 시: IsaacMotors() → RaspiMotors()
@@ -219,7 +247,9 @@ class IsaacAGV:
                                  if TWIN_MODE else 0.0)   # 라디안, 0=East, π/2=North
         self.heading_target   = self.heading   # TURNING 목표 방향
 
-        home = node_xy(home_node)
+        # 수정 71: 시작 위치도 current_node를 따른다 (TWIN_START_NODE 지정 시 그곳).
+        # 여기서 home_node를 그대로 쓰면 좌표만 홈에 남아 노드 번호와 어긋난다.
+        home = node_xy(self.current_node)
         self.pos             = home.copy()
         self.target_pos      = home.copy()
         self._moving_to_node = home_node
@@ -250,6 +280,11 @@ class IsaacAGV:
         # MQTT 스레드 → main loop 핸드오프
         self._pending_cmd: str | None = None   # 실행할 다음 명령
         self._pending_shelf_id: int | None = None  # lift_up 대상 선반 (서버 지정, 약점 3)
+        self._pending_target_node: int | None = None  # forward 도착 노드 (서버 지정, 수정 70)
+
+        # 수정 73 — 실물이 붙었는가 (트윈 모드). 붙기 전엔 화면에 안 그린다.
+        self._twin_seen    = False   # MQTT로 이 rid의 신호를 받은 적 있나
+        self._twin_visible = False   # 화면에 그려져 있나
         self._pending_marker: int | None = None    # 트윈: 실물이 보고한 마커 (동기화 대기)
         self._current_turn_cmd: str | None = None  # 실행 중인 turn 명령 이름
 
@@ -261,7 +296,6 @@ class IsaacAGV:
         self._twin_hold_pos = None                    # 홀드 지점 (엣지 끝)
         self._twin_holding  = False                   # 홀드 중 = 실물 마커 대기
         self._twin_hold_t: float | None = None        # 홀드 진입 시각 (대기 시간 = 추정 오차)
-        self._twin_localized = False                  # 첫 마커를 받았나 (수정 66 — 그 전엔 위치를 모른다)
 
         # 수정 68 — 실물 연속 자세 (/agv/pose). 회전을 실시간으로 따라가는 데 쓴다.
         self._pose_latest = None    # (marker_id, yaw_deg, 수신시각) — MQTT 스레드가 갱신
@@ -290,10 +324,19 @@ class IsaacAGV:
         """Camera 인스턴스 연결"""
         self.camera = camera
 
-    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None):
-        """Bridge cmd_handler 콜백 — main loop 핸드오프 (shelf_id: lift 대상, 약점 3)"""
+    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None,
+                            target_node: int | None = None):
+        """Bridge cmd_handler 콜백 — main loop 핸드오프.
+
+        shelf_id   : lift 대상 선반 (약점 3)
+        target_node: forward 도착 예정 노드 (수정 70) — 서버가 알려준다.
+                     예전엔 트윈이 자기 heading으로 추측했는데, heading이 서버와 갈리면
+                     같은 forward를 다른 목적지로 해석해 교착이 났다.
+        """
         self._pending_cmd = cmd
         self._pending_shelf_id = shelf_id
+        self._pending_target_node = target_node
+        self._twin_seen = True      # 서버가 이 AGV에게 명령을 냈다 = 존재한다
 
     def poll_camera(self):
         """카메라 감지 → marker 보고 (main loop에서 호출)"""
@@ -320,14 +363,17 @@ class IsaacAGV:
     def _on_marker_from_real(self, rid: int, marker_id: int):
         """트윈 모드 — 실물 AGV의 마커 보고 수신 (MQTT 스레드). main loop로 핸드오프."""
         self._pending_marker = marker_id
+        self._twin_seen = True      # 실물이 마커를 보고했다 = 연결됨 (수정 73)
 
     def _on_ack_from_real(self, rid: int, cmd: str):
         """트윈 모드 — 실물의 회전/리프트 완료(cmd_ack) 수신. main loop로 핸드오프."""
         self._pending_ack = cmd
+        self._twin_seen = True
 
     def _on_pose_from_real(self, rid: int, marker_id: int, yaw_deg: float):
         """트윈 모드 — 실물의 연속 자세(/agv/pose) 수신 (수정 68). main loop가 소비."""
         self._pose_latest = (marker_id, float(yaw_deg), time.time())
+        self._twin_seen = True
 
     def _apply_pose_heading(self) -> bool:
         """실물 카메라 yaw로 heading을 **직접** 갱신. 적용했으면 True.
@@ -475,7 +521,23 @@ class IsaacAGV:
             return                      # 예상 밖 노드(드리프트) → 측정 안 함
         secs = time.time() - self._twin_forward_t
         self._twin_forward_t = None
-        if not (0.2 < secs < 120.0):    # 이상치 (중복 마커 / 장기 정지)
+
+        # 수정 72 — **물리적으로 불가능한 값은 배우지 않는다.**
+        #
+        # 예전 상한은 120초라 사실상 없는 것과 같았다. 그래서 '주행 시간'이 아닌 것까지
+        # 학습했다: 카메라 벤치에서 사람이 카드를 바꿔 드는 시간(9~12초)을 1칸 주행으로
+        # 배워 트윈이 기어갔다(실측 평균 9.89초/칸).
+        # 실물에서도 회랑 대기·사람 피킹으로 마커가 늦으면 같은 일이 난다 —
+        # **한 번 배우면 그 뒤 모든 칸이 느려진다.**
+        #
+        # 1m를 TWIN_EDGE_MAX 넘게 걸렸다면 그건 주행이 아니라 **대기**다.
+        # 측정을 버리고 기존 추정을 유지한다 → 트윈은 정상 속도로 움직이고,
+        # 늦게 온 마커는 그냥 "오래 기다렸다"가 된다(대기 로그로 드러남).
+        if secs > TWIN_EDGE_MAX:
+            print(f"[AGV {self.rid}] (트윈) 1칸 {secs:.1f}초 — 주행이 아니라 대기로 보고 "
+                  f"학습 제외 (상한 {TWIN_EDGE_MAX:.0f}초, 평균 {self._twin_edge_secs:.2f}초 유지)")
+            return
+        if secs < 0.2:                  # 중복 마커 등 이상치
             return
         self._twin_edge_secs = (TWIN_EMA_ALPHA * secs
                                 + (1.0 - TWIN_EMA_ALPHA) * self._twin_edge_secs)
@@ -529,13 +591,20 @@ class IsaacAGV:
         #
         # "로봇은 한 칸씩 굴러가지 순간이동하지 않는다"는 서버만의 상식이 아니라 **물리 법칙**이다.
         # 트윈도 물리적으로 불가능한 보고는 믿지 않아야 한다.
-        if not self._twin_localized:
-            # 첫 마커만 무조건 받는다 — 트윈을 서버 도중에 켜면 자기 위치를 모르기 때문.
-            # (서버에는 이 예외가 없다. 서버는 AGV가 홈에서 시작한다고 전제한다.
-            #  트윈은 아무것도 제어하지 않으므로 첫 보고를 믿어도 위험하지 않다.)
-            self._twin_localized = True
-            print(f"[AGV {self.rid}] (트윈) 첫 마커 {nid} — 위치 확정")
-        elif self.state == "MOVING" and self._moving_to_node is not None:
+        # [수정 71] 수정 66의 "첫 마커는 무조건 수용" 예외를 **제거한다.**
+        #
+        # 그 예외는 실측에서 곧바로 악용당했다. 서버 켜자마자 유령 마커 37(오검출,
+        # x=-212mm = 화면 가장자리)이 들어오자:
+        #   서버:  "불가능한 마커 37 무시 (현재 9)"   ← 막았다
+        #   트윈:  "첫 마커 37 — 위치 확정"           ← 받아들여 5m 순간이동
+        #
+        # 서버에는 이 예외를 **일부러 안 넣었다**(같은 시나리오를 알고 있었으니까).
+        # 그런데 트윈에는 "제어를 안 하니 안전하다"며 넣었다 — 그게 틀렸다.
+        # **제어를 안 해도 트윈이 거짓을 그리면 트윈의 존재 이유가 사라진다.**
+        #
+        # 트윈도 자기 홈 노드를 안다(robot_config). 서버와 똑같이 **처음부터** 인접성을 건다.
+        # 서버 도중에 트윈을 붙이는 경우는 TWIN_START_NODE 로 **명시**한다(추측하지 않는다).
+        if self.state == "MOVING" and self._moving_to_node is not None:
             # forward 중이면 도착할 수 있는 곳은 목표 노드 하나뿐 (수정 64와 동일)
             if nid != self._moving_to_node:
                 print(f"[AGV {self.rid}] (트윈) 목표와 다른 마커 {nid} 무시 "
@@ -591,13 +660,26 @@ class IsaacAGV:
 
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
 
-    def execute_cmd(self, cmd: str, target_shelf: int | None = None):
-        """서버 명령 수신 → 상태 전환 (target_shelf: lift_up 대상 선반, 약점 3)"""
+    def execute_cmd(self, cmd: str, target_shelf: int | None = None,
+                    target_node: int | None = None):
+        """서버 명령 수신 → 상태 전환.
+
+        target_shelf: lift_up 대상 선반 (약점 3)
+        target_node : forward 도착 노드 (수정 70). **서버가 준 값을 최우선으로 쓴다** —
+                      추측하지 않으면 서버와 갈릴 수가 없다. 없을 때만 heading으로 추측(폴백).
+        """
         if cmd == "forward":
-            target = self._find_forward_target()
+            target = target_node if target_node is not None else self._find_forward_target()
             if target is None:
                 print(f"[AGV {self.rid}] forward: heading 방향 노드 없음 (heading={self.heading:.2f}rad)")
                 return
+            if target_node is not None and self.current_node is not None:
+                guess = self._find_forward_target()
+                if guess is not None and guess != target_node:
+                    # 서버와 트윈의 heading이 갈렸다는 뜻. 서버를 따르되 드러낸다.
+                    print(f"[AGV {self.rid}] (트윈) ⚠ forward 목적지 불일치 — "
+                          f"서버={target_node}, 내 추측={guess} → 서버를 따름 "
+                          f"(heading 장부가 서버와 갈렸다)")
             self._moving_to_node = target
             self.target_pos      = node_xy(target)
             # 출발 노드를 last_marker로 유지 → 이전 노드 재감지 방지
@@ -1367,6 +1449,22 @@ def build_workstation(stage, node_id: int, x: float, y: float):
     )
 
 
+def set_agv_visible(stage, rid: int, visible: bool):
+    """AGV의 모든 파츠(바디·바퀴·시저리프트·LED…)를 통째로 보이기/숨기기.
+
+    수정 73: 트윈 모드에서 **연결되지 않은 AGV는 그리지 않는다.**
+    실물이 1대만 붙어 있는데 화면에 2대가 서 있으면 그건 거짓말이다.
+    (트윈의 값어치는 '예쁨'이 아니라 '정직함'이다 — 수정 65와 같은 원칙)
+    """
+    prefix = f"AGV_{rid}"
+    for prim in stage.Traverse():
+        name = prim.GetName()
+        if name == prefix or name.startswith(prefix + "_"):
+            img = UsdGeom.Imageable(prim)
+            if img:
+                img.MakeVisible() if visible else img.MakeInvisible()
+
+
 def build_agv(stage, rid: int, x: float, y: float) -> bool:
     """AGV 빌드 — CAD_PATHS['agv'] 지정 시 USD 로드, 없으면 기본 도형
 
@@ -1575,6 +1673,13 @@ for rid, home_node in sorted(robot_homes.items()):
     agvs[rid] = IsaacAGV(rid, home_node)
     print(f"[AGV {rid}] Home: node {home_node}  ({x}, {y})")
 
+    # 수정 73 — 트윈 모드에서는 실물이 붙기 전까지 그리지 않는다.
+    # 실물 1대만 연결됐는데 화면에 2대가 서 있으면 트윈이 거짓을 그리는 것이다.
+    # 나중에 2번째 AGV가 붙으면 그때 등장한다(아래 main loop).
+    if TWIN_MODE:
+        set_agv_visible(stage, rid, False)
+        print(f"[AGV {rid}] (트윈) 실물 연결 대기 중 — 연결되면 화면에 등장합니다")
+
 world.reset()
 
 # 선반 루트 위치 설정 — world.reset() 이후에 해야 유지됨
@@ -1710,6 +1815,14 @@ while simulation_app.is_running():
     dt = world.get_physics_dt()
 
     for agv in agvs.values():
+        # 수정 73 — 실물이 붙으면 그때 화면에 등장시킨다.
+        # 주행 중에 2번째 AGV가 연결돼도 그 순간 나타난다.
+        if TWIN_MODE and agv._twin_seen and not agv._twin_visible:
+            agv._twin_visible = True
+            set_agv_visible(stage, agv.rid, True)
+            print(f"[AGV {agv.rid}] (트윈) ★ 실물 연결 감지 — 화면에 등장 "
+                  f"(홈 노드 {agv.current_node})")
+
         # 트윈: 실물 마커 보고 → 위치 동기화 (명령 실행보다 먼저 — 위치가 최신이어야 함)
         if agv._pending_marker is not None:
             nid = agv._pending_marker
@@ -1727,9 +1840,11 @@ while simulation_app.is_running():
         if agv._pending_cmd is not None and agv.state == "IDLE":
             cmd      = agv._pending_cmd
             shelf_id = agv._pending_shelf_id
-            agv._pending_cmd      = None
-            agv._pending_shelf_id = None
-            agv.execute_cmd(cmd, shelf_id)
+            target   = agv._pending_target_node
+            agv._pending_cmd          = None
+            agv._pending_shelf_id     = None
+            agv._pending_target_node  = None
+            agv.execute_cmd(cmd, shelf_id, target)
 
         agv.update(dt, stage)
 

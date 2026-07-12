@@ -101,6 +101,9 @@ class Bridge:
         # → UART 송신 시 command과 합쳐 패킷에 실림
         self._latest_offset = (0.0, 0.0, 0.0)
 
+        # 수정 70 — 서버가 알려준 forward 목적지 (실물은 안 씀, 벤치 가짜 로봇이 사용)
+        self._target_node: Optional[int] = None
+
         # 수정 67 — UART 오프셋 스트리밍 주기 제한 (카메라 프레임률과 분리)
         self._offset_period = 1.0 / UART_OFFSET_HZ if UART_OFFSET_HZ > 0 else 0.0
         self._last_offset_tx = 0.0
@@ -137,6 +140,9 @@ class Bridge:
             rid = int(data.get("rid", -1))
             cmd = data.get("cmd", "")
             if rid == self.rid and cmd:
+                # 수정 70: forward 목적지(서버가 알려줌). 실물 AGV는 물리적으로 앞으로
+                # 갈 뿐이라 안 써도 되지만, 벤치의 가짜 로봇은 이걸로 추측을 없앤다.
+                self._target_node = data.get("target_node")
                 self._dispatch_cmd(cmd)
 
     def _dispatch_cmd(self, cmd: str):

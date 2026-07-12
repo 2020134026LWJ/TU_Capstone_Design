@@ -239,6 +239,65 @@ class MovementMixin:
 
     # ─── 헬퍼 (선반/대기 노드) ───
 
+    def _diagnose_suboptimal_path(self, rid, start, goal, node_path,
+                                  excluded_transit, soft_avoid, heading) -> None:
+        """[진단] 최단보다 긴 경로를 골랐으면 A*의 입력을 전부 찍는다. 아니면 침묵.
+
+        재현이 불가능한 것(예약 스냅샷)을 추측으로 메우지 않기 위한 계측.
+        동작에는 영향 없음 — 읽기만 한다.
+        """
+        try:
+            from collections import deque
+            # 제약 없는 순수 최단 (BFS)
+            q, seen = deque([(start, [start])]), {start}
+            shortest = None
+            while q:
+                n, p = q.popleft()
+                if n == goal:
+                    shortest = p
+                    break
+                for nb, _ in self.path_planner.graph.get(n, []):
+                    if nb not in seen:
+                        seen.add(nb)
+                        q.append((nb, p + [nb]))
+            if not shortest or len(node_path) <= len(shortest):
+                return                      # 최단이거나 더 짧다 → 조용히 넘어감
+
+            # 최단경로의 어느 노드가 왜 막혔나
+            blocked = []
+            for n in shortest[1:-1]:
+                why = []
+                if excluded_transit and n in excluded_transit:
+                    why.append("excluded_transit")
+                if soft_avoid and n in soft_avoid:
+                    why.append("soft_avoid(비용만)")
+                if not self.reservation.is_free(n, 1, exclude_rid=rid):
+                    # 누가 잡고 있나 — 무기한(회랑) / 시간기반(경로) 구분
+                    indef = self.reservation._indefinite_by_node.get(n)
+                    cells = [(t, r) for (nn, t), r in self.reservation._cells.items() if nn == n]
+                    if indef is not None:
+                        why.append(f"예약점유:무기한(AGV-{indef})")
+                    if cells:
+                        why.append("예약점유:시간기반" + str(sorted(cells)))
+                    if indef is None and not cells:
+                        why.append("예약점유:출처불명★")
+                for orid, o in self.robot_manager.robots.items():
+                    if orid != rid and o.current_node == n:
+                        why.append(f"AGV-{orid} 위치({o.status.value})")
+                blocked.append(f"{n}[{'/'.join(why) if why else '막힌 이유 없음 ★'}]")
+
+            print(f"[진단] Robot {rid}: {start}→{goal} 최단보다 +{len(node_path)-len(shortest)}칸")
+            print(f"   선택: {node_path}")
+            print(f"   최단: {shortest}")
+            print(f"   최단경로 중간노드 상태: {' '.join(blocked)}")
+            print(f"   excluded_transit: {sorted(excluded_transit) if excluded_transit else '없음'}")
+            print(f"   soft_avoid      : {sorted(soft_avoid) if soft_avoid else '없음'}")
+            print(f"   heading: {heading}°  / 다른 AGV: "
+                  + ", ".join(f"AGV-{r}@{o.current_node}({o.status.value})"
+                              for r, o in self.robot_manager.robots.items() if r != rid))
+        except Exception as e:
+            print(f"[진단] 실패(무시): {e}")
+
     def _get_occupied_shelf_nodes(self) -> Set[int]:
         """현재 선반이 놓여있는 노드 집합 (IN_PLACE 상태인 선반)"""
         occupied = set()
@@ -356,7 +415,11 @@ class MovementMixin:
         # 이 선반을 직접 처리. lift_up 발행 시점엔 carrying_shelf가 이미 목표 선반으로
         # 세팅돼 있고(픽업 직전), lift_down 시엔 운반 중 선반이 곧 놓을 선반.
         shelf_id = robot.carrying_shelf if next_cmd in ("lift_up", "lift_down") else None
-        self.mqtt_publisher.publish_cmd(rid, next_cmd, shelf_id)
+        # 수정 70: forward의 목적지를 명시적으로 실어 보낸다.
+        # 서버는 이미 안다(next_node). 안 알려주면 AGV/트윈이 각자 heading으로 추측하고,
+        # heading이 갈리는 순간 같은 명령을 서로 다른 목적지로 해석한다 → 교착.
+        target = next_node if next_cmd == "forward" else None
+        self.mqtt_publisher.publish_cmd(rid, next_cmd, shelf_id, target_node=target)
         return True
 
     # _predict_heading_after_inflight 제거 (B-selfguard): 계획은 in_flight None일 때만
@@ -516,10 +579,31 @@ class MovementMixin:
 
         node_path = PathPlanner.compress_to_node_path(timed_path)
 
+        # [진단] 최단경로보다 긴 경로를 골랐다면 **그 자리에서 이유를 통째로 남긴다.**
+        #
+        # 실측(2026-07-13): 경로 계획 35건 중 7건(20%)이 최단보다 **정확히 +2칸** 길었고,
+        # 전부 작업대(9/33)가 출발지 또는 목적지였다. 작업대 이웃은 3개뿐이라(9→[1,10,17])
+        # 그중 하나(게이트웨이)가 막히면 우회가 정확히 +2가 된다.
+        # 그런데 excluded_transit/선반/정지로봇만으로는 재현이 안 됐다 → 남은 건 reservation인데
+        # 그건 로그로 재구성이 불가능하다(시간 기반 스냅샷).
+        #
+        # 그래서 추측 대신 **현장에서 잡는다.** 20% 확률이라 금방 걸린다.
+        # 평소엔 조용하다 — 최단을 골랐으면 아무것도 안 찍는다.
+        self._diagnose_suboptimal_path(rid, start, actual_goal, node_path,
+                                       excluded_transit, soft_avoid, planning_heading)
+
         # 명령 큐 생성 및 저장
         if robot:
             robot.planned_path = node_path
             # REFACTOR F Phase 3: 자기 plan reservation 등록 (dwell=1 legacy 호환)
+            #
+            # [수정 74 검증 기록] 이 commit을 지우면 안 된다.
+            # 죽은 예약(유령) 때문에 지워봤더니 53건 만에 AGV 2대가 41↔42에서 정면으로
+            # 맞물려 완전히 멈췄다. commit이 박는 건 cell만이 아니라 **edge(스왑 예약)**
+            # 이고, 그 edge가 "쟤가 B→A로 갈 예정이면 나는 A→B 못 감" = 정면충돌을
+            # 계획 단계에서 차단하는 유일한 장치였다. 41은 이웃이 33/42뿐이라 한번
+            # 맞물리면 교착 해소(수정 54)도 빠져나갈 길을 못 찾는다.
+            # → 유령 예약은 commit을 지우는 게 아니라 **청소부를 되살려서** 고친다 (아래).
             self.reservation.commit(rid, node_path, dwell=1)
             # commands 생성도 동일한 예측 heading 사용 (A*와 정합)
             robot.command_queue = self._path_to_commands(node_path, planning_heading)

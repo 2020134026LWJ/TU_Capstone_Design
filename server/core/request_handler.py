@@ -110,6 +110,19 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         self.reservation = ReservationService()
         # REFACTOR F Phase 4.5.1: staging이 corridor 점유를 reservation에 이중기록
         self.staging_manager.set_reservation(self.reservation)
+        # 수정 74: IDLE = "더 이상 안 감" → 남은 경로 예약을 반납한다.
+        #
+        # 수정 55가 "매 계획마다 남의 예약을 지우고 다시 박는" 블록을 지우면서 청소부가
+        # 사라졌다. 움직이는 로봇은 재계획할 때마다 commit()이 자기 예약을 갈아엎어 자정되지만,
+        # IDLE 로봇은 다시는 계획하지 않으므로 마지막 경로가 영원히 남는다 → A*가 죽은 경로를
+        # 피해 +2칸 우회 (실측 9/285건).
+        #
+        # keep_indefinite=True: 회랑 점유(indefinite)는 staging이 따로 관리하므로 건드리지 않는다.
+        # cell/edge만 반납 → 스왑 충돌 방어(edge)는 '움직이는 로봇' 것만 남아 정상 동작.
+        self.robot_manager.on_idle(
+            lambda rid: self.reservation.release(
+                rid, fire_callbacks=False, keep_indefinite=True)
+        )
 
         # REFACTOR F Phase 1 — 사후 대응 7종 baseline 카운터
         self._refactor_f_counters: Dict[str, int] = {

@@ -195,6 +195,27 @@ class MarkerMixin:
             if len(robot.planned_path) <= 1:
                 robot.planned_path = []
 
+            # 수정 74: planned_path만 자르고 예약은 안 잘라서, "이미 지나온 칸"이 계속
+            # 예약된 채 남아 있었다 (위 주석의 '시간 예약을 실제 진행과 정합'이 실제로는
+            # 안 되고 있었음). commit()은 재계획할 때만 옛 예약을 갈아엎으므로, 로봇이
+            # 한 경로를 재계획 없이 끝까지 걸으면 그 경로 전체가 예약된 채 남는다.
+            # → 다른 AGV의 A*가 죽은 칸을 피해 우회 (실측 6/68건).
+            #
+            # 남은 경로를 t=0부터 다시 예약 = (a) 지나간 칸 반납 (b) 시간축을 '지금'으로
+            # 재정렬. 수정 55가 지운 "매 계획마다 모든 로봇 예약 재동기화" 블록이 하던
+            # 두 가지 일을, 실제로 움직인 로봇 자신에 대해서만 되살린 것.
+            # edge(스왑 충돌 차단)도 남은 경로에 대해 그대로 다시 박히므로 방어는 유지된다.
+            if robot.planned_path:
+                self.reservation.commit(rid, robot.planned_path, dwell=1)
+            else:
+                # 경로 완주 = 더 이상 갈 곳 없음 → 전부 반납.
+                # commit([])은 빈 경로면 즉시 return True라 아무것도 안 지운다 → 직접 release.
+                # (IDLE 콜백만으로는 부족: 작업대에서 사람을 기다리는 WAITING_FOR_PICK은
+                #  IDLE이 아니라서, 그동안 걸어온 경로가 통째로 예약된 채 남는다.)
+                # 정지한 로봇은 excluded_transit(현재 노드)으로 이미 hard 회피되고,
+                # 회랑은 keep_indefinite로 보존되므로 안전하다.
+                self.reservation.release(rid, fire_callbacks=False, keep_indefinite=True)
+
         # 위치 기반 회랑 자동 해제 → 깨어난 대기 AGV dispatch (Phase 4.5.4a 단일화)
         released = self.staging_manager.check_position_release(rid, node)
         self._dispatch_released_agv(released)

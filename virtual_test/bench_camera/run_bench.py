@@ -105,8 +105,13 @@ class BenchBridge(br.Bridge):
                 print(f"    → forward: 다음 노드의 마커를 카메라에 보여주세요 "
                       f"(그게 도착 신호입니다)")
                 return
-            # 가짜 로봇: '이동'한 뒤에 도착 마커 발행 (실물의 인과관계)
-            nxt = self.robot.next_node()
+            # 수정 70: 서버가 목적지를 알려준다 → 추측하지 않는다.
+            #
+            # 예전엔 가짜 로봇이 자기 heading으로 next_node()를 계산했다. 그런데 heading은
+            # 서버·로봇·트윈이 각자 장부로 추적하는 값이라, 한 번 갈리면 **같은 forward를
+            # 서로 다른 목적지로 해석한다**(실측: 서버는 25, 트윈은 9 → 교착).
+            # 서버가 이미 아는 값을 받아 쓰면 갈릴 수가 없다.
+            nxt = self._target_node if self._target_node is not None else self.robot.next_node()
             if nxt is None:
                 print(f"    → forward: heading {self.robot.heading}° 방향에 노드 없음")
                 return

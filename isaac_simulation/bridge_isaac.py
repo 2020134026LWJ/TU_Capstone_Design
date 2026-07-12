@@ -106,7 +106,7 @@ class Bridge:
             rid = int(data.get("rid", -1))
             cmd = data.get("cmd", "")
             if rid == self.rid and cmd:
-                self._dispatch_cmd(cmd, data.get("shelf_id"))
+                self._dispatch_cmd(cmd, data.get("shelf_id"), data.get("target_node"))
 
         elif msg.topic == TOPIC_POSE and self._pose_handler is not None:
             rid = int(data.get("rid", -1))
@@ -126,10 +126,11 @@ class Bridge:
             if rid == self.rid and cmd:
                 self._ack_handler(self.rid, cmd)
 
-    def _dispatch_cmd(self, cmd: str, shelf_id: Optional[int] = None):
+    def _dispatch_cmd(self, cmd: str, shelf_id: Optional[int] = None,
+                      target_node: Optional[int] = None):
         print(f"[Bridge-{self.rid}] <- cmd: {cmd}")
-        # Isaac Sim 모드: 콜백 호출 (lift 대상 shelf_id 전달)
-        self._cmd_handler(self.rid, cmd, shelf_id)
+        # Isaac Sim 모드: 콜백 호출 (lift 대상 shelf_id, forward 목적지 전달)
+        self._cmd_handler(self.rid, cmd, shelf_id, target_node)
 
     # ─── 발행 ─────────────────────────────────────────────────────────────────
 

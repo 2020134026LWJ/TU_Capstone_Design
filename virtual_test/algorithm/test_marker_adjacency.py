@@ -118,3 +118,55 @@ def test_forward_target_match_accepted(handler, helpers):
     helpers.step_marker(handler, 1, 17)
 
     assert robot.current_node == 17
+
+
+# ─── 수정 70: forward 명령에 목적지 동봉 ──────────────────────────────────
+
+def test_forward_cmd_carries_target_node(handler, mock_mqtt, helpers):
+    """서버는 forward 목적지를 **명령에 실어** 보낸다.
+
+    2026-07-12 통합테스트 실측: 예전엔 `{"cmd":"forward"}`만 보내서 AGV·트윈이 각자
+    heading으로 목적지를 **추측**했다. 유령 마커로 트윈 heading이 자가복구되자
+    서버는 `목표=25`, 트윈은 `→ node 9`로 갈렸고 → 서버가 도착 보고를 거부 → 교착.
+    서버는 이미 목적지를 안다. 알려주기만 하면 아무도 추측할 필요가 없다.
+    """
+    robot = handler.robot_manager.get_robot(1)
+    robot.heading_initialized = True
+    mock_mqtt.reset()
+
+    handler._plan_and_publish_move(1, robot.current_node, 27)   # 홈 9 → 선반 27
+
+    # 서버는 명령을 한 번에 하나씩 보낸다(in-flight 단일 슬롯). 첫 명령은 회전이므로
+    # 그걸 완료시켜야 forward가 나온다.
+    for _ in range(4):
+        if mock_mqtt.forward_targets:
+            break
+        last = mock_mqtt.last_cmd(1)
+        if last in ("turn_left", "turn_right", "turn_180"):
+            helpers.step_cmd_ack(handler, 1, last)
+        else:
+            break
+
+    assert mock_mqtt.forward_targets, "forward 명령이 발행되지 않았다"
+    for rid, target in mock_mqtt.forward_targets:
+        assert target is not None, "forward인데 target_node가 비었다 (추측하게 두면 갈린다)"
+        assert target in handler.path_planner.nodes
+
+
+def test_turn_cmd_has_no_target(handler, mock_mqtt, helpers):
+    """turn/lift에는 목적지가 붙지 않는다 (forward 전용)"""
+    robot = handler.robot_manager.get_robot(1)
+    robot.heading_initialized = True
+    mock_mqtt.reset()
+
+    handler._plan_and_publish_move(1, robot.current_node, 27)
+    for _ in range(4):
+        last = mock_mqtt.last_cmd(1)
+        if last in ("turn_left", "turn_right", "turn_180"):
+            helpers.step_cmd_ack(handler, 1, last)
+        else:
+            break
+
+    # forward 개수 == target을 실은 개수 (turn/lift엔 안 붙는다)
+    assert len(mock_mqtt.forward_targets) == sum(
+        1 for _, c in mock_mqtt.cmds if c == "forward")

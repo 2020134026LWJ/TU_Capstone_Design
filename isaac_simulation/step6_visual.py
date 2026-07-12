@@ -178,6 +178,7 @@ class IsaacAGV:
         # MQTT 스레드 → main loop 핸드오프
         self._pending_cmd: str | None = None   # 실행할 다음 명령
         self._pending_shelf_id: int | None = None  # 약점 3: 서버가 지정한 lift 대상 선반
+        self._pending_target_node: int | None = None  # 수정 70: 서버가 지정한 forward 목적지
         self._current_turn_cmd: str | None = None  # 실행 중인 turn 명령 이름
 
     def set_bridge(self, bridge):
@@ -188,10 +189,20 @@ class IsaacAGV:
         """Camera 인스턴스 연결"""
         self.camera = camera
 
-    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None):
-        """Bridge cmd_handler 콜백 — main loop 핸드오프 (shelf_id: lift 대상, 약점 3)"""
+    def _on_cmd_from_bridge(self, rid: int, cmd: str, shelf_id: int | None = None,
+                            target_node: int | None = None):
+        """Bridge cmd_handler 콜백 — main loop 핸드오프.
+
+        shelf_id   : lift 대상 선반 (약점 3)
+        target_node: forward 도착 노드 (수정 70) — 서버가 알려준다.
+
+        [주의] bridge_isaac의 시그니처가 바뀌면 **여기도 같이 바꿔야 한다.**
+        안 그러면 TypeError로 모든 명령이 죽는데, 예외가 Isaac stderr에 묻혀
+        "그냥 안 움직이네"로 보인다. (step6/step7 중복이 두 번째로 청구한 비용)
+        """
         self._pending_cmd = cmd
         self._pending_shelf_id = shelf_id
+        self._pending_target_node = target_node
 
     def poll_camera(self):
         """카메라 감지 → marker 보고 (main loop에서 호출)"""
@@ -205,10 +216,16 @@ class IsaacAGV:
 
     # ─── 명령 실행 ───────────────────────────────────────────────────────────
 
-    def execute_cmd(self, cmd: str, target_shelf: int | None = None):
-        """서버 명령 수신 → 상태 전환 (target_shelf: lift_up 대상 선반, 약점 3)"""
+    def execute_cmd(self, cmd: str, target_shelf: int | None = None,
+                    target_node: int | None = None):
+        """서버 명령 수신 → 상태 전환.
+
+        target_shelf: lift_up 대상 선반 (약점 3)
+        target_node : forward 도착 노드 (수정 70). 서버가 준 값을 우선 사용 —
+                      추측하지 않으면 서버와 갈릴 수가 없다.
+        """
         if cmd == "forward":
-            target = self._find_forward_target()
+            target = target_node if target_node is not None else self._find_forward_target()
             if target is None:
                 print(f"[AGV {self.rid}] forward: heading 방향 노드 없음 (heading={self.heading:.2f}rad)")
                 return
@@ -1149,9 +1166,11 @@ while simulation_app.is_running():
         if agv._pending_cmd is not None and agv.state == "IDLE":
             cmd = agv._pending_cmd
             shelf_id = agv._pending_shelf_id
+            target = agv._pending_target_node
             agv._pending_cmd = None
             agv._pending_shelf_id = None
-            agv.execute_cmd(cmd, shelf_id)
+            agv._pending_target_node = None
+            agv.execute_cmd(cmd, shelf_id, target)
 
         agv.update(dt, stage)
 
