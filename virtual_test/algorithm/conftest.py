@@ -134,6 +134,13 @@ def handler(config: Config, mock_mqtt: MockMqttPublisher) -> RequestHandler:
         staging_manager=staging_manager,
         task_manager=task_manager,
     )
+
+    # 수정 75: 알고리즘 테스트의 로봇은 '켜져 있고 바닥에 있다'고 본다.
+    # (presence 자체를 검증하는 건 test_presence.py — 거기선 이 기본값을 다시 끈다.)
+    for robot in robot_manager.robots.values():
+        robot.online = True
+        robot.ever_seen = True
+
     return rh
 
 

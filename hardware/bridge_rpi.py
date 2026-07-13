@@ -47,7 +47,7 @@ import paho.mqtt.client as mqtt
 # 모듈 전역으로 가져옴 → SIL 테스트가 br.UART_ENABLED/br.UART_PORT 를 monkeypatch 가능
 from hardware.config import (
     MQTT_HOST, MQTT_PORT,
-    TOPIC_CMD, TOPIC_MARKER, TOPIC_CMD_ACK,
+    TOPIC_CMD, TOPIC_MARKER, TOPIC_CMD_ACK, TOPIC_PRESENCE,
     UART_PORT, UART_BAUD, UART_ENABLED, UART_OFFSET_HZ,
     TOPIC_POSE, POSE_PUBLISH_HZ,
 )
@@ -84,6 +84,14 @@ class Bridge:
             client_id=f"bridge_{rid}_{os.getpid()}_{uuid.uuid4().hex[:6]}")
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
+
+        # 수정 75 — 유언(LWT). **connect() 전에 등록해야 효력이 있다.**
+        # 전원이 나가면 우리 코드는 한 줄도 못 돈다 → 브로커가 대신 offline을 알려준다.
+        self._client.will_set(
+            TOPIC_PRESENCE,
+            json.dumps({"rid": rid, "online": False}),
+            qos=1, retain=True,
+        )
 
         # UART
         self._serial = None
@@ -122,14 +130,27 @@ class Bridge:
         self._running = False
         if self._uart_thread:
             self._uart_thread.join(timeout=0.5)   # 수신 스레드 정리 후 포트 닫기
+        # 수정 75: 정상 종료는 유언을 남기지 않으므로(브로커가 LWT를 폐기한다)
+        # 직접 offline을 알린다. Ctrl+C로 끄고 서버가 계속 도는 경우.
+        self._publish_presence(False)
         self._client.loop_stop()
         self._client.disconnect()
         if self._serial:
             self._serial.close()
 
+    def _publish_presence(self, online: bool):
+        """수정 75 — 접속/이탈 알림. retain=True: 서버가 나중에 떠도 즉시 안다."""
+        self._client.publish(
+            TOPIC_PRESENCE,
+            json.dumps({"rid": self.rid, "online": online}),
+            qos=1, retain=True,
+        )
+
     def _on_connect(self, client, userdata, flags, rc):
         client.subscribe(TOPIC_CMD)
-        print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})")
+        # 재접속 때도 다시 발행된다 — LWT로 offline이 박힌 뒤 돌아온 경우를 덮어써야 한다.
+        self._publish_presence(True)
+        print(f"[Bridge-{self.rid}] MQTT connected (rc={rc}) — presence online")
 
     def _on_message(self, client, userdata, msg):
         try:

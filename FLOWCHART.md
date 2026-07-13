@@ -2228,6 +2228,49 @@ No path found    0건
 
 ---
 
+### 수정 75: AGV 접속/이탈 (presence) — 안 켠 로봇에 일 시키지 않기 (2026-07-13)
+
+> **쉽게**: 서버는 `robot_config.json`에 2대가 적혀 있으면 **2대가 다 있다고 믿었다.** 실물 1대만 켜고 시연하면 없는 AGV-2에게도 주문이 배정될 수 있었다.
+
+**원래 왜 안 터졌나 (우연이었다)**
+
+`get_available_robot()`의 `heading_initialized` 조건이 유령을 막고 있었다. 이 플래그는 **첫 마커 보고**로만 켜지므로, 한 번도 신호를 안 보낸 AGV는 배차가 안 됐다. 하지만 이건 heading 초기화의 **부수효과**지 "연결 확인"이 아니다 — 코드 어디에도 '존재'라는 개념이 없어서, 누가 heading을 다른 데서 초기화하면 조용히 뚫린다.
+
+**두 개념을 나눈다 (합치면 안 된다)**
+
+| 플래그 | 뜻 | 쓰임 |
+|---|---|---|
+| `online` | **지금** 붙어 있나 | 태스크 배정 게이트 (`get_available_robot`) |
+| `ever_seen` | **한 번이라도** 붙었나 | 바닥에 실재하나 → A* 장애물 여부 |
+
+**⛔ 통신이 끊긴 AGV를 장애물에서 빼면 안 된다.** MQTT가 끊긴 것이지 로봇이 바닥에서 증발한 게 아니다. 몸은 그 칸에 그대로 서 있으므로 **계속 피해 다녀야 한다** (`ever_seen`은 절대 되돌리지 않는다). 반대로 한 번도 안 켠 AGV는 실재하지 않으므로 **길을 막으면 안 된다** — 이 두 경우를 한 플래그로 처리하려다 죽은 AGV에 들이받는 게 이 기능의 가장 위험한 오답이다.
+
+**어떻게 아나 — MQTT LWT (유언)**
+
+`/agv/presence` 신설. 브릿지가 접속 시 `{"online":true}`를 **retain**으로 발행(서버가 나중에 떠도 즉시 앎). offline은 **우리가 보내는 게 아니라 브로커가 LWT로 대신 보낸다** — 전원이 나가면 정상 종료 코드가 돌 기회조차 없기 때문이다. 그게 LWT의 존재 이유.
+
+- **트윈은 침묵한다**: `TWIN=1`은 관찰자지 AGV가 아니다. 트윈이 presence를 쏘면 실물이 꺼져 있어도 서버가 있다고 믿는다 — 유령을 막으려는 장치가 유령을 만든다.
+- **fallback**: 마커/cmd_ack가 오면 그것도 `online=True`로 친다 (말을 걸어왔으면 있는 것). presence를 안 쏘는 클라이언트도 동작.
+- **상태 전이는 한 곳**: `online`/`ever_seen`에 값을 쓰는 코드는 `RobotManager.set_presence()` 뿐 (수정 74의 `on_idle` 교훈 — 호출부마다 붙이면 반드시 빠뜨린다).
+
+**검증** (서버 + 벤치 가짜 AGV, 실물과 동일한 MQTT 경로)
+
+```
+서버만 기동 (0대)        → ONLINE 0건, 배정 가능 로봇 없음
+AGV-1만 연결 + 주문 투입 → 명령 8개 전부 AGV-1. 꺼진 AGV-2에겐 0개
+AGV-1 SIGKILL (전원뽑기) → LWT 발화 → OFFLINE (node 27, picking_up_shelf).
+                            신규 배정 중단, 장애물로는 유지
+AGV-2 새로 연결          → ONLINE, 배정 재개
+Isaac 트윈(TWIN=1)       → 연결된 AGV만 등장 (수정 73과 일관)
+회귀 테스트              → 100/100 통과 (기존 93 + presence 7)
+```
+
+**미구현 (알고 남긴 것)**: 작업 중 끊긴 AGV의 **태스크 인계**. presence는 "새 일을 안 준다"까지만 한다. 선반을 든 채 멈췄을 수 있어 자동 회수는 위험하고, 재접속해도 in-flight 명령은 재전송되지 않는다 → 복구는 서버 재시작.
+
+- **수정 파일**: `server/config.py`, `server/main.py`, `server/managers/robot.py`, `server/core/request_handler.py`, `server/core/_marker_mixin.py`, `server/core/_movement_mixin.py`, `hardware/config.py`, `hardware/bridge_rpi.py`, `isaac_simulation/bridge_isaac.py`, `virtual_test/algorithm/{conftest,test_presence}.py`
+
+---
+
 ## Isaac Sim 이전 이력
 
 > Webots 시뮬레이션 검증 완료 후 Isaac Sim 5.1.0으로 이전 진행 중.

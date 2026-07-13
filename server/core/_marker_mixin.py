@@ -29,6 +29,50 @@ from ..managers.robot import RobotStatus
 class MarkerMixin:
     """AGV 이벤트 수신 핸들러"""
 
+    # ─── 수정 75: AGV 접속/이탈 (presence) ───
+
+    def _mark_online(self, rid: int) -> None:
+        """그 AGV에게서 신호가 왔다 = 붙어있다. 처음 붙었으면 대기 주문을 태워본다."""
+        if self.robot_manager.set_presence(rid, True):
+            robot = self.robot_manager.get_robot(rid)
+            print(f"[RequestHandler] Robot {rid} ONLINE (node {robot.current_node})")
+            self._try_assign_pending_tasks()
+
+    def _handle_presence(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """AGV 접속/이탈 보고 (/agv/presence).
+
+        online=True  : 브릿지가 접속하며 발행 (retained)
+        online=False : 브로커가 LWT로 대신 발행 = 전원/네트워크가 끊겼다
+
+        이탈해도 **장부에서 지우지 않는다**. MQTT가 끊긴 것이지 로봇이 바닥에서
+        사라진 게 아니다 — 몸은 그 칸에 그대로 서 있으므로 A*는 계속 피해 다녀야
+        한다(ever_seen 유지). 끊는 것은 '새 태스크 배정'뿐이다.
+        """
+        rid = data.get("rid")
+        online = data.get("online")
+        if rid is None or online is None:
+            return self._error_response("Missing 'rid' or 'online' in presence")
+
+        rid = int(rid)
+        if not self.robot_manager.get_robot(rid):
+            return self._error_response(f"Robot {rid} not found")
+
+        if online:
+            self._mark_online(rid)
+            return {"type": "presence_ack", "success": True, "action": "online"}
+
+        if self.robot_manager.set_presence(rid, False):
+            robot = self.robot_manager.get_robot(rid)
+            print(f"[RequestHandler] Robot {rid} OFFLINE — 연결 끊김 "
+                  f"(node {robot.current_node}, status {robot.status.value}). "
+                  f"신규 배정 중단. 몸은 그 자리에 있으므로 장애물로는 유지한다.")
+            if robot.current_task_id is not None:
+                print(f"[RequestHandler] ⚠ Robot {rid}가 작업 중({robot.current_task_id})에 "
+                      f"끊겼다. 이 태스크는 다른 AGV로 넘어가지 않는다(선반을 든 채 멈췄을 수 "
+                      f"있다). 재접속해도 in-flight 명령은 재전송되지 않으므로, 복구하려면 "
+                      f"서버를 재시작해야 한다. 태스크 인계는 미구현.")
+        return {"type": "presence_ack", "success": True, "action": "offline"}
+
     # ─── 수정 46: corridor release dispatch sanity check ───
 
     def _is_corridor_dispatch_consistent(self, rid: int, target_ws: int) -> bool:
@@ -89,6 +133,8 @@ class MarkerMixin:
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return self._error_response(f"Robot {rid} not found")
+
+        self._mark_online(rid)   # 수정 75: 말을 걸어왔으면 붙어있는 것 (presence fallback)
 
         node = int(marker_id)
 
@@ -318,6 +364,8 @@ class MarkerMixin:
         robot = self.robot_manager.get_robot(rid)
         if not robot:
             return self._error_response(f"Robot {rid} not found")
+
+        self._mark_online(rid)   # 수정 75: presence fallback (마커 보고와 동일)
 
         # REFACTOR E 3.2: turn/lift의 ACK = cmd_ack. 큐 ack가 in_flight 해제.
         # I4 일치성: in_flight cmd와 ACK cmd 일치해야 정상.

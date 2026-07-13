@@ -155,6 +155,7 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
             # MarkerMixin
             "marker_report": self._handle_marker_report,
             "cmd_ack": self._handle_cmd_ack,
+            "presence": self._handle_presence,
             # 베이스 (상태 조회)
             "status_request": self._handle_status_request,
             "task_status_request": self._handle_task_status,

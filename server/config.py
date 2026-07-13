@@ -37,6 +37,7 @@ class Config:
     mqtt_topic_cmd: str = "/agv/cmd"          # 서버 → AGV 개별 명령 (forward/turn/lift)
     mqtt_topic_marker: str = "/agv/marker"    # AGV → 서버 마커 인식 보고 (위치 갱신 트리거)
     mqtt_topic_cmd_ack: str = "/agv/cmd_ack"  # AGV → 서버 명령 완료 보고 (turn/lift 완료)
+    mqtt_topic_presence: str = "/agv/presence"  # AGV → 서버 접속/이탈 (retained + LWT, 수정 75)
     mqtt_topic_state: str = "/agv/state"      # (예비) AGV 상태 브로드캐스트용 — 현재 미사용
 
     # ─── 파일 경로 (빈 문자열이면 __post_init__이 data/ 기준으로 자동 채움) ───

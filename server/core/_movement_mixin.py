@@ -527,6 +527,10 @@ class MovementMixin:
         for other_rid, other in self.robot_manager.robots.items():
             if other_rid == rid:
                 continue
+            # 수정 75: 한 번도 안 켠 AGV는 바닥에 없다 → 길을 막으면 안 된다.
+            # (통신이 끊긴 AGV는 ever_seen=True 로 남아 계속 장애물이다 — 몸은 그 자리에 있다.)
+            if not other.ever_seen:
+                continue
             stationary = (other.status == RobotStatus.IDLE
                           or not other.planned_path
                           or self._is_staging_robot(other_rid))

@@ -152,6 +152,12 @@ class AGVServer:
             self.config.mqtt_topic_cmd_ack,
             lambda data: self._handle_mqtt_cmd_ack(data),
         )
+        # AGV → 서버: 접속/이탈 (retained birth + 브로커 LWT). 수정 75
+        # 안 켠 AGV에 태스크가 나가지 않게 하는 배정 게이트의 입력.
+        self.mqtt_publisher.subscribe(
+            self.config.mqtt_topic_presence,
+            lambda data: self._handle_mqtt_presence(data),
+        )
         # GUI/테스트 도구 → 서버: 주문 시작. AGV는 stock 검증 안 함(validate_stock 제거됨, 수정 50).
         self.mqtt_publisher.subscribe(
             "warehouse/order/start",
@@ -181,7 +187,7 @@ class AGVServer:
             }),
         )
         print("[AGVServer] MQTT subscriptions ready "
-              "(/agv/marker, /agv/cmd_ack, "
+              "(/agv/marker, /agv/cmd_ack, /agv/presence, "
               "warehouse/order/start, warehouse/shelf/complete, warehouse/order/complete)")
 
     # ─── MQTT 콜백 어댑터 (수신 dict → handle_message용 메시지로 가공 + 로그) ───
@@ -201,6 +207,12 @@ class AGVServer:
         data["type"] = "cmd_ack"
         result = self.request_handler.handle_message(json.dumps(data))
         print(f"[AGVServer] cmd_ack: AGV-{data.get('rid')} {data.get('cmd')} → {result.get('action', '?')}")
+
+    def _handle_mqtt_presence(self, data):
+        """AGV 접속/이탈 → request_handler 라우팅 (MarkerMixin._handle_presence)."""
+        data["type"] = "presence"
+        result = self.request_handler.handle_message(json.dumps(data))
+        print(f"[AGVServer] presence: AGV-{data.get('rid')} → {result.get('action', '?')}")
 
     def _handle_mqtt_gui(self, data):
         """GUI발 메시지(start_order/shelf_complete/order_complete) → 라우팅 (WorkflowMixin)."""

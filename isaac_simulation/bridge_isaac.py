@@ -27,6 +27,7 @@ MQTT_PORT = 1883
 TOPIC_CMD     = "/agv/cmd"
 TOPIC_MARKER  = "/agv/marker"
 TOPIC_CMD_ACK = "/agv/cmd_ack"
+TOPIC_PRESENCE = "/agv/presence"   # 수정 75 — AGV 접속/이탈 (일반 시뮬만 발행, 트윈은 침묵)
 TOPIC_POSE    = "/agv/pose"   # 수정 68 — 연속 자세 (트윈 전용)
 
 # cmd_ack의 shelf_id "미지정" 센티넬 (lift_up/down만 대상 선반 명시)
@@ -77,6 +78,23 @@ class Bridge:
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
+        # 수정 75 — presence는 **AGV 역할일 때만** 발행한다.
+        #
+        # 트윈(TWIN=1)은 관찰자다. 트윈이 "AGV-2 여기 있다"고 말하면 실물 AGV-2가
+        # 꺼져 있어도 서버가 있다고 믿고 태스크를 준다 — 유령을 막으려고 만든 장치가
+        # 유령을 만드는 꼴이 된다. 트윈은 침묵한다(마커·cmd_ack를 침묵하는 것과 같은 이유).
+        if not self._is_twin:
+            self._client.will_set(       # connect() 전에 등록해야 효력 발생
+                TOPIC_PRESENCE,
+                json.dumps({"rid": rid, "online": False}),
+                qos=1, retain=True,
+            )
+
+    @property
+    def _is_twin(self) -> bool:
+        """트윈 모드 = 실물의 보고를 구독하는 관찰자. 일반 시뮬은 자기가 AGV다."""
+        return self._marker_handler is not None
+
     # ─── MQTT ─────────────────────────────────────────────────────────────────
 
     def connect(self):
@@ -84,8 +102,18 @@ class Bridge:
         self._client.loop_start()
 
     def disconnect(self):
+        if not self._is_twin:
+            self._publish_presence(False)   # 정상 종료는 LWT가 안 뜬다 → 직접 알림
         self._client.loop_stop()
         self._client.disconnect()
+
+    def _publish_presence(self, online: bool):
+        """수정 75 — 접속/이탈 알림 (일반 시뮬 = Isaac이 곧 AGV일 때만)."""
+        self._client.publish(
+            TOPIC_PRESENCE,
+            json.dumps({"rid": self.rid, "online": online}),
+            qos=1, retain=True,
+        )
 
     def _on_connect(self, client, userdata, flags, rc):
         client.subscribe(TOPIC_CMD)
@@ -95,7 +123,10 @@ class Bridge:
             client.subscribe(TOPIC_POSE)     # 트윈 모드 — 실물의 연속 자세
         if self._ack_handler is not None:
             client.subscribe(TOPIC_CMD_ACK)  # 트윈 모드 — 실물의 회전/리프트 완료를 따라감
-        print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})")
+        if not self._is_twin:
+            self._publish_presence(True)
+        print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})"
+              f"{'' if self._is_twin else ' — presence online'}")
 
     def _on_message(self, client, userdata, msg):
         try:

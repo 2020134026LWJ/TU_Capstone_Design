@@ -37,6 +37,15 @@ class Robot:
     current_task: Optional[Dict[str, Any]] = None
     task_queue: List[Dict[str, Any]] = field(default_factory=list)
 
+    # 존재 여부 (수정 75) — 두 플래그의 의미가 다르다. 합치지 말 것.
+    #   online    = 지금 MQTT로 붙어 있나        → 태스크를 줘도 되나 (배정 게이트)
+    #   ever_seen = 한 번이라도 붙은 적 있나     → 바닥에 실재하나 (A* 장애물 여부)
+    # 주행 중 통신이 끊긴 로봇은 online=False 지만 ever_seen=True 다 — 몸은 그 칸에
+    # 그대로 서 있으므로 **계속 피해 다녀야 한다**. 반대로 한 번도 안 켠 로봇은
+    # 바닥에 없으므로 길을 막으면 안 된다.
+    online: bool = False
+    ever_seen: bool = False
+
     # 명령 기반 이동
     heading: int = 0                                 # 현재 방향 (0=북, 90=동, 180=남, 270=서)
     heading_initialized: bool = False                # 첫 마커 보고로 heading 확인됐는지 여부
@@ -50,6 +59,7 @@ class Robot:
             "home_node": self.home_node,
             "current_node": self.current_node,
             "status": self.status.value,
+            "online": self.online,
             "carrying_shelf": self.carrying_shelf,
             "current_task_id": self.current_task_id,
             "current_task": self.current_task,
@@ -120,22 +130,25 @@ class RobotManager:
     ) -> Optional[Robot]:
         """유휴 로봇 조회 (target_node 지정 시 가장 가까운 로봇 우선).
 
-        가용 = status IDLE + heading 초기화 + planned_path 비어있음 (= 진짜 정지).
+        가용 = online + status IDLE + heading 초기화 + planned_path 비어있음 (= 진짜 정지).
         IDLE 상태로 parking 노드 이동 중인 로봇은 planned_path가 남아있음 → 제외.
         (수정 48: in-flight forward 중인 IDLE 로봇에 lift_up 명령 발행되어 엉뚱한
          노드에서 빈 lift 실행되는 race 차단)
+        (수정 75: online — 안 켠 AGV에 태스크를 주면 서버 장부에만 존재하는 유령이
+         일하게 된다. 전에는 heading_initialized가 우연히 이걸 막고 있었다.)
         """
+        def _usable(r: Robot) -> bool:
+            return (r.online and r.status == RobotStatus.IDLE
+                    and r.heading_initialized and not r.planned_path)
+
         # [DEMO MODE] 특정 로봇 전담 배정
         if dedicated_rid is not None:
             robot = self.robots.get(dedicated_rid)
-            if (robot and robot.status == RobotStatus.IDLE
-                    and robot.heading_initialized and not robot.planned_path):
+            if robot and _usable(robot):
                 return robot
             return None  # 전담 로봇이 유휴가 아니면 대기
 
-        idle_robots = [r for r in self.robots.values()
-                       if r.status == RobotStatus.IDLE and r.heading_initialized
-                       and not r.planned_path]
+        idle_robots = [r for r in self.robots.values() if _usable(r)]
         if not idle_robots:
             return None
 
@@ -145,6 +158,25 @@ class RobotManager:
         return idle_robots[0]
 
     # ─── 업데이트 ───
+
+    def set_presence(self, rid: int, online: bool) -> bool:
+        """AGV 접속/이탈 반영 (수정 75). 상태가 실제로 바뀌었으면 True.
+
+        online=True 는 두 곳에서 온다:
+          1) /agv/presence 의 birth 메시지 (브릿지가 접속하며 발행)
+          2) 그 AGV의 마커/ack 보고 — 말을 걸어왔으면 있는 것이다.
+             (presence를 안 쏘는 구버전 클라이언트를 위한 fallback)
+        online=False 는 브로커의 LWT 로만 온다 = 통신이 끊겼다.
+        **몸은 그 자리에 남아있으므로 ever_seen 은 절대 되돌리지 않는다.**
+        """
+        robot = self.robots.get(rid)
+        if not robot:
+            return False
+        changed = robot.online != online
+        robot.online = online
+        if online:
+            robot.ever_seen = True
+        return changed
 
     def update_robot_position(self, rid: int, node: int) -> bool:
         """로봇 위치 업데이트"""
