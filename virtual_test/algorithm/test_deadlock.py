@@ -19,34 +19,34 @@ import pytest
 def test_staging_node_excluded_from_transit(handler):
     """4.5.6 Step 1: corridor staging_node는 어떤 로봇의 경유(transit) 경로에도 안 들어간다.
 
-    W1(33) staging_node=41. 42→33 최단경로 후보는 [42, 41, 33]이지만
-    41이 transit에서 제외되어 [42, 34, 33] 등으로 우회해야 한다.
+    W1(32) staging_node=40. 41→32 최단경로 후보는 [41, 40, 32]이지만
+    40이 transit에서 제외되어 [41, 33, 32] 등으로 우회해야 한다.
     """
-    # AGV-2를 목적지(33)에서 치움 (goal 노드 점유 방지)
+    # AGV-2를 목적지(32)에서 치움 (goal 노드 점유 방지)
     other = handler.robot_manager.get_robot(2)
-    other.current_node = 9
+    other.current_node = 8
 
     robot = handler.robot_manager.get_robot(1)
-    robot.current_node = 42
+    robot.current_node = 41
     robot.heading = 0
     robot.heading_initialized = True
 
-    handler._plan_and_publish_move(1, 42, 33)
+    handler._plan_and_publish_move(1, 41, 32)
 
     assert robot.planned_path, "경로가 나와야 함"
-    assert robot.planned_path[-1] == 33
-    assert 41 not in robot.planned_path[1:-1], \
-        f"staging_node 41이 경유 경로에 포함되면 안 됨: {robot.planned_path}"
+    assert robot.planned_path[-1] == 32
+    assert 40 not in robot.planned_path[1:-1], \
+        f"staging_node 40이 경유 경로에 포함되면 안 됨: {robot.planned_path}"
 
 
 @pytest.mark.deadlock
 def test_staging_node_allowed_as_goal(handler):
     """staging_node가 그 로봇의 *목적지*면 제외 안 함 (대기 AGV는 거기로 가야 함)."""
     other = handler.robot_manager.get_robot(2)
-    other.current_node = 9
+    other.current_node = 8
 
     robot = handler.robot_manager.get_robot(1)
-    robot.current_node = 42
+    robot.current_node = 41
     robot.heading = 0
     robot.heading_initialized = True
 

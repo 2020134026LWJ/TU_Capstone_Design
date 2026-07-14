@@ -139,7 +139,7 @@ class MarkerMixin:
         node = int(marker_id)
 
         # 수정 59: 맵에 없는 마커는 버린다 (실물 오검출 방어).
-        # ArUco는 조명·각도·잘린 마커 때문에 엉뚱한 ID를 내뱉는다(실측: 노드 1~48뿐인데 145 검출).
+        # ArUco는 조명·각도·잘린 마커 때문에 엉뚱한 ID를 내뱉는다(실측: 노드 0~47뿐인데 145 검출).
         # 이걸 그대로 믿으면 robot.current_node가 맵 밖 노드가 되어 경로계획·충돌회피가
         # 통째로 무너진다. 위치는 '모르는 값'보다 '직전 값'이 안전하므로 무시가 정답.
         if node not in self.path_planner.nodes:
@@ -149,7 +149,7 @@ class MarkerMixin:
         # 수정 62: 인접성 검사 — 물리적으로 갈 수 없는 곳에서 온 마커는 버린다.
         #
         # 위의 수정 59 필터는 "맵에 있는 번호냐"만 본다. 그런데 ArUco 오검출은 ID 0~249에
-        # 흩어지고 우리 유효 노드는 1~48이라, **5번 중 1번은 유효 노드로 위장해 통과한다**.
+        # 흩어지고 우리 유효 노드는 0~47이라, **5번 중 1번은 유효 노드로 위장해 통과한다**.
         # (실측 2026-07-12: 카메라 앞에 아무것도 없는데 37 → 3 → 4 검출. 145는 걸렀지만
         #  37은 못 걸렀다. 서버가 이걸 믿고 로봇을 맵 반대편으로 순간이동시켰다.)
         #
@@ -448,7 +448,8 @@ class MarkerMixin:
             # Bug B fix: 대기 AGV 없이 회랑 FREE → PENDING 작업 재배정 시도
             # (AT_WORKSTATION + 회랑 점유로 PENDING됐던 작업이 이제 배정 가능)
             ws_node = self.staging_manager._trigger_to_ws.get(marker_id)
-            if ws_node:
+            if ws_node is not None:      # 노드 0은 유효한 노드다
+
                 corridor = self.staging_manager.corridors.get(ws_node)
                 if corridor and self.staging_manager._owner(ws_node) is None:
                     self._try_assign_pending_tasks()

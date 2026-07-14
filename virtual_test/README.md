@@ -39,7 +39,7 @@ TWIN=1 TWIN_EDGE_SECS=3.0 ~/isaacsim/_build/linux-x86_64/release/python.sh \
 
 # 터미널 3 — 가짜 실물 AGV-1 (홈 9에서 시작, 한 칸 3초)
 cd TU_Capstone_Design && python3 -m virtual_test.bench_camera.run_bench 1 \
-  --no-camera --auto-walk 9 --ack-delay 3.0
+  --no-camera --auto-walk 8 --ack-delay 3.0
 
 # 터미널 4 — 주문 (라파 GUI 또는 직접 발행)
 mosquitto_pub -h localhost -t warehouse/order/start -m '{"사용자ID":1,"주문번호":1,"작업대":2}'

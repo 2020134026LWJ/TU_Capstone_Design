@@ -62,14 +62,17 @@ class StagingManager:
         # REFACTOR F Phase 1 — staging cascade wake-up 카운터 (release_corridor_without_trigger 호출 수)
         self._cascade_count: int = 0
 
-        # ws_node(33,34) → gateway, staging, trigger 매핑
+        # ws_node → gateway, staging, trigger 매핑 (shelf_config.json이 출처)
         for ws_node_str, ws_info in workstations.items():
             ws_node = int(ws_node_str)
             gateway = ws_info.get("gateway_node")
             staging = ws_info.get("staging_node")
             trigger = ws_info.get("trigger_node")
 
-            if gateway and staging and trigger:
+            # [주의] `if gateway and staging and trigger:` 로 쓰면 안 된다.
+            # 노드 0이 유효한 번호라(0-based) W2의 staging_node=0이 falsy로 걸러져
+            # **회랑 자체가 등록되지 않는다** — 스테이징이 통째로 죽는다.
+            if None not in (gateway, staging, trigger):
                 self.corridors[ws_node] = CorridorInfo(
                     ws_node=ws_node,
                     gateway_node=gateway,
@@ -273,7 +276,7 @@ class StagingManager:
             None: 트리거가 아니거나 대기 AGV 없음
         """
         ws_node = self._trigger_to_ws.get(marker_id)
-        if not ws_node:
+        if ws_node is None:      # 노드 0은 유효한 노드다 — falsy로 걸러내면 안 된다
             return None
 
         corridor = self.corridors.get(ws_node)

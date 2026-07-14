@@ -59,40 +59,42 @@ TU_Capstone_Design/
 |
 +-- isaac_simulation/           # Isaac Sim (현재 메인) — Isaac 전용
 |   +-- hello_world.py ~ step5_camera_aruco.py   # Step 1~5 (완료)
-|   +-- step6_visual.py         # Step 6: 바퀴/차체방향/시각/터치스크린 (현재 메인)
-|   +-- step7_kinematic.py      # Step 7: Kinematic Physics (구현 완료, 런타임 검증 남음)
+|   +-- step7_kinematic.py      # ★ 현재 메인: Kinematic Physics + 디지털 트윈(TWIN=1)
+|   +-- step6_visual.py         # Step 6: 시각 전용 (물리 없음, 트윈 미지원)
+|   +-- run_twin.sh             # 트윈 모드 실행 래퍼 (TWIN=1 + 칸당 소요시간)
 |   +-- bridge_isaac.py         # Isaac 전용 bridge (콜백)
 |   +-- isaac_hw.py             # IsaacMotors (가상)
 |   +-- camera.py               # IsaacCamera (proximity 가상 마커 감지)
+|   +-- capture_agv.py          # 발표자료용 정적 포즈 촬영 (MQTT/서버 없음)
+|   +-- Presentation_manual.py  # 발표용 수동 제어 데모 (터미널로 노드 지정)
 |   +-- STEP8_PLAN.md / README.md
 |
 +-- hardware/                   # AGV 실물(RPi) 전용 (주원이 STM 펌웨어 대응)
+|   +-- INTEGRATION.md          # 실물 붙이는 날 bring-up 절차서
 |   +-- rpi_main.py             # 실물 진입점 (camera+bridge, AGV_ID로 rid)
 |   +-- bridge_rpi.py           # MQTT ↔ UART 브릿지
 |   +-- camera.py               # RpiCamera (주원이 opencv ArUco 비전)
-|   +-- config.py               # 배포 설정 (서버IP/UART/카메라)
+|   +-- camera_preview.py       # 초점 맞추기용 웹 프리뷰
+|   +-- config.py               # 배포 설정 (서버IP/UART/카메라/HEADING_OFFSET)
 |   +-- stm32/rpi_uart.c, AGV_Control.zip   # 주원이 STM 소스/펌웨어
 |
 +-- server/                     # AGV 서버 (MQTT 기반) — 2026-06-13 레이어 분리
 |   +-- main.py  config.py
 |   +-- comm/ core/ planning/ managers/ data/ docs/   # 상세는 루트 README / CLAUDE.md
 |
-+-- virtual_test/               # 실물 없이 도는 테스트 (algorithm=pytest, software_in_the_loop=SIL)
++-- virtual_test/               # 실물 없이 돌리기 (algorithm=pytest / bench_camera=벤치 / SIL)
 |
-+-- webots_simulation/          # Webots 전용
-|   (controllers, worlds, textures)
-|
-+-- mqtt_test.py                # CLI 테스트 도구
 +-- FLOWCHART.md                # 알고리즘 플로우차트 + 수정 이력
 |
 +-- warehouse_gui_server/       # 작업자 GUI + 재고 서버
-|   +-- warehouse_gui_v2.py     # KivyMD 터치스크린 GUI (Raspberry Pi, IP 입력 팝업)
+|   +-- warehouse_gui_ws1.py    # 1번 라파(작업대1) GUI / ws2.py = 2번 라파
+|   |                           #   [주의] warehouse_gui_v2.py는 ws2 사본 — 1번에서 열지 말 것
 |   +-- warehouse_server_v2.py  # Flask HTTP + MQTT + SQLite 재고 관리
 |   +-- excel_to_sqlite.py      # 데이터 베이스.xlsx -> warehouse.db (최초 1회)
 |   +-- 사용자{1,2}주문.xlsx    # 주문 데이터
 |   +-- 데이터 베이스.xlsx      # 재고 마스터
 |
-+-- archive/                    # 이전 버전 (v1~v3, 참조용)
++-- archive/                    # 이전 버전 (v1~v3, webots, 구 mqtt_test.py — 참조용)
 +-- README.md
 ```
 
@@ -101,27 +103,29 @@ TU_Capstone_Design/
 ## 3. 맵 구조
 
 ```
-          1 - 2 - 3 - 4 - 5 - 6 - 7 - 8    (row 0, 통로)
+          0 - 1 - 2 - 3 - 4 - 5 - 6 - 7    (row 0, 통로)
           |   |   |   |   |   |   |   |
-W2(9)---  9 -10 -11 -12 -13 -14 -15 -16    (row 1, W2 작업대)
+W2(8)---  8 - 9 -10 -11 -12 -13 -14 -15    (row 1, W2 작업대)
           |   |   |   |   |   |   |   |
-         17 -18 -[19]-[20]-21-[22]-[23]-24   (row 2, []=선반)
+         16 -17 -[18]-[19]-20-[21]-[22]-23   (row 2, []=선반)
           |   |   |   |   |   |   |   |
-         25 -26 -[27]-[28]-29-[30]-[31]-32   (row 3, []=선반)
+         24 -25 -[26]-[27]-28-[29]-[30]-31   (row 3, []=선반)
           |   |   |   |   |   |   |   |
-W1(33)-- 33 -34 -35 -36 -37 -38 -39 -40    (row 4, W1 작업대)
+W1(32)-- 32 -33 -34 -35 -36 -37 -38 -39    (row 4, W1 작업대)
           |   |   |   |   |   |   |   |
-         41 -42 -43 -44 -45 -46 -47 -48    (row 5, 통로)
+         40 -41 -42 -43 -44 -45 -46 -47    (row 5, 통로)
+
+노드 = ArUco 마커 ID (항등). 0-based — 바닥 마커 0~47을 그 번호 칸에 붙인다.
 ```
 
 | 항목 | 값 |
 |------|----|
-| 전체 노드 | 48개 (8×6 그리드) |
-| 선반 노드 | 8개 — 19, 20, 22, 23, 27, 28, 30, 31 |
-| 작업대 | W1=33 (user_id=1), W2=9 (user_id=2) |
-| W1 회랑 | gateway=25, staging=41, trigger=34 (수정 28: staging 25→41) |
-| W2 회랑 | gateway=17, staging=1,  trigger=10 (수정 28: staging 17→1) |
-| AGV 홈 | AGV-1: node 9 (W2), AGV-2: node 33 (W1) |
+| 전체 노드 | 48개 (8×6 그리드, **0~47**) |
+| 선반 노드 | 8개 — 18, 19, 21, 22, 26, 27, 29, 30 |
+| 작업대 | W1=32 (user_id=1), W2=8 (user_id=2) |
+| W1 회랑 | gateway=24, staging=40, trigger=33 |
+| W2 회랑 | gateway=16, staging=0,  trigger=9 |
+| AGV 홈 | AGV-1: node 8 (W2), AGV-2: node 32 (W1) |
 | 노드 타입 | M(통로), S(선반), W(작업대) |
 
 ---
@@ -135,26 +139,34 @@ W1(33)-- 33 -34 -35 -36 -37 -38 -39 -40    (row 4, W1 작업대)
 | `/agv/cmd` | Server → AGV | 이동/회전/리프트 명령 |
 | `/agv/marker` | AGV → Server | ArUco 마커 감지 (위치 + heading) |
 | `/agv/cmd_ack` | AGV → Server | 회전/리프트 완료 알림 |
-| `warehouse/order/start` `warehouse/shelf/complete` `warehouse/order/complete` | GUI → Server | 주문 시작/선반완료/주문종료 (start_order 등) |
+| `/agv/presence` | AGV → Server | 접속/이탈 (retained + LWT, 수정 75) |
+| `/agv/pose` | AGV → **트윈** | 연속 자세 스트림 (수정 68) — **서버는 구독 안 함** |
+| `warehouse/order/start` `warehouse/shelf/complete` `warehouse/order/complete` | GUI → Server | 주문 시작/선반완료/주문종료 |
 | `warehouse/shelf/arrived` | Server → GUI | AGV 작업대 도착 알림 (선반 셀 활성화) |
 
 ### 메시지 형식
 
 서버 → AGV 명령 (`/agv/cmd`):
 ```json
-{"rid": 1, "cmd": "forward"}
+{"rid": 1, "cmd": "forward", "target_node": 24, "timestamp": 1700000000.0}
 {"rid": 1, "cmd": "turn_left"}
-{"rid": 1, "cmd": "turn_right"}
 {"rid": 1, "cmd": "turn_180"}
-{"rid": 1, "cmd": "lift_up"}
-{"rid": 1, "cmd": "lift_down"}
+{"rid": 1, "cmd": "lift_up", "shelf_id": 18}
+{"rid": 1, "cmd": "lift_down", "shelf_id": 18}
 ```
+- `target_node` (수정 70): forward의 **도착 예정 노드**. 없으면 AGV/트윈이 자기 heading으로
+  "내 앞이 어디지?"를 스스로 계산해야 하고, heading이 한 번 어긋나면 **서버와 서로 다른 목적지로
+  해석해 교착**한다. 서버는 이미 목적지를 아니까 그냥 알려준다. (실물은 무시해도 됨 — 그냥 앞으로 감)
+- `shelf_id`: lift 대상 선반. 시뮬이 "근처 선반"을 추측하지 않게 한다.
 
 AGV → 서버 위치 보고 (`/agv/marker`):
 ```json
 {"rid": 1, "marker_id": 14, "heading": 90, "ts": 1700000000}
+{"rid": 1, "marker_id": 14, "heading_observed": 87, "ts": 1700000000}
 ```
-- `heading`: 0=North, 90=East, 180=South, 270=West
+- `heading`: 0=North, 90=East, 180=South, 270=West. **서버가 제어에 그대로 쓴다** (시뮬이 보내는 신뢰된 값).
+- `heading_observed` (수정 69): 실물 카메라가 계산한 값. **서버는 비교/로그만 하고 제어엔 안 쓴다.**
+  `HEADING_OFFSET` 실측 후 `server/config.py`의 `TRUST_CAMERA_HEADING=True`로 밸브를 연다.
 
 AGV → 서버 완료 알림 (`/agv/cmd_ack`):
 ```json
@@ -162,23 +174,29 @@ AGV → 서버 완료 알림 (`/agv/cmd_ack`):
 {"type": "cmd_ack", "rid": 1, "cmd": "lift_up",   "status": "done"}
 ```
 
-주문 시작:
+AGV → 서버 접속/이탈 (`/agv/presence`, retain=True + LWT):
 ```json
-{"type": "start_order", "사용자ID": 1, "주문번호": 1}
+{"rid": 1, "online": true}
+{"rid": 1, "online": false}     // LWT — 브로커가 대신 발행 (전원/네트워크 끊김)
+```
+- 안 켠 로봇에는 태스크를 배정하지 않는다. 단, **끊긴 로봇의 몸은 그 칸에 남아 있으므로**
+  A* 장애물로는 계속 취급한다 (`online` ≠ `ever_seen`).
+
+주문 시작 (`warehouse/order/start`):
+```json
+{"type": "start_order", "사용자ID": 1, "주문번호": 1, "작업대": 2}
+```
+- `작업대`는 **user_id와 별개 개념** (수정 53). 사용자 1이 작업대 2에서 일할 수 있다.
+
+선반 피킹 완료 (`warehouse/shelf/complete`) — 서버는 `작업대`로 어느 회랑을 비울지 찾는다:
+```json
+{"type": "shelf_complete", "사용자ID": 1, "작업대": 2}
 ```
 
-선반 피킹 완료:
+서버 → GUI 선반 도착 (`warehouse/shelf/arrived`) — GUI가 해당 선반 셀만 활성화:
 ```json
-{"type": "shelf_complete", "사용자ID": 1}
+{"작업대": 2, "사용자ID": 1, "선반번호": "1-1"}
 ```
-
-### CLI 테스트 도구 명령 (mqtt_test.py)
-
-| 명령 | 동작 |
-|------|------|
-| `시작 1` / `시작 2` | 사용자 주문 시작 |
-| `선반완료 1 [노드번호]` | 특정 선반 피킹 완료 |
-| `완료 1` / `완료 2` | 주문 전체 완료 |
 
 ---
 
@@ -189,49 +207,42 @@ Isaac Sim, 실물 하드웨어 어느 쪽이든 MQTT 토픽만 맞으면 교체 
 
 ### 모듈별 역할
 
+> 2026-06-13 레이어 분리 — import는 패키지 경로(`from server.managers.robot import RobotManager`).
+> 전체 구조는 [`../server/docs/README.md`](../server/docs/README.md)가 단일 진실. 여기는 요약.
+
 ```
 main.py
-  +-- MQTT 브로커 구독 (arrived, shelf_ack, marker, algorithm)
-  +-- WebSocket 서버 시작 (Admin UI)
+  +-- MQTT 구독 배선 (/agv/marker, /agv/cmd_ack, /agv/presence, warehouse/order|shelf/*)
+  +-- 상단 docstring = 이벤트↔핸들러↔다이어그램 매핑 지도
 
-request_handler.py  [핵심]
-  +-- _handle_start_order()      : 주문 시작 -> DB 로드 -> 선반 배정 -> 명령 발행
-  +-- _handle_shelf_complete()   : 선반 피킹 완료 -> 반납 or 포워딩 결정
-  +-- _handle_marker_report()    : /agv/marker 수신 -> 위치 갱신 -> 다음 cmd 발행
-  +-- _handle_cmd_ack()          : /agv/cmd_ack 수신 -> turn/lift 완료 처리
-  +-- _handle_putdown_ack()      : lift_down 완료 -> 다음 선반 or IDLE
-  +-- _send_next_command()       : forward 충돌 체크 + _reserved_nodes 예약
-  +-- _retry_blocked_robots()    : blocked 재시도 + 교착 감지
-  +-- _resolve_deadlock()        : 우선순위 결정 + 우회/yield 전략
-  +-- _is_staging_robot()        : staging 큐 멤버십 (수정 28)
-  +-- _plan_and_publish_move()   : STG 체크 포함 경로 계획
-  +-- _try_assign_pending_tasks(): PENDING 작업 재배정 루프
+core/request_handler.py  [핵심]  — 3 mixin 다중상속
+  core/_workflow_mixin.py   주문/태스크/F-노드/인터셉트
+    +-- _handle_start_order()      : 주문 -> DB 로드 -> 태스크 N개 -> 배정
+    +-- _handle_shelf_complete()   : 선반 피킹 완료 -> 반납 or 포워딩 결정 (Point C)
+    +-- _get_shelf_availability()  : F-노드 선반 가용성 분기
+    +-- _try_assign_pending_tasks(): PENDING 작업 재배정 루프
+  core/_marker_mixin.py     AGV 이벤트 — 주행 엔진
+    +-- _handle_marker_report()    : /agv/marker -> 위치 갱신 -> 다음 cmd
+    +-- _handle_cmd_ack()          : /agv/cmd_ack -> turn/lift 완료
+    +-- _handle_presence()         : /agv/presence -> 접속/이탈 (수정 75)
+    +-- handle_marker_trigger()    : TRG -> 대기 AGV 해제
+  core/_movement_mixin.py   ★ 이동 명령 발행 + 충돌/교착 회피
+    +-- _plan_and_publish_move()   : STG 체크 포함 경로 계획 -> cmd 큐
+    +-- _send_next_command()       : forward 충돌 체크 + 노드 락 획득
+    +-- _try_dispatch_all()        : 막힌 로봇 재시도 + 교착 감지 (ACK 도착마다 호출)
+    +-- _detect_deadlock_cycle()   : wait-for 사이클 감지 (수정 54)
+    +-- _resolve_deadlock(cycle)   : 사이클 중 한쪽을 우회 재계획
 
-task_manager.py
-  +-- 서브태스크 시퀀스 생성 (GO_TO_SHELF -> PICKUP -> DELIVER -> WAIT -> RETURN)
-  +-- handle_shelf_complete()    : 선반 단위 완료 처리
-  +-- rotate_shelf_to_end()      : 블록 선반을 순서 뒤로
+planning/reservation_service.py   미래 점유 단일 진실 (시공간 예약) — 충돌/교착 예방의 핵심
+planning/path_planner.py          astar_with_time() — 예약 연동 A*, turn_penalty=0.3
+planning/deadlock_detector.py     wait-for 사이클 감지 (순수 함수, 수정 54)
+planning/command_queue.py         AGV별 cmd lifecycle (in_flight 단일 슬롯)
+planning/order_optimizer.py       Nearest Neighbor 선반 방문 순서 최적화
 
-order_optimizer.py
-  +-- Nearest Neighbor 알고리즘으로 선반 방문 순서 최적화 (구 task_scheduler)
-
-robot_manager.py
-  +-- 6단계 상태 머신 관리
-  +-- get_available_robot()      : 유휴 AGV 탐색
-
-shelf_manager.py
-  +-- IN_PLACE / CARRIED / AT_WORKSTATION 상태 추적
-  +-- 선반별 담당 AGV 기록
-
-staging_manager.py
-  +-- should_stage()             : 회랑 진입 가능 여부 판단
-  +-- handle_marker_trigger()    : ArUco 트리거 -> 대기 AGV 해제
-  +-- check_position_release()   : 위치 기반 회랑 자동 해제
-  +-- release_corridor_without_trigger(): 포워딩 시 즉시 해제
-
-path_planner.py
-  +-- astar_with_time()          : 시간 기반 A* (예약 기반 충돌 회피)
-  +-- 선반 노드 통과 제외 (출발/도착만 허용)
+managers/robot.py     6단계 상태 머신 + get_available_robot() + presence
+managers/shelf.py     IN_PLACE / CARRIED / AT_WORKSTATION 추적
+managers/staging.py   should_stage() / handle_marker_trigger() / release_corridor_without_trigger()
+managers/task.py      서브태스크 시퀀스 (GO_TO_SHELF -> PICKUP -> DELIVER -> WAIT -> RETURN)
 ```
 
 ### 서브태스크 타입
@@ -313,17 +324,29 @@ _try_intercept_returning_shelf() 호출
 
 ### 충돌 회피 — cmd-based 노드 예약
 
+> **노드 락(통행권) 모델** (수정 55). 예전엔 서버가 각자 `_reserved_nodes` set을 들고 있었지만,
+> 지금은 **`ReservationService`가 미래 점유의 단일 진실**이다. "누가 언제 어디 있을 것인가"를
+> 한 곳에서만 관리하니, 예약과 실제 진행이 어긋나는 종류의 버그가 구조적으로 줄었다.
+> 배경은 [`../../설계_근본해결_노트.md`](../../설계_근본해결_노트.md) (저장소 밖 상위 폴더 `Projects/`).
+
 ```
 AGV가 forward 직전:
-  서버 _send_next_command() 충돌 체크
-    +-> next_node 점유/예약 -> _blocked_robots 추가 -> 명령 보류
-    +-> 안전 -> _reserved_nodes[next_node]=rid 예약 + forward 발행
+  _send_next_command() 충돌 체크
+    +-> next_node를 남이 잡고 있음 -> 보류 (blocked)
+    +-> 안전 -> 노드 락 획득 + forward 발행 (target_node 명시 — 수정 70)
 
 AGV가 마커 도착:
-  /agv/marker 발행 -> 서버 위치 갱신 + _reserved_nodes 해제
-  _retry_blocked_robots() -> 보류 중인 다른 AGV 재시도
-    +-> blocker도 blocked OR staging -> _resolve_deadlock() (수정 28)
+  /agv/marker -> 위치 갱신 + 지나온 락 해제
+  _try_dispatch_all() -> 보류 중인 다른 AGV 재시도 (ACK 도착마다)
+    +-> 서로 맞물려 못 움직이면 -> _detect_deadlock_cycle()
+                                   -> deadlock_detector.find_wait_cycle() (수정 54)
+    +-> _resolve_deadlock(cycle) : 사이클 중 한쪽을 우회 재계획
 ```
+
+추가 방어막:
+- **마커 인접성 검사** (수정 62) — 지금 칸에서 **갈 수 없는 칸**의 마커 보고는 거부. 오검출로 인한 순간이동 차단
+- **forward 목표 일치 검사** (수정 64) — 보낸 `target_node`와 다른 마커가 오면 거부
+- **죽은 예약 청소** (수정 74) — 주인이 사라진 예약이 A*를 영영 막던 문제
 
 > 구 NODE_WAIT 방식(`/agv/arrived` + `/agv/control` resume)은 cmd-based로 통합됨.
 
@@ -363,15 +386,28 @@ get_next_pending_task_fair()  : 활성 로봇이 적은 WS 태스크 우선 배�
 | Step 3 | AGV 이동 + MQTT 연동 | 완료 |
 | Step 4 | 리프트 애니메이션 + 선반 이동 (USD API) | 완료 |
 | Step 5 | 가상 카메라 ArUco 감지 (근접 기반, cmd-based) | 완료 |
-| Step 6 | 바퀴 회전 + 터치스크린 + 선반 orient 유지 (코드 완료) | 🔲 런타임 검증 필요 |
+| Step 6 | 바퀴 회전 + 터치스크린 + 선반 orient 유지 (`step6_visual.py`) | 완료 |
+| **Step 7** | **Kinematic Physics + 디지털 트윈 (`step7_kinematic.py`) — 현재 메인** | 완료 (시뮬 검증 06-30, 실물 트윈 연동 07-11) |
+| Step 8 | Articulation — 바퀴 JointDrive 물리 이동 | 미작성 (졸업 후, [`STEP8_PLAN.md`](STEP8_PLAN.md)) |
 
-### 실행 방법
+### 실행 방법 — 두 가지 역할을 구분할 것
+
+Isaac은 **AGV 본인**이 될 수도, **디지털 트윈**(실물을 따라 그리는 화면)이 될 수도 있다.
 
 ```bash
-# 절대 경로 필수 (현재 최신: step6_visual.py)
+# (A) AGV 역할 — 시뮬 단독 실행. Isaac이 직접 마커를 발행한다
 ~/isaacsim/_build/linux-x86_64/release/python.sh \
-  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step6_visual.py
+  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step7_kinematic.py
+
+# (B) 트윈 역할 — 실물/벤치가 발행한 마커를 따라 그린다
+./isaac_simulation/run_twin.sh          # = TWIN=1, 1칸 추정 3.0초
+./isaac_simulation/run_twin.sh 5.0      # 실물이 느릴 때 칸당 5초로
 ```
+
+> ⚠️ **TWIN=1을 빠뜨리고 실물과 동시에 켜면** Isaac이 트윈이 아니라 AGV 본인이 되어
+> **마커를 직접 발행한다.** 발행자가 둘이 되어 서버가 도착을 두 번 받고 상태가 꼬인다.
+>
+> `step6_visual.py`는 트윈을 지원하지 않는다 (물리·TWIN 없는 시각 전용 버전).
 
 ### AGV 모델 구조
 
@@ -625,7 +661,7 @@ sudo systemctl start mosquitto
 sudo systemctl restart mosquitto
 
 # 서버 의존성
-pip install paho-mqtt websockets pandas openpyxl
+pip install paho-mqtt pandas openpyxl
 
 # Isaac Sim 의존성 (Isaac Sim Python 환경 내)
 # paho-mqtt 별도 설치 필요
@@ -638,13 +674,13 @@ pip install paho-mqtt websockets pandas openpyxl
 cd TU_Capstone_Design
 python3 -m server.main
 
-# 터미널 2: Isaac Sim 시뮬레이션
+# 터미널 2: Isaac Sim (AGV 역할)
 ~/isaacsim/_build/linux-x86_64/release/python.sh \
-  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step6_visual.py
+  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step7_kinematic.py
 
-# 터미널 3: CLI 테스트
-cd TU_Capstone_Design
-python3 mqtt_test.py
+# 터미널 3: 주문 넣기 (구 mqtt_test.py는 archive로 이동 — GUI가 MQTT로 완전 전환)
+mosquitto_pub -h localhost -t warehouse/order/start \
+  -m '{"사용자ID":1,"주문번호":1,"작업대":2}'
 ```
 
 ### GUI 포함 전체 실행 (네트워크 필요)
@@ -660,13 +696,28 @@ python3 warehouse_server_v2.py
 
 # 노트북 터미널 3: Isaac Sim
 ~/isaacsim/_build/linux-x86_64/release/python.sh \
-  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step6_visual.py
+  /home/won-ububtu/Desktop/Projects/TU_Capstone_Design/isaac_simulation/step7_kinematic.py
 
-# Raspberry Pi: GUI
-cd TU_Capstone_Design/warehouse_gui_server
-python3 warehouse_gui_v2.py
+# Raspberry Pi(1번=작업대1): GUI
+cd TU_Capstone_Design/warehouse_gui_server && python3 warehouse_gui_ws1.py
+# Raspberry Pi(2번=작업대2): GUI
+cd TU_Capstone_Design/warehouse_gui_server && python3 warehouse_gui_ws2.py
 # -> 시작 시 노트북 핫스팟 IP 입력 팝업 (hostname -I 로 확인). 입력 IP는 ~/.warehouse_gui_ip 에 캐시
 ```
+
+> ⚠️ **`warehouse_gui_v2.py`는 ws2의 사본**(WORKSTATION_ID=2)이다. 1번 라파에서 이걸 열면
+> 주문이 작업대 2로 발행되어 AGV가 반대편으로 간다. **라파별로 ws1/ws2를 열 것.**
+
+### 실물/벤치와 함께 (디지털 트윈)
+
+```bash
+# 터미널 1: 서버 / 터미널 2: 트윈
+./isaac_simulation/run_twin.sh 3.0
+
+# 터미널 3: 실물 AGV(라파) 또는 벤치 가짜 로봇
+python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 8 --ack-delay 3.0
+```
+상세는 [`../virtual_test/README.md`](../virtual_test/README.md) (3모드), 실물은 [`../hardware/INTEGRATION.md`](../hardware/INTEGRATION.md).
 
 네트워크: 휴대폰 핫스팟에 노트북, Raspberry Pi, AGV 실물 모두 연결.
 
@@ -709,25 +760,35 @@ python3 warehouse_gui_v2.py
 
 ## 11. 향후 계획
 
-### 발표 전 (우선순위)
+### 지금 상태 (2026-07-14)
 
-| 순서 | 항목 | 내용 |
-|------|------|------|
-| 1 | **Step 6 검증** | TURNING/MOVING 동작, 바퀴 회전, 센서/LED 시각 확인 |
-| 2 | **전체 흐름 시연** | 서버 + Isaac Sim + GUI 연동 영상 |
+시뮬레이션·서버·트윈은 **소프트웨어적으로 끝났다.** 남은 건 전부 **실물에 붙여서 숫자를 재는 일**.
 
-### 발표 후 — 하드웨어 연동 (2026-06-30 코드 통합 완료)
+| 항목 | 상태 |
+|------|------|
+| Step 6/7 (시각 + Kinematic Physics + 트윈) | 완료 — 시뮬 4 시나리오 검증 (06-30) |
+| 실물 라파 카메라 → 서버 → 트윈 연동 | 완료 (07-11) |
+| 서버 알고리즘 (락 모델·교착·멱등·presence) | 완료 — pytest 100 tests |
+| **실물 HIL** | **남음** — 아래 |
+| Step 8 (Articulation) | 미작성 (졸업 후) |
 
-> ⚠️ 아래는 옛 계획(0xAA 바이너리 패킷)이었고, **실제는 주원이 STM 프로토콜로 확정**됨. 상세·최신은 **`hardware/README.md`**.
+### 실물 HIL — 붙이는 날 절차서는 [`../hardware/INTEGRATION.md`](../hardware/INTEGRATION.md)
 
-핵심만:
-- **UART 송신**: ASCII `<cmd,±xxxx,±yyyy,±wwww>` 21바이트 (cmd 1~7, x/y/yaw=ArUco offset×10)
-- **명령 코드**: forward1 / stop2 / lift_up3 / lift_down4 / turn_left5 / turn_right6 / turn_180_7
-- **수신**: 단일바이트 `0x81`=DONE / `0xFF`=ACK (각 3회 반복 송신 — 신호 유실 대비)
-- **forward 완료 = 카메라 마커**(서버 ACK), turn/lift 완료 = cmd_ack
-- **실행**: `python3 -m hardware.rpi_main` (라파별 `export AGV_ID=1/2`), 설정은 `hardware/config.py` (`UART_ENABLED`/`MQTT_HOST` 등)
-- **서버 코드 변경 없음** — `/agv/cmd` `/agv/marker` `/agv/cmd_ack` 토픽 동일
-- **남은 HIL**: heading K 보정 / turn 좌우 방향 / 마커=노드 배치
+제일 먼저 확인할 2가지 (**벤치로는 검증이 구조적으로 불가능한 것들**):
+
+1. **turn 좌우 방향(handedness)** — 서버가 `turn_left`를 냈을 때 실물이 어느 쪽으로 도나.
+   벤치의 가짜 로봇은 서버와 **같은 회전 규약을 공유**하므로 아무것도 말해주지 않는다.
+   차 띄워놓고 한 번 쏴보면 5분, 반대면 부호 하나 뒤집으면 된다.
+2. **AGV 초기 방향** — 홈 노드에 **북향(heading 0)으로** 놓아야 한다. 서버·트윈 둘 다 그렇게 가정한다.
+   (`TRUST_CAMERA_HEADING` 밸브를 켜면 이 제약이 사라진다 → `HEADING_OFFSET` 실측이 선행)
+
+그 외: 마커=노드번호 바닥 배치(**전부 같은 방향으로**) / 2대 동시 주행.
+
+> ⚠️ **마커 시트는 낱장으로 자를 것.** 한 장에 15~20개가 인쇄돼 있으면 9번을 보여줄 때
+> 옆칸 10번도 같이 잡혀서 로봇이 "순간이동"한다. (서버 가드는 수정 62/64로 들어가 있지만,
+> 애초에 안 보이게 하는 게 맞다)
+
+> UART 프로토콜·통신유실 대응·`hardware/config.py` 설정은 **`hardware/README.md`가 단일 진실**.
 
 ---
 
@@ -744,37 +805,26 @@ CAD_PATHS = {
 
 ---
 
-#### 전체 하드웨어 연동 순서
-
-| 순서 | 항목 | 구체적 작업 | 난이도 |
-|------|------|------------|--------|
-| 1 | UART 프로토콜 연동 | STM32 팀과 패킷 포맷 최종 확인 | 낮음 |
-| 2 | config.py 설정 | UART_ENABLED=True, MQTT_HOST=서버IP (hardware/config.py) | 낮음 |
-| 3 | RPi 실행 확인 | main.py 1/2 실행 → MQTT ↔ UART 동작 | 낮음 |
-| 4 | 카메라 캘리브레이션 | camera_calibration.pkl 생성 | 중간 |
-| 5 | RpiCamera ArUco 실물 | 마커 감지 + heading 정확도 확인 | 중간 |
-| 6 | 리프트 타이밍 조정 | lift_up/down 완료 타이밍 튜닝 | 중간 |
-| 7 | CAD 파일 적용 | STEP → USD, CAD_PATHS 입력 | 낮음 |
-
 ### 장기 (선택적)
 
 | 항목 | 내용 |
 |------|------|
 | Admin 웹 대시보드 | 실시간 맵 뷰 + 로봇 상태 모니터링 |
-| 타임아웃/에러 복구 | AGV 응답 없음 시 재시도 + 경보 로직 |
-| 물리 엔진 전환 | CAD+URDF 기반 Articulation (발표 이후) |
+| 타임아웃/에러 복구 강화 | 통신유실은 STM `Send_Event` 3회 반복으로 1차 대응됨 |
+| 물리 엔진 전환 | Step 8 Articulation — CAD+URDF 기반 (졸업 후) |
+| CAD 파일 적용 | STEP → USD 변환 후 `CAD_PATHS`에 경로 입력 (지금은 전부 None=기본 도형) |
 
 ---
 
 ## 의존성
 
-### 서버
+### 서버 (`server/requirements.txt`)
 
 ```
 paho-mqtt >= 1.6.0
-websockets >= 10.0
 pandas
 openpyxl
+websockets >= 10.0    # ← 레거시. WebSocket 핸들러는 archive로 갔고 지금은 안 쓴다
 ```
 
 ### warehouse_gui (Raspberry Pi)

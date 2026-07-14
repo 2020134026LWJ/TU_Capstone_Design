@@ -1658,7 +1658,7 @@ for node_id in ws_node_ids:
     node = nodes[node_id]
     build_workstation(stage, node_id, node["x"], node["y"])
 
-# 입고 스테이션 (shelf_config.json inbound_station — 현재 노드 48, 동쪽 밖 작업자)
+# 입고 스테이션 (shelf_config.json inbound_station — 현재 노드 47, 동쪽 밖 작업자)
 for node_str in shelf_cfg.get("inbound_station", {}):
     node = nodes[int(node_str)]
     build_inbound_station(stage, int(node_str), node["x"], node["y"])

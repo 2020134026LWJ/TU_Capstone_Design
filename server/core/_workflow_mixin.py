@@ -516,8 +516,9 @@ class WorkflowMixin:
             # 포워딩된 선반 재픽업 완료 → 원래 위치(home)로 반납
             shelf_id = current_st.shelf_id
             home_node = self.shelf_manager.get_shelf_home(shelf_id)
-            return_node = home_node or shelf_id
-            if home_node and not self.shelf_manager.is_position_available(home_node):
+            # 노드 0도 유효 → truthiness로 판단하면 0번 노드를 '없음'으로 오인한다
+            return_node = home_node if home_node is not None else shelf_id
+            if home_node is not None and not self.shelf_manager.is_position_available(home_node):
                 alt = self.shelf_manager.find_nearest_empty_position(
                     robot.current_node, self.path_planner
                 )

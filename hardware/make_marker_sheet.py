@@ -15,7 +15,7 @@ isaac_simulation/aruco_markers/aruco_{N}.png (DICT_4X4_250, ID=노드번호)를
   한 장이라도 돌아가 있으면 그 위를 지날 때 기준이 튀어 AGV가 헛돈다.
 
 사용:
-  python3 -m hardware.make_marker_sheet                 # 노드 1~48 전체
+  python3 -m hardware.make_marker_sheet                 # 노드 0~47 전체
   python3 -m hardware.make_marker_sheet 9 10 11 19      # 지정 노드만 (벤치 테스트용 카드)
   python3 -m hardware.make_marker_sheet --size 40       # 마커 한 변 40mm (camera.py도 같이 고칠 것)
 """
@@ -125,12 +125,13 @@ def build_sheet(node_ids, marker_mm: float, out_path: str) -> None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("nodes", nargs="*", type=int, help="노드 번호 (없으면 1~48 전체)")
+    p.add_argument("nodes", nargs="*", type=int, help="노드 번호 (없으면 0~47 전체)")
     p.add_argument("--size", type=float, default=25.0, help="마커 한 변 mm (기본 25)")
     p.add_argument("--out", default=OUT_PDF)
     args = p.parse_args()
 
-    node_ids = args.nodes if args.nodes else list(range(1, 49))
+    # 노드 = 마커 ID = 0~47 (0-based). 맵이 바뀌면 map.json을 보고 여기도 맞출 것.
+    node_ids = args.nodes if args.nodes else list(range(0, 48))
     build_sheet(node_ids, args.size, args.out)
 
 

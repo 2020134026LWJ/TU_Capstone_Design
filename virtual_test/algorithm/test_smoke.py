@@ -22,19 +22,19 @@ def test_robot_config_loaded(handler):
     agv2 = handler.robot_manager.get_robot(2)
     assert agv1 is not None
     assert agv2 is not None
-    assert agv1.home_node == 9
-    assert agv2.home_node == 33
-    assert agv1.current_node == 9
-    assert agv2.current_node == 33
+    assert agv1.home_node == 8      # W2
+    assert agv2.home_node == 32     # W1
+    assert agv1.current_node == 8
+    assert agv2.current_node == 32
     assert agv1.status == RobotStatus.IDLE
     assert agv2.status == RobotStatus.IDLE
 
 
 def test_corridors_initialized(handler):
-    """shelf_config.json 기준 W1(33), W2(9) corridor가 등록됨"""
+    """shelf_config.json 기준 W1(32), W2(8) corridor가 등록됨"""
     corridors = handler.staging_manager.corridors
-    assert 33 in corridors
-    assert 9 in corridors
+    assert 32 in corridors
+    assert 8 in corridors
 
 
 def test_mock_mqtt_records_publish(mock_mqtt):

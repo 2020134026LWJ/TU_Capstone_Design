@@ -368,7 +368,8 @@ class TaskManager:
                     task.workstation_id, self.path_planner
                 )
                 if return_node is None:
-                    return_node = home_node or shelf_id
+                    # 노드 0도 유효 → `home_node or shelf_id`는 0을 버린다
+                    return_node = home_node if home_node is not None else shelf_id
             next_st.target_node = return_node
             return {
                 "action": "shelf_done",

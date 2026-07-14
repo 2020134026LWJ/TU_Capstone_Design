@@ -260,8 +260,9 @@ def main():
     print(f"  서버(MQTT): {br.MQTT_HOST}:{br.MQTT_PORT}")
 
     robot = None
-    start_node = args.auto_walk or args.manual
-    if start_node:
+    # 노드 0이 유효해졌다(0-based) → `or` / truthiness로 판단하면 "0번에서 시작"을 못 준다
+    start_node = args.auto_walk if args.auto_walk is not None else args.manual
+    if start_node is not None:
         import os
         map_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),

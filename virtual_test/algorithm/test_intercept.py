@@ -67,10 +67,10 @@ def test_intercept_clears_is_exiting(handler, mock_mqtt):
     state도 FREE로 전환되어야 한다.
     """
     rid = 1
-    shelf_id = 19         # 1-1
-    src_ws = 9            # W2 (AGV-1 home)
-    dst_ws = 33           # W1
-    current_node = 17     # W2 gateway 부근, RETURN 진행 중
+    shelf_id = 18         # 1-1
+    src_ws = 8            # W2 (AGV-1 home)
+    dst_ws = 32           # W1
+    current_node = 16     # W2 gateway 부근, RETURN 진행 중
 
     _, return_st = _setup_returning_robot(handler, rid, shelf_id, src_ws, current_node)
 
@@ -116,17 +116,17 @@ def test_intercept_skipped_when_not_returning(handler):
     동일 선반을 운반 중이라도 DELIVERING_TO_WS 등의 상태에선 인터셉트 미발동.
     """
     rid = 1
-    shelf_id = 19
-    src_ws = 9
+    shelf_id = 18
+    src_ws = 8
 
-    _setup_returning_robot(handler, rid, shelf_id, src_ws, current_node=17)
+    _setup_returning_robot(handler, rid, shelf_id, src_ws, current_node=16)
     # 상태만 DELIVERING_TO_WS로 변경
     handler.robot_manager.set_robot_status(rid, RobotStatus.DELIVERING_TO_WS)
 
     item = next(iter(handler.shelf_manager.get_shelf(shelf_id).items))
     new_task = handler.task_manager.create_task(
         task_id="T_new",
-        workstation_id=33,
+        workstation_id=32,
         items=[item],
     )
     assert handler._try_intercept_returning_shelf(new_task) is False

@@ -11,7 +11,7 @@
 | MQTT `warehouse/order/start` 수신 | `mqtt_client.py` → `main.py` 구독 | `handle_message` | GUI에서 `start_order`(작업대 포함) 등 받음 → request_handler로 전달 |
 | 라우팅 | `request_handler.py` `handle_message` | type 별로 분기 | `start_order` → `_handle_start_order` (WorkflowMixin) |
 | 주문 분해 | `_workflow_mixin.py` `_handle_start_order` | 엑셀 DB 조회 → 선반 리스트 → 태스크 N개 생성 | `T{user}_{order}_{idx}` 형식 |
-| 선반 방문 순서 최적화 | `order_optimizer.py` `optimize_shelf_order` | Nearest Neighbor — AGV 홈 기준 가까운 선반부터 |
+| 선반 방문 순서 최적화 | `order_optimizer.py` `schedule_order()` → `optimize_order()` | Nearest Neighbor — 작업대 기준 가까운 선반부터. [주의] 핸들러에선 `self.task_scheduler`라는 **옛 이름의 속성**으로 잡혀 있다 (`OrderOptimizer` 인스턴스) |
 
 ## 2. 로봇 배정 → 첫 plan
 
@@ -87,9 +87,18 @@
 |------|-------------|
 | 쓸데없는 우회 (예: row 1 detour) | `_plan_and_publish_move` Point A → `should_stage` (ETA hold은 Phase 4.2에서 삭제됨) |
 | 회랑 안 풀림 | `check_position_release` / `handle_marker_trigger` / `release_corridor_without_trigger` |
-| AGV 멈춤 (cmd 안 옴) | `_send_next_command` (`_reserved_nodes` 충돌) / `_blocked_robots` 미해제 |
-| 두 로봇 동시 진입 | `_is_safe_to_resume` / `_in_flight_cmds` |
+| AGV 멈춤 (cmd 안 옴) | `_send_next_command` (노드 락 충돌) / `_is_blocked` 그대로 / `_try_dispatch_all` 미호출 |
+| A*가 길을 못 찾음 | `reservation` — 주인 없는 죽은 예약이 남았나 (수정 74 청소부) |
+| 두 로봇 동시 진입 | `_send_next_command` 락 획득 / `_in_flight_cmds` (ACK 전 상태는 stale) |
+| 마커 보고가 거부됨 | 인접성 검사(수정 62) / forward `target_node` 불일치(수정 64) — 로그에 사유가 찍힘 |
+| 안 켠 로봇에 태스크 감 | `_handle_presence` / `robot.online` (수정 75) |
 | Staging 후 직진 안 함 | `_staged_to_ws` → `staging_released_proceed` 분기 |
+
+> ⚠️ 옛 이름 주의 — 아래는 **더 이상 없다.** 문서·기억에서 나오면 낡은 것:
+> `_reserved_nodes` · `_blocked_robots` · `_is_safe_to_resume` · `_retry_blocked_robots` · `_find_yield_node`
+>
+> 지금: 미래 점유 = `ReservationService`(단일 진실) / blocked 추론 = `_is_blocked` /
+> 재시도 = `_try_dispatch_all` (ACK마다) / 교착 = `_detect_deadlock_cycle` → `_resolve_deadlock`
 
 ---
 
@@ -97,10 +106,10 @@
 
 | 용어 | 의미 |
 |------|------|
-| **gateway_node** | corridor 진입로 (W2=17, W1=25) — staging 후 corridor로 들어가는 입구 |
-| **staging_node** | 대기 노드 (W2=1, W1=41) — corridor 점유 중일 때 canonical 대기 위치 |
-| **trigger_node** | 퇴출 감지 ArUco (W2=10, W1=34) — 점유자가 통과하면 corridor 자동 해제 |
-| **corridor_area** | `{ws_node, gateway_node}` — 점유자가 이 안에 있으면 "진입 중" 판정 |
+| **gateway_node** | corridor 진입로 (W2=16, W1=24) — staging 후 corridor로 들어가는 입구 |
+| **staging_node** | 대기 노드 (W2=**0**, W1=40) — corridor 점유 중일 때 canonical 대기 위치. **0은 유효 노드** |
+| **trigger_node** | 퇴출 감지 ArUco (W2=9, W1=33) — 점유자가 통과하면 corridor 자동 해제 |
+| **corridor_area** | `{ws_node, gateway_node}` — 점유자가 이 안에 있으면 "진입 중" 판정 (W2={8,16}, W1={32,24}) |
 | **is_exiting** | corridor 점유자가 퇴출 시작했음 (mark_exiting 호출 후) — 위치 기반 해제 활성화 |
 | **is_forwarding** | 선반 들고 다른 WS로 이동 중 — staging 대신 gateway에서 대기 (멀리 우회 방지) |
 

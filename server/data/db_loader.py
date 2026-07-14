@@ -5,21 +5,22 @@
 - 물품명 → 선반 노드 매핑
 """
 
+import json
 import os
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
+
+# 선반 라벨↔노드 매핑의 단일 진실 = shelf_config.json.
+# (예전엔 이 파일에도 같은 표가 복붙돼 있어서, 맵을 바꾸면 두 곳을 고쳐야 했다.
+#  한쪽만 고치면 "물품은 있는데 엉뚱한 선반으로 간다"가 조용히 발생.)
+_DEFAULT_SHELF_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "shelf_config.json")
 
 
 class DBLoader:
     """엑셀 DB 로더"""
 
-    # 선반 번호 → 노드 ID 매핑 (6×8 그리드 기준)
-    SHELF_NODE_MAP = {
-        "1-1": 19, "1-2": 20, "1-3": 27, "1-4": 28,
-        "2-1": 22, "2-2": 23, "2-3": 30, "2-4": 31,
-    }
-
-    def __init__(self, db_dir: str):
+    def __init__(self, db_dir: str, shelf_config_file: Optional[str] = None):
         self.db_dir = db_dir
         self.inventory_file = os.path.join(db_dir, "데이터 베이스.xlsx")
         self.order_files = {
@@ -27,11 +28,37 @@ class DBLoader:
             2: os.path.join(db_dir, "사용자2주문.xlsx"),
         }
 
+        # 선반 라벨("1-1") → 노드 ID, 사용자 → 작업대 노드. 둘 다 JSON에서 읽는다 (하드코딩 금지).
+        self.shelf_node_map, self.user_to_ws_node = self._load_shelf_config(
+            shelf_config_file or _DEFAULT_SHELF_CONFIG
+        )
+
         # 캐시
         self._inventory_cache: Optional[pd.DataFrame] = None
         self._item_to_shelf: Dict[str, Tuple[str, int]] = {}  # 물품명 → (선반번호, 노드ID)
 
         self._load_inventory()
+
+    @staticmethod
+    def _load_shelf_config(path: str) -> Tuple[Dict[str, int], Dict[int, int]]:
+        """shelf_config.json에서 (선반 라벨→노드, 사용자→작업대 노드)를 읽는다.
+
+        맵/번호 체계가 바뀌어도 고칠 곳은 이 JSON 하나뿐이게 하기 위함.
+        """
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        shelf_node_map = {label: int(node) for label, node in cfg.get("shelf_node_map", {}).items()}
+        if not shelf_node_map:
+            raise ValueError(f"[DBLoader] shelf_node_map이 비어있음: {path}")
+
+        user_to_ws_node: Dict[int, int] = {}
+        for ws_node, info in cfg.get("workstations", {}).items():
+            user_id = info.get("user_id")
+            if user_id is not None:
+                user_to_ws_node[int(user_id)] = int(ws_node)
+
+        return shelf_node_map, user_to_ws_node
 
     def _load_inventory(self) -> None:
         """재고 DB 로드 및 물품→선반 매핑 생성"""
@@ -54,8 +81,8 @@ class DBLoader:
             parts = shelf_full.split("-")
             if len(parts) >= 2:
                 shelf_key = f"{parts[0]}-{parts[1]}"
-                node_id = self.SHELF_NODE_MAP.get(shelf_key)
-                if node_id:
+                node_id = self.shelf_node_map.get(shelf_key)
+                if node_id is not None:      # 노드 0도 유효한 노드다 (0-based 번호 체계)
                     self._item_to_shelf[item_name] = (shelf_key, node_id)
 
         print(f"[DBLoader] Loaded {len(self._item_to_shelf)} items from inventory")
@@ -95,8 +122,13 @@ class DBLoader:
             quantity = int(row["개수"])
             items.append({"name": item_name, "quantity": quantity})
 
-        # 작업대: 사용자1 → W1(33), 사용자2 → W2(9)
-        workstation_id = 33 if user_id == 1 else 9
+        # 작업대 폴백: 사용자 → 작업대 역산 (shelf_config.json의 user_id 필드 기준).
+        # [주의] 이건 '작업대' 필드가 없는 옛 메시지용 폴백일 뿐이다 (수정 53).
+        # 정상 경로에서는 GUI가 보낸 '작업대'를 서버가 그대로 쓴다 — 사용자는 자리를 옮길 수 있으니까.
+        workstation_id = self.user_to_ws_node.get(user_id)
+        if workstation_id is None:
+            print(f"[DBLoader] user {user_id}에 대응하는 작업대가 shelf_config.json에 없음")
+            return None
 
         return {
             "workstation_id": workstation_id,

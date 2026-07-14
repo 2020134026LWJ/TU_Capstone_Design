@@ -10,10 +10,18 @@
 3. TSP(외판원 문제) 근사 알고리즘으로 경로 최적화
 """
 
+import json
 import os
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from ..data.db_loader import DBLoader
+
+# 노드 좌표의 단일 진실 = map.json.
+# (예전엔 여기서 `(id-1) % 8` 로 격자를 역산했다 → 맵 크기나 번호 체계가 바뀌면 조용히 틀린다.
+#  map.json에 x/y가 이미 있으므로 그대로 읽는다.)
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_DEFAULT_MAP = os.path.join(_DATA_DIR, "map.json")
+_DEFAULT_SHELF_CONFIG = os.path.join(_DATA_DIR, "shelf_config.json")
 
 
 @dataclass
@@ -29,22 +37,35 @@ class ScheduledTask:
 class OrderOptimizer:
     """주문 최적화 — 물품 → 선반 방문 순서 결정 (Nearest Neighbor)"""
 
-    # 노드 좌표 (맵 기준, 6×8 그리드)
-    NODE_COORDS = {
-        # 그리드 노드 (1-48): col = (id-1)%8, row = (id-1)//8
-        **{i: ((i-1) % 8, (i-1) // 8) for i in range(1, 49)},
-    }
-
-    # 선반 노드 목록
-    SHELF_NODES = {19, 20, 22, 23, 27, 28, 30, 31}
-
-    def __init__(self, db_loader: DBLoader):
+    def __init__(self, db_loader: DBLoader, map_file: Optional[str] = None,
+                 shelf_config_file: Optional[str] = None):
         self.db_loader = db_loader
+        # 노드 좌표: map.json에서 그대로 읽는다 (격자 수식 역산 금지)
+        self.node_coords: Dict[int, Tuple[float, float]] = self._load_node_coords(
+            map_file or _DEFAULT_MAP
+        )
+        # 작업대 노드 → 라벨("W1") — 로그 출력용. 이것도 JSON이 출처.
+        self.ws_labels: Dict[int, str] = self._load_ws_labels(
+            shelf_config_file or _DEFAULT_SHELF_CONFIG
+        )
+
+    @staticmethod
+    def _load_node_coords(path: str) -> Dict[int, Tuple[float, float]]:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return {int(n["id"]): (float(n["x"]), float(n["y"])) for n in cfg["nodes"]}
+
+    @staticmethod
+    def _load_ws_labels(path: str) -> Dict[int, str]:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return {int(node): info.get("label", f"WS{node}")
+                for node, info in cfg.get("workstations", {}).items()}
 
     def _calc_distance(self, node1: int, node2: int) -> float:
         """두 노드 간 맨해튼 거리 계산"""
-        x1, y1 = self.NODE_COORDS.get(node1, (0, 0))
-        x2, y2 = self.NODE_COORDS.get(node2, (0, 0))
+        x1, y1 = self.node_coords[node1]
+        x2, y2 = self.node_coords[node2]
         return abs(x2 - x1) + abs(y2 - y1)
 
     def _group_items_by_shelf(self, items: List[str]) -> Dict[int, Dict]:
@@ -76,7 +97,7 @@ class OrderOptimizer:
     def optimize_order(
         self,
         items: List[str],
-        start_node: int = 33,
+        start_node: int,
         return_to_start: bool = True
     ) -> List[ScheduledTask]:
         """
@@ -84,7 +105,8 @@ class OrderOptimizer:
 
         Args:
             items: 피킹할 물품 목록
-            start_node: AGV 시작 노드 (기본: 33=W1)
+            start_node: AGV 시작 노드 (호출자가 반드시 지정 — 작업대 노드).
+                        기본값(옛 33=W1)을 두면 맵이 바뀔 때 조용히 틀린 곳을 기준으로 잡는다.
             return_to_start: 마지막에 시작점으로 복귀 여부
 
         Returns:
@@ -138,7 +160,7 @@ class OrderOptimizer:
     def optimize_order_by_distance(
         self,
         items: List[str],
-        start_node: int = 33
+        start_node: int
     ) -> List[ScheduledTask]:
         """
         단순 거리 기반 최적화 (시작점에서 가까운 순)
@@ -249,7 +271,7 @@ class OrderOptimizer:
         print(f"  주문 스케줄: 사용자 {schedule['user_id']}, 주문 {schedule['order_id']}")
         print("=" * 60)
         ws = schedule['workstation']
-        ws_label = {33: "W1", 9: "W2"}.get(ws, f"WS{ws}")  # W1=33, W2=9
+        ws_label = self.ws_labels.get(ws, f"WS{ws}")
         print(f"  작업대: {ws} ({ws_label})")
         print(f"  총 물품: {schedule['total_items']}개")
         print(f"  방문 선반: {schedule['total_shelves']}개")

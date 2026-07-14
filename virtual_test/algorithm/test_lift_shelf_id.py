@@ -24,11 +24,11 @@ def test_lift_up_publishes_target_shelf_id(handler, mock_mqtt):
     rid = 1
     robot = _prime(handler, rid)
     # lift_up 발행 시점엔 carrying_shelf가 이미 목표 선반으로 세팅돼 있음(픽업 직전)
-    robot.carrying_shelf = 27
+    robot.carrying_shelf = 26
     robot.command_queue = ["lift_up"]
 
     assert handler._send_next_command(rid) is True
-    assert mock_mqtt.lift_shelf_ids[-1] == (rid, "lift_up", 27), \
+    assert mock_mqtt.lift_shelf_ids[-1] == (rid, "lift_up", 26), \
         "lift_up 발행에 목표 shelf_id가 실리지 않음 (시뮬이 추측하게 됨)"
 
 
@@ -45,7 +45,7 @@ def test_lift_down_publishes_carried_shelf_id(handler, mock_mqtt):
 def test_non_lift_cmd_has_no_shelf_id(handler, mock_mqtt):
     rid = 1
     robot = _prime(handler, rid)
-    robot.carrying_shelf = 27
+    robot.carrying_shelf = 26
     # forward는 충돌체크가 있으니 turn으로 검증 (shelf_id 미부착)
     robot.command_queue = ["turn_left"]
 

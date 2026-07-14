@@ -102,15 +102,14 @@ class RobotManager:
 
             print(f"[RobotManager] Loaded {len(self.robots)} robots from {self.config.robot_config_file}")
 
-        except FileNotFoundError:
-            print(f"[RobotManager] Config not found, using defaults")
-            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=33, current_node=33)
-            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=34, current_node=34)
-
-        except Exception as e:
-            print(f"[RobotManager] Error loading config: {e}")
-            self.robots[1] = Robot(rid=1, name="AGV-1", home_node=33, current_node=33)
-            self.robots[2] = Robot(rid=2, name="AGV-2", home_node=34, current_node=34)
+        except (FileNotFoundError, ValueError, KeyError) as e:
+            # 폴백으로 홈 노드를 '추측'하지 않는다.
+            # 예전엔 여기서 home 33/34를 만들어 넣었는데, 실제 홈은 9/33이라 이미 틀린 값이었다.
+            # 설정을 못 읽으면 로봇이 엉뚱한 곳을 집으로 알고 도는 것보다 즉시 멈추는 게 안전하다.
+            raise RuntimeError(
+                f"[RobotManager] robot_config.json을 읽을 수 없음: "
+                f"{self.config.robot_config_file} ({e}). 홈 노드는 추측하지 않는다."
+            ) from e
 
     # ─── 조회 ───
 

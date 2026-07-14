@@ -66,8 +66,11 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # __file__ = server/core/request_handler.py → dirname 3번 = 프로젝트 루트
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         db_dir = os.path.join(project_root, "warehouse_gui_server")
-        self.db_loader = DBLoader(db_dir)
-        self.task_scheduler = OrderOptimizer(self.db_loader)
+        # 선반 라벨↔노드는 shelf_config.json, 노드 좌표는 map.json이 단일 진실 (하드코딩 금지)
+        self.db_loader = DBLoader(db_dir, shelf_config_file=config.shelf_config_file)
+        self.task_scheduler = OrderOptimizer(self.db_loader,
+                                             map_file=config.map_file,
+                                             shelf_config_file=config.shelf_config_file)
 
         # ─── 상태 변수 (mixin들이 self 통해 공유 접근) ───
 

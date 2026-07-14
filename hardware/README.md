@@ -3,6 +3,9 @@
 실물 AGV(STM32 + RPi) 코드. **Isaac Sim 전용 코드는 `isaac_simulation/`으로 분리**됨.
 역할 분담: **비전(카메라) = 주원이 / UART 다리(bridge) = 사용자**. 같은 라파 안에서 함수 호출로 엮고, MQTT는 라파↔서버(다른 머신)에만 쓴다.
 
+> **실물을 처음 붙이는 날이면 → [`INTEGRATION.md`](INTEGRATION.md)** (순서대로 따라가는 bring-up 절차서).
+> 이 README는 **레퍼런스**(구조·프로토콜·환경구축)다.
+
 ---
 
 ## 빠른 실행 (clone & run)
@@ -26,11 +29,11 @@ python3 -m hardware.rpi_main          # AGV_ID 환경변수로 자동
 
 ```
 hardware/
-├── rpi_main.py       ★ RPi 진입점 (camera + bridge 엮기, AGV_ID 해석)
-├── camera.py         ★ 실물 카메라 — 비전 전용 (주원이 opencv 비전 그대로, detect→id/x/y/yaw)
-├── bridge_rpi.py     ★ 실물 bridge — MQTT ↔ UART (주원이 STM ASCII 프로토콜 + 카메라 offset)
-├── config.py         ★ 배포 설정 한 곳 (MQTT_HOST / UART_* / CALIB_FILE / SHOW_PREVIEW)
-├── camera_preview.py ★ 초점 맞추기용 웹 프리뷰 (라파에 모니터 없어도 PC 브라우저로 봄)
+├── rpi_main.py       [내] RPi 진입점 (camera + bridge 엮기, AGV_ID 해석)
+├── camera.py         [내] 실물 카메라 — 비전 전용 (주원이 opencv 비전 그대로, detect→id/x/y/yaw)
+├── bridge_rpi.py     [내] 실물 bridge — MQTT ↔ UART (주원이 STM ASCII 프로토콜 + 카메라 offset)
+├── config.py         [내] 배포 설정 한 곳 (MQTT_HOST / UART_* / CALIB_FILE / SHOW_PREVIEW)
+├── camera_preview.py [내] 초점 맞추기용 웹 프리뷰 (라파에 모니터 없어도 PC 브라우저로 봄)
 ├── stm32/
 │   └── rpi_uart.c                      (주원이) STM UART 송수신 — 신호 3회 반복 반영본 (660a43e)
 ├── AGV_Control.zip                     (주원이) 실제 STM32F7 CubeIDE 펌웨어 (전체 프로젝트)
@@ -38,7 +41,7 @@ hardware/
 └── camera_calibration.pkl              (주원이) 카메라 캘리브레이션
 ```
 
-> ★ = 사용자 코드. Isaac 전용(`bridge_isaac.py`·`isaac_hw.py`·`IsaacCamera`)은 `isaac_simulation/`,
+> [내] = 사용자 코드. Isaac 전용(`bridge_isaac.py`·`isaac_hw.py`·`IsaacCamera`)은 `isaac_simulation/`,
 > stm32 임시 스켈레톤은 `archive/hardware_stm32_skeleton/`에.
 > `stm32/rpi_uart.c`는 주원이가 별도로 올린 최신 STM 소스(전체 프로젝트는 `AGV_Control.zip`).
 
@@ -68,7 +71,7 @@ bridge_rpi 송신 / 주원이 카메라 원본 / STM 파서, 셋이 byte 단위�
 - command 1자리(1~7, **0 = carrier/무명령**), x/y/yaw = (mm·deg)×10 정수 (STM이 /10 복원)
 - offset = camera가 `set_marker_offset()`으로 공급한 최신값
 - STM 파서 위치: cmd=buf[1], x=buf[3], y=buf[9], yaw=buf[15] / 프레임 `[0]=='<'`, `[20]=='>'`
-- ⚠️ offset 절댓값은 **±999.9(=±9999) 이내** 가정 (넘으면 6자리 → 21바이트 깨짐)
+- [주의] offset 절댓값은 **±999.9(=±9999) 이내** 가정 (넘으면 6자리 → 21바이트 깨짐)
 
 | forward | stop | lift_up | lift_down | turn_left | turn_right | turn_180 |
 |---|---|---|---|---|---|---|
@@ -85,7 +88,7 @@ bridge_rpi 송신 / 주원이 카메라 원본 / STM 파서, 셋이 byte 단위�
 
 ---
 
-## 통신 유실 대비 ✅
+## 통신 유실 대비 (해결됨)
 
 raw UART는 ACK/DONE이 1회 송신이라, **DONE 유실 → 멈춤 / ACK 유실 → 이중 실행** 위험.
 (MQTT는 TCP 위라 재전송 보장되어 무관 — UART만 안전망 없음)
@@ -146,7 +149,7 @@ SUBSYSTEM=="dma_heap", MODE="0666"
 EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
-# 6) ★ 파이썬 경로 연결 — 우분투 함정. 이거 안 하면 위를 다 해도 import 실패
+# 6) [중요] 파이썬 경로 연결 — 우분투 함정. 이거 안 하면 위를 다 해도 import 실패
 mkdir -p ~/.local/lib/python3.12/site-packages
 echo "/usr/local/lib/python3/dist-packages"                     >  ~/.local/lib/python3.12/site-packages/libcamera-local.pth
 echo "/usr/local/lib/aarch64-linux-gnu/python3.12/site-packages" >  ~/.local/lib/python3.12/site-packages/pykms-local.pth
@@ -163,7 +166,7 @@ echo "/usr/local/lib/aarch64-linux-gnu/python3.12/site-packages" >  ~/.local/lib
 
 ---
 
-## ★ 카메라 초점 맞추기 — 제일 먼저 할 것 (2026-07-12)
+## 카메라 초점 맞추기 — 제일 먼저 할 것 (2026-07-12)
 
 **초점이 안 맞으면 ArUco가 없는 마커를 지어낸다.** 흐린 영상 + `DICT_4X4_250`(4×4=16비트라
 ID 간 패턴 차이가 작음) 조합은 오검출의 온상이다. 실제로 겪은 사고:
@@ -188,7 +191,7 @@ http://<라파IP>:8000
 - 카메라를 독점하므로 `run_bench` / `rpi_main`과 **동시 실행 불가**
 
 > [주의] 수정 59의 "맵 밖 마커 무시" 필터는 오검출의 **약 80%만** 막는다.
-> `DICT_4X4_250`의 오검출은 ID 0~249에 흩어지는데 우리 유효 노드는 1~48이라,
+> `DICT_4X4_250`의 오검출은 ID 0~249에 흩어지는데 우리 유효 노드는 0~47이라,
 > **5번 중 1번은 유효 노드로 위장해 필터를 통과한다.** 위 사고의 37/3/4가 그 경우.
 > → 근본 처방은 `DICT_6X6_50`(ID 48개만 필요한데 250개짜리를 쓸 이유가 없다).
 >   마커 재인쇄가 필요하므로 바닥에 마커 깔 때 같이 할 것.
@@ -205,7 +208,7 @@ http://<라파IP>:8000
 # 라파 (repo 루트)
 python3 -m virtual_test.bench_camera.run_bench 1              # 미리보기 창 (ssh -X 로 노트북에 표시)
 python3 -m virtual_test.bench_camera.run_bench 1 --no-preview # 헤드리스
-python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 9   # PC 예행연습(가짜 로봇)
+python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 8   # PC 예행연습(가짜 로봇)
 
 # PC: 마커 시트 인쇄 (검은 사각형 25mm = camera.py marker_size)
 python3 -m hardware.make_marker_sheet 9 17 25 26 27
@@ -233,22 +236,31 @@ python3 -m virtual_test.software_in_the_loop.run_sil   # repo 루트에서
 
 | 항목 | 값 | 비고 |
 |---|---|---|
-| `MQTT_HOST` | `172.30.1.26` | PC 서버 IP (핫스팟). 네트워크 바뀌면 여기만 |
+| `MQTT_HOST` | `UB-Region5.local` | PC 서버 mDNS 이름 (IP 바뀌어도 자동 해석). IP 직접 쓰려면 여기 교체 |
 | `UART_PORT` / `UART_BAUD` | `/dev/ttyAMA10` / `115200` | 주원이 카메라와 동일 |
 | `UART_ENABLED` | `True` | 실물 전용 (SIL은 monkeypatch로 덮음) |
 | `CALIB_FILE` | (자동) | `hardware/camera_calibration.pkl`, cwd 무관 |
 | `SHOW_PREVIEW` | `True` | 헤드리스(디스플레이 없는) 라파면 `False` |
+| `UART_OFFSET_HZ` | `10` | STM offset 스트리밍 주기 상한 (수정 67). 카메라 fps와 UART 부하를 분리 — 카메라를 최적화해도 STM이 받는 패킷 수가 조용히 안 늘어난다 |
+| `HEADING_OFFSET` | `0` | 카메라 yaw → 서버 heading 변환 (수정 69). **실물 1회 실측** — `INTEGRATION.md` 6단계 |
 | **AGV_ID** | — | config 아님 → **라파별 `.bashrc` `export AGV_ID=1/2`** |
+
+**토픽 3종 추가**: `/agv/presence`(수정 75 — 접속/이탈, retained+LWT. 안 켠 로봇에 태스크 배정 금지) ·
+`/agv/pose`(수정 68 — **트윈 전용** 연속 자세 스트림, 서버는 구독 안 함)
 
 ---
 
 ## 남은 일 (HIL — 실물 붙여서)
 
-- **heading**: 마커 부착 방향 기준 보정상수 K 측정 (또는 IMU 출처 결정)
-- **turn 방향**: 서버 "turn_left" = AGV 실제 좌회전인지(handedness) 확인
-- **marker_id == node_id**: 바닥 ArUco를 노드 번호와 1:1 인쇄/배치
-- 카메라 실동작(주원이 하드 + calibration) / 2대 동시(rid별) / picamera2·opencv 설치
-- 통신유실 3회 반복 라이브 확인(거의 닫혔지만 실측)
+> 순서대로 따라갈 절차는 **[`INTEGRATION.md`](INTEGRATION.md)**. 여기는 목록만.
+
+- **turn 방향(handedness)**: 서버 `turn_left` = AGV 실제 좌회전인지. **벤치로는 구조적으로 검증 불가**
+  (가짜 로봇이 서버와 같은 회전 규약을 공유하므로) → 실물 전용. 반대면 부호 하나 뒤집기
+- **heading**: 배관은 완료(수정 69). `HEADING_OFFSET` 실측 → 서버 로그가 `차이 0°`면
+  `server/config.py: TRUST_CAMERA_HEADING = True`로 밸브만 열면 끝
+- **marker_id == node_id**: 바닥 ArUco를 노드 번호와 1:1 배치 (**전부 같은 방향으로**,
+  **시트는 낱장으로 잘라서** — 한 장에 여러 개면 옆칸이 같이 잡혀 로봇이 순간이동)
+- 2대 동시(rid별) / 통신유실 3회 반복 라이브 확인(거의 닫혔지만 실측)
 
 ---
 

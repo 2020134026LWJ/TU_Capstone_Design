@@ -1,18 +1,18 @@
 """
 Step 7 — 발표용 수동 제어 데모 (서버/MQTT 없이, 터미널로 노드 지정)
 
-노드 구조 (기존 33/34 off-grid 작업대 제거, 6×8=48노드 위에서부터 재번호):
-  y=4.5: [ 1  2  3  4  5  6  7  8]
-  y=3.5: [ 9 10 11 12 13 14 15 16]  ← W2=9  (AGV2 홈)
-  y=2.5: [17 18 19 20 21 22 23 24]   (선반: 19 20 22 23)
-  y=1.5: [25 26 27 28 29 30 31 32]   (선반: 27 28 30 31)
-  y=0.5: [33 34 35 36 37 38 39 40]  ← W1=33 (AGV1 홈)
-  y=-0.5:[41 42 43 44 45 46 47 48]
-  선반 노드: 19 20 22 23 27 28 30 31
+노드 구조 (6×8=48노드, 위에서부터 0-based 재번호 — 노드=마커 ID=0~47):
+  y=4.5: [ 0  1  2  3  4  5  6  7]
+  y=3.5: [ 8  9 10 11 12 13 14 15]  ← W2=8  (AGV1 홈)
+  y=2.5: [16 17 18 19 20 21 22 23]   (선반: 18 19 21 22)
+  y=1.5: [24 25 26 27 28 29 30 31]   (선반: 26 27 29 30)
+  y=0.5: [32 33 34 35 36 37 38 39]  ← W1=32 (AGV2 홈)
+  y=-0.5:[40 41 42 43 44 45 46 47]
+  선반 노드: 18 19 21 22 26 27 29 30
 
 터미널 명령어:
   1 [노드]        AGV1을 해당 노드로 이동  (예: 1 11)
-  2 [노드]        AGV2를 해당 노드로 이동  (예: 2 25)
+  2 [노드]        AGV2를 해당 노드로 이동  (예: 2 24)
   1 up / 1 down   AGV1 리프트 올리기/내리기
   2 up / 2 down   AGV2 리프트 올리기/내리기
   q               종료
@@ -79,22 +79,22 @@ ARUCO_DIR = os.path.join(_ROOT, "isaac_simulation", "aruco_markers")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 맵 데이터 (6×8=48 노드, 프로그래매틱 생성)
+# 맵 데이터 (6×8=48 노드, 0~47 — 선반/작업대/홈은 server/data JSON에서 로드)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # 노드 번호 규칙:  node_id = row_idx * 8 + col + 1  (위에서부터 순서대로)
 #
 #   row_idx | y 좌표 | 노드 범위
 #   --------+--------+----------
-#       0   |  4.5   |  1~ 8
-#       1   |  3.5   |  9~16   ← W2 (col=0 → node 9)
-#       2   |  2.5   | 17~24
-#       3   |  1.5   | 25~32
-#       4   |  0.5   | 33~40   ← W1 (col=0 → node 33)
-#       5   | -0.5   | 41~48
+#       0   |  4.5   |  0~ 7
+#       1   |  3.5   |  8~15   ← W2 (col=0 → node 8)
+#       2   |  2.5   | 16~23
+#       3   |  1.5   | 24~31
+#       4   |  0.5   | 32~39   ← W1 (col=0 → node 32)
+#       5   | -0.5   | 40~47
 #
-# 선반: y=2.5(row_idx=2) col=2,3,5,6 → 19,20,22,23
-#        y=1.5(row_idx=3) col=2,3,5,6 → 27,28,30,31
+# 선반: y=2.5(row_idx=2) col=2,3,5,6 → 18,19,21,22
+#        y=1.5(row_idx=3) col=2,3,5,6 → 26,27,29,30
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -102,25 +102,35 @@ ARUCO_DIR = os.path.join(_ROOT, "isaac_simulation", "aruco_markers")
 # ══════════════════════════════════════════════════════════════════════════════
 # _SHELF_SET : 선반이 놓일 노드 번호 집합. 여기 있는 노드에 선반 오브젝트가 생성됨.
 #              선반 위치를 바꾸고 싶으면 노드 번호를 교체.
-#              예) {19, 20} → 선반 2개만 배치
+#              예) {18, 19} → 선반 2개만 배치
 #
 # _WS_SET    : 작업대(컨베이어+작업자)가 배치될 노드 번호 집합.
-#              예) {9, 33} → 현재 W2=9, W1=33
+#              예) {8, 32} → 현재 W2=8, W1=32
 #
 # _AGV_HOMES : AGV가 시작할 홈 노드.  {AGV번호: 시작노드}
-#              예) {1: 33, 2: 9} → AGV1은 node33에서, AGV2는 node9에서 시작
+#              예) {1: 8, 2: 32} → robot_config.json 기준 (AGV1=W2, AGV2=W1)
 # ─────────────────────────────────────────────────────────────────────────────
 _ROW_Y      = [4.5, 3.5, 2.5, 1.5, 0.5, -0.5]  # row_idx 0~5 (위→아래, 수정 불필요)
-_SHELF_SET  = {19, 20, 22, 23, 27, 28, 30, 31}  # ← 선반 노드 목록
-_WS_SET     = {9, 33}                            # ← 작업대 노드 (W2=9, W1=33)
-_AGV_HOMES  = {1: 33, 2: 9}                      # ← AGV 시작 노드
+
+# 선반/작업대/홈 노드는 **서버와 같은 JSON**에서 읽는다 (하드코딩 금지 — 두 벌이 되면 어긋난다).
+_CFG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "server", "data")
+with open(os.path.join(_CFG_DIR, "map.json"), encoding="utf-8") as _f:
+    _MAP_CFG = json.load(_f)
+with open(os.path.join(_CFG_DIR, "robot_config.json"), encoding="utf-8") as _f:
+    _ROBOT_CFG = json.load(_f)
+
+_SHELF_SET  = set(_MAP_CFG["shelf_nodes"])                    # 선반 노드
+_WS_SET     = set(_MAP_CFG["workstation_nodes"])              # 작업대 노드
+_AGV_HOMES  = {int(rid): info["home_node"]                    # AGV 시작 노드
+               for rid, info in _ROBOT_CFG["robots"].items()}
 
 
 def _make_nodes() -> dict[int, dict]:
     nodes = {}
     for ri in range(6):
         for col in range(8):
-            nid = ri * 8 + col + 1
+            nid = ri * 8 + col          # 노드 = 마커 = 0~47 (0-based)
             x   = col + 0.5
             y   = _ROW_Y[ri]
             if nid in _SHELF_SET:
@@ -143,16 +153,16 @@ def _make_adjacency(nodes: dict) -> dict[int, list[int]]:
     # 수평 엣지 (같은 row_idx 안에서 col 증가)
     for ri in range(6):
         for col in range(7):
-            a = ri * 8 + col + 1
-            b = ri * 8 + col + 2
+            a = ri * 8 + col
+            b = ri * 8 + col + 1
             _add(a, b)
 
     # 수직 엣지 (row_idx 순서대로 인접, 0↔1↔2↔3↔4↔5)
     VERT_PAIRS = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
     for ri_lo, ri_hi in VERT_PAIRS:
         for col in range(8):
-            a = ri_lo * 8 + col + 1
-            b = ri_hi * 8 + col + 1
+            a = ri_lo * 8 + col
+            b = ri_hi * 8 + col
             _add(a, b)
 
     return adj
@@ -924,7 +934,7 @@ class ManualController:
             print(f"[Ctrl] AGV{rid} 이동 중 (목표: node {state['target']}). 완료 후 재시도."); return
 
         if shelf_node not in nodes:
-            print(f"[Ctrl] node {shelf_node} 없음 (유효 범위: 1~48)"); return
+            print(f"[Ctrl] node {shelf_node} 없음 (유효 범위: 0~47)"); return
 
         home_node = _AGV_HOMES[rid]
         seq = []
@@ -989,7 +999,7 @@ class ManualController:
             print(f"[Ctrl] AGV{rid} 이동 중 (목표: node {state['target']}). 완료 후 재시도."); return
 
         if target not in nodes:
-            print(f"[Ctrl] node {target} 없음 (유효 범위: 1~48)"); return
+            print(f"[Ctrl] node {target} 없음 (유효 범위: 0~47)"); return
 
         start = agv.current_node
         if start == target:
@@ -1103,13 +1113,13 @@ def _print_help():
   │  q              종료                          │
   ├──────────────────────────────────────────────┤
   │  노드 지도 (위에서부터 순서대로):               │
-  │   y=4.5:  1  2  3  4  5  6  7  8             │
-  │   y=3.5:  9 10 11 12 13 14 15 16  ← W2=9     │
-  │   y=2.5: 17 18[19 20]21[22 23]24             │
-  │   y=1.5: 25 26[27 28]29[30 31]32             │
-  │   y=0.5: 33 34 35 36 37 38 39 40  ← W1=33    │
-  │   y=-0.5:41 42 43 44 45 46 47 48             │
-  │   [ ] = 선반 노드: 19 20 22 23 27 28 30 31   │
+  │   y=4.5:  0  1  2  3  4  5  6  7             │
+  │   y=3.5:  8  9 10 11 12 13 14 15  ← W2=8     │
+  │   y=2.5: 16 17[18 19]20[21 22]23             │
+  │   y=1.5: 24 25[26 27]28[29 30]31             │
+  │   y=0.5: 32 33 34 35 36 37 38 39  ← W1=32    │
+  │   y=-0.5:40 41 42 43 44 45 46 47             │
+  │   [ ] = 선반 노드: 18 19 21 22 26 27 29 30   │
   └──────────────────────────────────────────────┘""")
 
 
@@ -1159,7 +1169,7 @@ def _terminal_input_thread(agvs_ref):
                     if parts[1] in ("up", "down"):
                         _cmd_queue.put(("lift", rid, parts[1]))
                     else:
-                        target = int(parts[1])   # 두 번째 숫자 = 목표 노드 (1~48)
+                        target = int(parts[1])   # 두 번째 숫자 = 목표 노드 (0~47)
                         if target in _SHELF_SET:
                             _cmd_queue.put(("pick", rid, target))  # 선반 노드 → 자동 피킹 시퀀스
                         else:

@@ -19,37 +19,37 @@ def _make_inflight_forward(handler, helpers, rid, start, goal, heading):
 def test_replan_deferred_while_inflight(handler, mock_mqtt, helpers):
     """in-flight forward 중 들어온 재계획은 보류되고 새 명령을 발행하지 않는다."""
     rid = 1
-    # 13(row2,col5) → 5(row1,col5): 북쪽 직선 forward 1개
-    _make_inflight_forward(handler, helpers, rid, start=13, goal=5, heading=0)
+    # 12(row2,col5) → 4(row1,col5): 북쪽 직선 forward 1개
+    _make_inflight_forward(handler, helpers, rid, start=12, goal=4, heading=0)
 
     q = handler.command_queues[rid]
     assert q.in_flight is not None and q.in_flight.cmd == "forward"
     n_before = len(mock_mqtt.cmds_for(rid))
 
     # 이동 중 재계획(preempt 흉내) — 다른 goal로
-    handler._plan_and_publish_move(rid, handler.robot_manager.get_robot(rid).current_node, 9)
+    handler._plan_and_publish_move(rid, handler.robot_manager.get_robot(rid).current_node, 8)
 
-    # 보류 등록 + 새 명령 발행 0 (stale 위치 13에서 계획하지 않음)
+    # 보류 등록 + 새 명령 발행 0 (stale 위치 12에서 계획하지 않음)
     assert rid in handler._pending_replan
-    assert handler._pending_replan[rid][0] == 9
+    assert handler._pending_replan[rid][0] == 8
     assert len(mock_mqtt.cmds_for(rid)) == n_before
 
 
 def test_pending_replan_flushes_at_marker(handler, mock_mqtt, helpers):
     """마커 도착으로 in_flight 해제 → 보류 재계획이 fresh 위치에서 실행된다."""
     rid = 1
-    _make_inflight_forward(handler, helpers, rid, start=13, goal=5, heading=0)
-    handler._plan_and_publish_move(rid, 13, 9)
+    _make_inflight_forward(handler, helpers, rid, start=12, goal=4, heading=0)
+    handler._plan_and_publish_move(rid, 12, 8)
     assert rid in handler._pending_replan
 
-    # AGV가 5 도착 보고 → ack + flush
-    helpers.step_marker(handler, rid, 5, heading=0)
+    # AGV가 4 도착 보고 → ack + flush
+    helpers.step_marker(handler, rid, 4, heading=0)
 
     robot = handler.robot_manager.get_robot(rid)
     assert rid not in handler._pending_replan          # flush됨
-    assert robot.current_node == 5                      # 위치 fresh
-    # 새 plan은 실제 도착 노드 5에서 출발 (옛 노드 13 중복 없음)
-    assert robot.planned_path and robot.planned_path[0] == 5
+    assert robot.current_node == 4                      # 위치 fresh
+    # 새 plan은 실제 도착 노드 4에서 출발 (옛 노드 12 중복 없음)
+    assert robot.planned_path and robot.planned_path[0] == 4
 
 
 def test_no_replan_when_idle_plans_immediately(handler, mock_mqtt, helpers):
