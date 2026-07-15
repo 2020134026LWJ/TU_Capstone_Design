@@ -45,6 +45,11 @@ from isaac_hw import IsaacMotors
 from bridge_isaac import Bridge
 from camera import IsaacCamera
 
+
+def _ts() -> str:
+    """콘솔 로그용 시각 프리픽스 [HH:MM:SS.mmm] — 서버 로그와 시각을 맞춰 통신 타이밍 비교."""
+    return time.strftime("%H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
+
 # ─── CAD 경로 설정 ────────────────────────────────────────────────────────────
 # None     = 기본 도형 사용 (현재)
 # 경로 지정 = USD 파일 로드 (CAD 파일 완성 후 여기만 변경)
@@ -706,7 +711,7 @@ class IsaacAGV:
             self.state = "MOVING"
             if TWIN_MODE:
                 self._start_twin_pacing()
-            print(f"[AGV {self.rid}] <- forward → node {target}")
+            print(f"[{_ts()}][AGV {self.rid}] <- forward → node {target}")
 
         elif cmd == "turn_left":
             self._current_turn_cmd = cmd
@@ -715,7 +720,7 @@ class IsaacAGV:
             self.state = "TURNING"
             if TWIN_MODE:
                 self._start_twin_turn_pacing()
-            print(f"[AGV {self.rid}] <- turn_left")
+            print(f"[{_ts()}][AGV {self.rid}] <- turn_left")
 
         elif cmd == "turn_right":
             self._current_turn_cmd = cmd
@@ -724,7 +729,7 @@ class IsaacAGV:
             self.state = "TURNING"
             if TWIN_MODE:
                 self._start_twin_turn_pacing()
-            print(f"[AGV {self.rid}] <- turn_right")
+            print(f"[{_ts()}][AGV {self.rid}] <- turn_right")
 
         elif cmd == "turn_180":
             self._current_turn_cmd = cmd
@@ -733,7 +738,7 @@ class IsaacAGV:
             self.state = "TURNING"
             if TWIN_MODE:
                 self._start_twin_turn_pacing()
-            print(f"[AGV {self.rid}] <- turn_180")
+            print(f"[{_ts()}][AGV {self.rid}] <- turn_180")
 
         elif cmd == "lift_up":
             # 약점 3: 서버가 지정한 선반을 직접 든다 (좌표 추측 금지).
@@ -759,14 +764,14 @@ class IsaacAGV:
             q_agv   = self._heading_quat(self.heading)
             q_inv   = Gf.Quatf(q_agv.GetReal(), -q_agv.GetImaginary())
             self.shelf_offset = q_inv * q_shelf
-            print(f"[AGV {self.rid}] <- lift_up → shelf {picked}")
+            print(f"[{_ts()}][AGV {self.rid}] <- lift_up → shelf {picked}")
 
         elif cmd == "lift_down":
             self.lift_target_z = self.LIFT_PLATE_Z
             self.lift_state    = "LOWERING"
             if TWIN_MODE:
                 self._start_twin_lift_pacing()
-            print(f"[AGV {self.rid}] <- lift_down → shelf {self.carrying_shelf}")
+            print(f"[{_ts()}][AGV {self.rid}] <- lift_down → shelf {self.carrying_shelf}")
 
     def _find_forward_target(self) -> int | None:
         """현재 heading 방향 인접 노드 탐색 (adjacency 그래프 기반)"""
@@ -897,7 +902,7 @@ class IsaacAGV:
 
                 self.current_node = self._moving_to_node
                 self.state        = "IDLE"
-                print(f"[AGV {self.rid}] Reached node {self.current_node}")
+                print(f"[{_ts()}][AGV {self.rid}] Reached node {self.current_node}")
                 # 다음 명령은 ArUco 마커 감지 → /agv/marker → 서버가 결정
             else:
                 # 직진 + 작은 각도 보정 (Webots Navigator 와 동일 방식)

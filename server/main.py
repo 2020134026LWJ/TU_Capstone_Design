@@ -57,7 +57,7 @@ import sys       # 인터럽트 시 종료 코드 반환
 # ─── 의존 모듈 (의존 방향: main → 각 매니저/플래너/통신, 한쪽) ───
 from .config import Config
 from .planning.path_planner import PathPlanner
-from .comm.mqtt_client import MQTTClient
+from .comm.mqtt_client import MQTTClient, _ts  # _ts: 통신 로그 타임스탬프 (단일 정의)
 from .managers.robot import RobotManager, RobotStatus
 from .managers.shelf import ShelfManager
 from .managers.staging import StagingManager
@@ -200,19 +200,19 @@ class AGVServer:
         rid = data.get("rid")
         marker_id = data.get("marker_id")
         # result.action 예: en_route / pending_replan_flushed / 도착 처리 결과
-        print(f"[AGVServer] Marker: AGV-{rid} at node {marker_id} → {result.get('action', '?')}")
+        print(f"[{_ts()}][AGVServer] Marker: AGV-{rid} at node {marker_id} → {result.get('action', '?')}")
 
     def _handle_mqtt_cmd_ack(self, data):
         """AGV turn/lift 완료 보고 → request_handler 라우팅 (MarkerMixin._handle_cmd_ack)."""
         data["type"] = "cmd_ack"
         result = self.request_handler.handle_message(json.dumps(data))
-        print(f"[AGVServer] cmd_ack: AGV-{data.get('rid')} {data.get('cmd')} → {result.get('action', '?')}")
+        print(f"[{_ts()}][AGVServer] cmd_ack: AGV-{data.get('rid')} {data.get('cmd')} → {result.get('action', '?')}")
 
     def _handle_mqtt_presence(self, data):
         """AGV 접속/이탈 → request_handler 라우팅 (MarkerMixin._handle_presence)."""
         data["type"] = "presence"
         result = self.request_handler.handle_message(json.dumps(data))
-        print(f"[AGVServer] presence: AGV-{data.get('rid')} → {result.get('action', '?')}")
+        print(f"[{_ts()}][AGVServer] presence: AGV-{data.get('rid')} → {result.get('action', '?')}")
 
     def _handle_mqtt_gui(self, data):
         """GUI발 메시지(start_order/shelf_complete/order_complete) → 라우팅 (WorkflowMixin)."""
@@ -220,7 +220,7 @@ class AGVServer:
         result = self.request_handler.handle_message(json.dumps(data))
         msg_type = data.get("type", "?")
         status = result.get("action", result.get("success", "?"))
-        print(f"[AGVServer] GUI MQTT ({msg_type}) → {status}")
+        print(f"[{_ts()}][AGVServer] GUI MQTT ({msg_type}) → {status}")
 
     async def stop(self):
         """서버 정지 — MQTT 정리 + 진단 카운터 출력."""

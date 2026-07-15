@@ -40,6 +40,7 @@ self 상태 접근:
 import json
 from typing import Any, Dict, List, Optional, Set
 
+from ..comm.mqtt_client import _ts
 from ..managers.robot import RobotStatus
 from ..managers.shelf import ShelfStatus
 from ..managers.task import SubTaskType, TaskStatus
@@ -418,6 +419,8 @@ class WorkflowMixin:
             json.dumps({"작업대": ws_id, "사용자ID": user_id, "선반번호": shelf_label},
                        ensure_ascii=False)
         )
+        print(f"[{_ts()}][AGVServer] → GUI shelf_arrived: 작업대 {ws_id}, "
+              f"선반 {shelf_label} (AGV-{robot.rid})")
 
     def _process_arrival(self, robot, task, current_st) -> Dict[str, Any]:
         """로봇 도착 후 서브태스크 유형에 따라 처리"""

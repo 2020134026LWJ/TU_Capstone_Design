@@ -20,6 +20,11 @@ except ImportError:
 from ..config import Config
 
 
+def _ts() -> str:
+    """발행/통신 로그용 시각 프리픽스 [HH:MM:SS.mmm] — 서버 로그 타임라인 통일."""
+    return time.strftime("%H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
+
+
 class MQTTClient:
     """MQTT 발행/구독"""
 
@@ -130,7 +135,9 @@ class MQTTClient:
 
         try:
             self.client.publish(self.config.mqtt_topic_cmd, json.dumps(payload), qos=0)
-            print(f"[MQTTClient] AGV {rid} <- {cmd}")
+            _extra = (f" → node {target_node}" if target_node is not None
+                      else f" (shelf {shelf_id})" if shelf_id is not None else "")
+            print(f"[{_ts()}][MQTTClient] → AGV {rid}: {cmd}{_extra}")
             return True
         except Exception as e:
             print(f"[MQTTClient] Publish failed: {e}")

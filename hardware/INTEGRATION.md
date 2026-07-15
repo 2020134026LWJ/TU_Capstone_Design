@@ -120,6 +120,31 @@ mosquitto_sub -h UB-Region5.local -t '/agv/#' -v
 
 ---
 
+## 6.5 로그 저장 & 시각순 병합 (통신 타이밍 디버깅)
+
+서버·트윈 로그 앞엔 `[HH:MM:SS.mmm]` 시각이 붙는다(통신 이벤트만). 두 콘솔을 파일로 남겨
+시각순으로 합치면 **"서버가 명령 낸 시각 → 트윈이 실행한 시각"** 지연을 한 타임라인에서 볼 수 있다.
+
+```bash
+# 1) 각 터미널에서 화면+파일 동시 기록 (tee)
+python3 -m server.main                    2>&1 | tee server.log
+TWIN=1 ./isaac_simulation/run_twin.sh 3.0 2>&1 | tee twin.log
+
+# 2) 끝난 뒤 시각순 병합 — 타임스탬프 줄만 골라 정렬 (0채움이라 글자순=시각순)
+cat server.log twin.log | grep -E '^\[[0-9]{2}:[0-9]{2}:' | sort
+```
+
+읽는 법: `[AGVServer] ...`=서버 수신 / `[MQTTClient] → AGV n:`=서버가 AGV로 발행 /
+`[AGVServer] → GUI shelf_arrived`=서버가 GUI로 발행(파란불) / `[AGV n] <- ...`·`Reached node`=트윈 실행.
+- 서버 발행 → 트윈 실행 지연이 **수십~수백 ms** = 정상(MQTT). **초 단위로 벌어지면** 브로커/페이싱 의심.
+- 어떤 cmd에 **트윈 대응 줄이 아예 없으면** = 명령 유실(`client_id` 충돌 수정 63 / 구독 누락) 의심.
+- GUI 파란불이 안 켜졌을 때: `→ GUI shelf_arrived`가 로그에 **찍혔나**로 서버(안 보냄) vs GUI(받고 안 켬) 갈라냄.
+
+> [주의] 시각순 정렬은 **한 PC에서 서버·트윈을 같이 돌릴 때**만 정확(시계 공유). 실물 라파 로그를
+> PC 서버 로그와 섞을 땐 두 기기 NTP가 안 맞으면 오차 → 기기 시계부터 맞출 것.
+
+---
+
 ## 7. HEADING_OFFSET 밸브 (마지막)
 
 지금 서버는 카메라 heading을 안 믿고(`server/config.py: TRUST_CAMERA_HEADING=False`) 로그만 찍는다. **남은 건 로그 읽기.**
