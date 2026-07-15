@@ -1,8 +1,8 @@
 """
-실물 카메라 — 주원이 opencv_arucomarker_detection_v4.py 비전 로직 그대로 (UART/콘솔입력만 제거)
+실물 카메라 — 주원이 opencv_aruco_marker_detection.py 비전 로직 그대로 (UART/콘솔입력만 제거)
 TU Capstone Design - AGV 물류 피킹 시스템
 
-주원이 원본(opencv_arucomarker_detection_v4.py)의 '비전 부분'을 그대로 옮기고,
+주원이 원본(opencv_aruco_marker_detection.py)의 '비전 부분'을 그대로 옮기고,
 UART 송수신(serial)·콘솔 input·command/event 처리만 제거 → bridge_rpi가 담당.
 주석도 주원이 원본 그대로 유지 (알아보기 쉽게).
 
@@ -74,7 +74,7 @@ class RpiCamera:
         self.detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
 
         # 마커 크기 및 3D 좌표 설정 (mm 단위)
-        self.marker_size = 25
+        self.marker_size = 15
         # 마커 중심을 원점으로 하고, 네 꼭짓점의 위치를 정의
         half = self.marker_size / 2
         self.marker_3d_edges = np.array([
@@ -94,6 +94,15 @@ class RpiCamera:
 
         # 카메라 초기화 대기
         time.sleep(2)
+
+        # ── (선택) undistort 최적화 — 주원이 신규 코드 그대로 ─────────────────
+        # 매 프레임 cv2.undistort()를 호출하면 왜곡 맵을 매번 다시 계산해서 느리다.
+        # 맵을 한 번만 만들어 두고 remap을 쓰면 루프 속도가 올라가 PID 피드백 주기가 빨라진다.
+        frame0 = self.picam2.capture_array()
+        h, w = frame0.shape[:2]
+        self.map1, self.map2 = cv2.initUndistortRectifyMap(
+            self.camera_matrix, self.dist_coeffs, None, self.camera_matrix, (w, h), cv2.CV_16SC2
+        )
 
         # 미리보기 창 (헤드리스면 show_preview=False)
         self.show_preview = show_preview
@@ -115,8 +124,8 @@ class RpiCamera:
         # BGR를 RGB로 변환
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # 이미지 왜곡 보정 (캘리브레이션 적용)
-        frame_undistorted = cv2.undistort(frame_rgb, self.camera_matrix, self.dist_coeffs)
+        # 이미지 왜곡 보정 (미리 만든 맵으로 remap → undistort보다 빠름, 주원이 신규 코드 그대로)
+        frame_undistorted = cv2.remap(frame_rgb, self.map1, self.map2, cv2.INTER_LINEAR)
 
         # 마커 검출
         corners, ids, rejected = self.detector.detectMarkers(frame_undistorted)

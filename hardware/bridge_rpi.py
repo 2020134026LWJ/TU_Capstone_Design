@@ -29,7 +29,7 @@ UART 프로토콜 (RPi ↔ STM32, 주원이 rpi_uart.c / main.c 기준):
   (3) 통신 유실 복구 : DONE 누락 시 timeout 주체(bridge/서버) + STM 상태조회 가능한가
 
 [결정됨 — 카메라(비전)는 주원이 영역, bridge는 받기만]
-  - UART 포트 = /dev/ttyAMA10 (주원이 카메라 코드와 동일)
+  - UART 포트 = /dev/ttyAMA0 (주원이 카메라 코드와 동일)
   - 카메라가 (marker_id, x, y, yaw)를 계산 → set_marker_offset()/publish_marker()로 넘김
   - heading/yaw 변환·ArUco 비전 로직은 주원이 카메라가 담당 (bridge는 안 건드림)
 """

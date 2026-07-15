@@ -1,4 +1,4 @@
-"""카메라 웹 프리뷰 — 라파에서 실행, PC 브라우저에서 본다.
+"""카메라 웹 프리뷰 (단독 셋업 도구) — 라파에서 실행, PC 브라우저에서 본다.
 
 라파에 모니터가 없어도 카메라 화면을 볼 수 있다. MJPEG로 스트리밍하므로
 브라우저만 있으면 된다 (X11 포워딩 불필요).
@@ -25,106 +25,32 @@
   (회전의자에 앉아 오른쪽으로 돌면 방이 왼쪽으로 도는 것처럼 보이는 것과 같다)
 
 [주의] 카메라를 독점한다. run_bench / rpi_main 과 동시 실행 불가.
+       rpi_main 돌리는 중에 화면을 보려면 → `python3 -m hardware.rpi_main --preview`
+       (그쪽은 카메라를 하나만 열고 같은 MJPEG 서버로 스트리밍한다).
 """
 
-import io
-import socketserver
-import threading
 import time
-from http import server
-from threading import Condition
 
 import cv2
-import numpy as np
 
 from hardware.camera import RpiCamera
 from hardware.config import CALIB_FILE
+from hardware.mjpeg_preview import PORT, push_frame, start_preview_server
 
-PORT = 8000
-
-PAGE = """<!DOCTYPE html>
-<html><head><title>AGV 카메라</title>
-<style>
- body { background:#111; color:#eee; font-family:sans-serif; text-align:center; margin:0; padding:16px; }
- img { width:80vw; max-width:960px; border:1px solid #444; }
- p  { color:#aaa; max-width:960px; margin:12px auto; line-height:1.6; }
- b  { color:#fff; }
-</style></head>
-<body>
-<h2>AGV 카메라</h2>
-<img src="stream.mjpg">
-<p><b>초점</b>: sharpness 가 <b>최대</b>가 되도록 렌즈를 돌리세요.<br>
-<b>yaw 측정</b>: 마커를 <b>책상에 놓고 카메라를 돌리세요</b> (카드를 돌리면 부호가 반대로 나옵니다).</p>
-</body></html>"""
-
-
-class StreamingOutput(io.BufferedIOBase):
-    def __init__(self):
-        self.frame = None
-        self.condition = Condition()
-
-    def write(self, buf):
-        with self.condition:
-            self.frame = buf
-            self.condition.notify_all()
-
-
-class StreamingHandler(server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(301)
-            self.send_header('Location', '/index.html')
-            self.end_headers()
-        elif self.path == '/index.html':
-            content = PAGE.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
-            self.send_header('Content-Length', len(content))
-            self.end_headers()
-            self.wfile.write(content)
-        elif self.path == '/stream.mjpg':
-            self.send_response(200)
-            self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
-            self.end_headers()
-            try:
-                while True:
-                    with output.condition:
-                        output.condition.wait()
-                        frame = output.frame
-                    self.wfile.write(b'--FRAME\r\n')
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.send_header('Content-Length', len(frame))
-                    self.end_headers()
-                    self.wfile.write(frame)
-                    self.wfile.write(b'\r\n')
-            except Exception:
-                pass  # 브라우저가 닫힘 — 정상
-        else:
-            self.send_error(404)
-            self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-
-class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-
-output = StreamingOutput()
+_NOTE = ("<b>초점</b>: sharpness 가 <b>최대</b>가 되도록 렌즈를 돌리세요.<br>"
+         "<b>yaw 측정</b>: 마커를 <b>책상에 놓고 카메라를 돌리세요</b> "
+         "(카드를 돌리면 부호가 반대로 나옵니다).")
 
 
 def main():
     # 실제 운용과 같은 검출기 — 화면의 숫자 = 서버/STM으로 가는 숫자
     camera = RpiCamera(CALIB_FILE, show_preview=False, keep_frame=True)
 
-    srv = StreamingServer(('0.0.0.0', PORT), StreamingHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    output = start_preview_server(PORT, note=_NOTE)
 
     import subprocess
-    ip = subprocess.run(['hostname', '-I'], capture_output=True, text=True).stdout.split()[0]
+    ip = subprocess.run(['hostname', '-I'], capture_output=True, text=True).stdout.split()
+    ip = ip[0] if ip else '<라파IP>'
     print(f"\n  브라우저에서 열기 →  http://{ip}:{PORT}\n")
     print("  [초점]   sharpness 가 최대가 되도록 렌즈를 돌리세요.")
     print("  [yaw]    ★마커는 책상에 놓고 **카메라를 돌리세요** (카드를 돌리면 부호가 반대).")
@@ -162,9 +88,7 @@ def main():
                           f"sharp {sharpness:5.0f}")
                     last_log = time.time()
 
-            ok, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if ok:
-                output.write(jpg.tobytes())
+            push_frame(output, frame)
             time.sleep(0.03)
     except KeyboardInterrupt:
         print("\n종료")

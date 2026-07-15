@@ -143,6 +143,15 @@ TWIN_EDGE_MAX = float(os.environ.get("TWIN_EDGE_MAX", "8.0"))
 # 마커가 시야에서 사라지면 pose가 끊긴다 → 이 시간을 넘으면 다시 시간 보간으로 되돌아간다.
 POSE_STALE_SECS = 0.5
 
+# 수정 77 — 트윈 회전 heading을 '절대값'으로 (HEADING_OFFSET 확정 후).
+#
+# 델타(변화량) 방식은 HEADING_OFFSET을 못 재던 시절의 우회였다. 북향 마커로 offset이
+# 확정(=0)되면 카메라 yaw를 곧바로 절대 방위로 쓸 수 있고, 그게 더 정확하다 — 기준(anchor)
+# 없이 매 프레임 실물 방위를 그대로 반영하므로 회전을 거듭해도 오차가 누적되지 않는다.
+# 되돌릴 수 있게 밸브(env)로 둔다: TWIN_ABS_HEADING=0 이면 옛 델타 방식.
+POSE_HEADING_OFFSET = float(os.environ.get("HEADING_OFFSET", "0"))    # 카메라 yaw→서버 heading 상수 (북향 마커 → 0)
+TWIN_ABS_HEADING    = os.environ.get("TWIN_ABS_HEADING", "1") == "1"  # 1=절대(기본) / 0=델타(구방식)
+
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
 SHELF_PATH = os.path.join(_ROOT, "server", "data", "shelf_config.json")
@@ -378,15 +387,18 @@ class IsaacAGV:
     def _apply_pose_heading(self) -> bool:
         """실물 카메라 yaw로 heading을 **직접** 갱신. 적용했으면 True.
 
-        **회전 중에만 쓴다.** 직진 중엔 로봇이 돌지 않으므로 yaw 변화는 노이즈일 뿐이고,
-        그걸 heading에 먹이면 트윈이 슬금슬금 틀어진다.
+        **회전 중에만 쓴다.** 직진 중엔 마커가 시야를 벗어나 pose가 끊기고(POSE_STALE),
+        그때는 시간 보간으로 폴백한다.
 
-        yaw는 '마커 대비 상대 각도'라 절대값은 못 믿는다(HEADING_OFFSET 미확정).
-        하지만 **변화량은 믿을 수 있다** — 같은 마커를 보는 동안의 yaw 변화 = 실제 회전량.
-        그래서 마커가 바뀌면 기준을 다시 잡는다.
+        두 방식(TWIN_ABS_HEADING로 선택):
+          · 절대(기본, 수정 77): 카메라 yaw → 서버 heading((yaw+OFFSET)%360) → Isaac 라디안.
+            HEADING_OFFSET 확정(북향 마커 → 0) 후엔 이게 정답 — 매 프레임 실물의 절대 방위를
+            그대로 반영하므로 기준(anchor)도, 오차 누적도 없다.
+          · 델타(구방식): HEADING_OFFSET 미확정 시절의 우회. 마커 대비 yaw '변화량'만 신뢰하고
+            (offset이 빼기에서 상쇄됨) 마커가 바뀌면 기준을 다시 잡았다. 되돌릴 수 있게 남겨둔다.
 
-        부호: 실측(2026-07-12) **카메라가 시계방향으로 돌면 yaw 증가**.
-        트윈 내부 heading은 수학 규약(0=East, 반시계 +)이라 **시계방향 = heading 감소** → 뺀다.
+        부호: 실측(2026-07-12) **카메라 시계방향 = yaw 증가**. Isaac heading은 수학 규약
+        (0=East, 반시계 +) — 절대는 server_deg_to_rad가, 델타는 뺄셈이 이 부호차를 흡수한다.
         """
         if not TWIN_MODE or self._pose_latest is None:
             return False
@@ -394,21 +406,25 @@ class IsaacAGV:
         if time.time() - ts > POSE_STALE_SECS:
             return False                    # 마커가 시야에서 사라짐 → 시간 보간으로 폴백
 
-        if self._pose_ref is None or self._pose_ref[0] != mid:
-            self._pose_ref = (mid, yaw, self.heading)   # 마커 바뀜 → 기준 재설정
-            return False
-
-        _, yaw_ref, head_ref = self._pose_ref
-        d_cw = np.radians((yaw - yaw_ref + 180.0) % 360.0 - 180.0)   # 시계방향 회전량
-        self.heading = _normalize_angle(head_ref - d_cw)
+        if TWIN_ABS_HEADING:
+            # 절대: 실물 방위를 직접 반영. 상태(anchor) 없음 → 구조적으로 누적 오차 0.
+            self.heading = server_deg_to_rad((yaw + POSE_HEADING_OFFSET) % 360.0)
+            driver = "절대"
+        else:
+            # 델타: 마커 첫 관측을 기준으로 그 뒤 yaw 변화량만큼만 돌린다.
+            if self._pose_ref is None or self._pose_ref[0] != mid:
+                self._pose_ref = (mid, yaw, self.heading)   # 마커 바뀜 → 기준 재설정
+                return False
+            _, yaw_ref, head_ref = self._pose_ref
+            d_cw = np.radians((yaw - yaw_ref + 180.0) % 360.0 - 180.0)   # 시계방향 회전량
+            self.heading = _normalize_angle(head_ref - d_cw)
+            driver = "델타"
 
         # 추종하고 있다는 걸 눈으로 확인할 창구 (0.5초에 한 번).
-        # 없으면 "시간 보간으로 돌았는지 실물을 따라갔는지" 구분할 방법이 없다.
         now = time.time()
         if now - self._pose_log_t > 0.5:
             self._pose_log_t = now
-            print(f"[AGV {self.rid}] (트윈) 회전 추종 — 실물 yaw {yaw:.0f}° "
-                  f"(기준 {yaw_ref:.0f}°, 시계 {np.degrees(d_cw):+.0f}°) "
+            print(f"[AGV {self.rid}] (트윈) 회전 추종[{driver}] — 실물 yaw {yaw:.0f}° "
                   f"→ heading {np.degrees(self.heading) % 360:.0f}°")
         return True
 
