@@ -63,6 +63,10 @@ class MarkerMixin:
 
         if self.robot_manager.set_presence(rid, False):
             robot = self.robot_manager.get_robot(rid)
+            # 수정 85: 끊긴 로봇은 더 이상 회전하지 않는다(ack가 영영 안 옴) → 회전 footprint
+            # 해제. 안 풀면 이웃칸이 영구 잠겨 다른 로봇 진입이 막힌다. 몸(current_node)은
+            # 장애물로 그대로 유지되므로 안전.
+            self.reservation.release_turn_footprint(rid)
             print(f"[RequestHandler] Robot {rid} OFFLINE — 연결 끊김 "
                   f"(node {robot.current_node}, status {robot.status.value}). "
                   f"신규 배정 중단. 몸은 그 자리에 있으므로 장애물로는 유지한다.")
@@ -369,9 +373,11 @@ class MarkerMixin:
 
         # REFACTOR E 3.2: turn/lift의 ACK = cmd_ack. 큐 ack가 in_flight 해제.
         # I4 일치성: in_flight cmd와 ACK cmd 일치해야 정상.
+        was_in_place = False   # 수정 82: 제자리 유지(hold) lift 여부 (ack 전에 캡처)
         queue = self.command_queues.get(rid)
         if queue is not None and queue.in_flight is not None:
             in_flight = queue.in_flight
+            was_in_place = in_flight.in_place
             if in_flight.cmd != cmd:
                 print(f"[REFACTOR E] WARN cmd_ack mismatch: rid={rid}, "
                       f"in_flight.cmd={in_flight.cmd}, ack.cmd={cmd}")
@@ -381,15 +387,9 @@ class MarkerMixin:
         # (return-home 등 태스크 없는 이동 중에도 heading을 정확히 유지해야 함)
         if cmd in ("turn_left", "turn_right", "turn_180"):
             self.robot_manager.apply_turn(robot.rid, cmd)
-
-            # 수정 58: 작업대 피킹 방향 회전 완료 → 보류했던 PICK 노드 진입을 마저 실행
-            orienting = self._ws_orienting.get(robot.rid)
-            if orienting is not None:
-                shelf_id, ws_node = orienting
-                self._ws_orienting.pop(robot.rid, None)
-                self._enter_wait_picking(robot, shelf_id, ws_node)
-                return {"type": "cmd_ack_response", "success": True,
-                        "action": "ws_oriented_wait_picking"}
+            # 수정 85: 회전 완료 → footprint(이웃칸 일시 점유) 해제. 대기하던 진입 로봇은
+            # 바로 아래 _try_dispatch_all()에서 재시도되어 풀린다.
+            self.reservation.release_turn_footprint(robot.rid)
 
             # B-selfguard flush: turn 완료로 heading fresh → 보류 재계획 우선 실행.
             # 보류분이 있으면 옛 큐의 다음 명령 대신 새 plan을 발행(옛 경로 폐기).
@@ -397,6 +397,14 @@ class MarkerMixin:
                 self._send_next_command(robot.rid)
             self._try_dispatch_all()
             return {"type": "cmd_ack_response", "success": True, "action": f"turned_{cmd}"}
+
+        # 수정 82: 제자리 유지(hold) lift = '내려놓고 돌기'의 물리 동작만. 워크플로우 전이
+        # (배달/반납 완료, 태스크 진행, 선반 status 변경) 절대 금지 — 그러면 선반을 복도에
+        # 잃어버린다(규칙 3). carrying_shelf/CARRIED 그대로 유지하고 다음 명령만 발행.
+        if was_in_place:
+            self._send_next_command(robot.rid)
+            self._try_dispatch_all()
+            return {"type": "cmd_ack_response", "success": True, "action": "in_place_lift"}
 
         # REFACTOR E 3.4: 리프트 완료는 큐 ack가 자동 처리 (in_flight 비워짐)
 

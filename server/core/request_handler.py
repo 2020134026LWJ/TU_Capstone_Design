@@ -89,10 +89,6 @@ class RequestHandler(MovementMixin, MarkerMixin, WorkflowMixin):
         # "옛 위치(stale current_node)로 계획" 상황 자체를 구조적으로 제거 (수정 51 클래스 근절).
         self._pending_replan: Dict[int, tuple] = {}
 
-        # 수정 58: 작업대 도착 후 피킹 방향(pick_heading)으로 회전 중인 로봇.
-        # rid → (shelf_id, ws_node). 회전 cmd_ack가 오면 _enter_wait_picking을 이어서 실행.
-        self._ws_orienting: Dict[int, tuple] = {}
-
         # REFACTOR E 3.3: _blocked_robots 제거 — _is_blocked가 큐 상태로 추론
 
         # REFACTOR F Phase 4.4: goal-lock(_deferred_goals + _check_goal_locked_robots) 제거.

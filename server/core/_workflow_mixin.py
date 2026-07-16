@@ -358,55 +358,18 @@ class WorkflowMixin:
 
     # ─── 도착 / lift_up / lift_down 처리 ───
 
-    def _pick_heading(self, station_node: int):
-        """스테이션에서 선반을 작업자 쪽으로 향하게 하는 heading (없으면 None = 회전 안 함).
-
-        출고 작업대(9·33 → 270=서쪽, 맵 서쪽 끝 열이라 작업자가 서쪽)와
-        입고 스테이션(48 → 90=동쪽) 둘 다 조회한다.
-        """
-        station = (self.shelf_manager.workstations.get(station_node)
-                   or self.shelf_manager.inbound_station.get(station_node)
-                   or {})
-        return station.get("pick_heading")
-
-    def _orient_for_picking(self, robot, shelf_id: int, ws_node: int) -> bool:
-        """수정 58: 작업대 도착 → 피킹 방향으로 제자리 회전. 회전이 필요하면 True.
-
-        선반은 리프트에 얹혀 AGV heading을 따라 돌므로(실물·시뮬 동일), AGV를 돌리면
-        선반 면이 작업자를 향한다. 회전이 끝나기 전엔 WAITING_FOR_PICK 전이도
-        GUI 셀 활성(파란불)도 하지 않는다 — 작업자가 옆면을 보고 집는 상황 방지.
-        """
-        target = self._pick_heading(ws_node)
-        if target is None or robot.heading == target:
-            return False
-        delta = (target - robot.heading) % 360
-        turn_cmd = {90: "turn_right", 180: "turn_180", 270: "turn_left"}.get(delta)
-        if turn_cmd is None:                       # 격자 밖 heading — 회전 불가, 그냥 진행
-            print(f"[RequestHandler] Robot {robot.rid}: 피킹 회전 불가 "
-                  f"(heading={robot.heading}° → {target}°, delta={delta}°)")
-            return False
-        self._ws_orienting[robot.rid] = (shelf_id, ws_node)
-        robot.command_queue.append(turn_cmd)
-        self._send_next_command(robot.rid)
-        print(f"[RequestHandler] Robot {robot.rid}: WS {ws_node} 도착 → 피킹 방향 회전 "
-              f"({robot.heading}° → {target}°, {turn_cmd})")
-        return True
-
     def _enter_wait_picking(self, robot, shelf_id: int, ws_node: int) -> None:
-        """FLOWCHART 'PICK' 노드: 선반이 작업대에 도착해 피킹 대기 진입.
+        """FLOWCHART 'PICK' 노드: 선반이 작업대 바닥에 놓여 피킹 대기 진입.
 
-        일반 배달(_process_arrival)과 포워딩(_handle_putdown_ack) 두 경로가 공유한다.
+        배달(_handle_putdown_ack DELIVER)과 포워딩(_handle_putdown_ack FORWARD) 두 경로가 공유한다.
         부수효과(상태 전이 + PENDING 재배정 + GUI 셀 활성)를 한 곳에 모아,
         경로별로 한쪽만 빠뜨리는 분기 누락을 구조적으로 차단한다 (플로우차트 PICK 노드 1:1 대응).
         user_id는 task 소유자가 아니라 선반이 놓인 WS(ws_node) 기준 — 포워딩 시 둘이 다르다.
 
-        수정 58: 피킹 방향 회전이 먼저다. 회전이 필요하면 여기서 중단하고,
-        회전 cmd_ack(_handle_cmd_ack)가 이 함수를 다시 불러 나머지를 마저 실행한다.
+        수정 79: WS 피킹방향 회전(옛 수정 58) 제거. 선반은 바닥에 놓이므로 AGV만 돌아선
+        선반 방향을 못 맞춘다 → 들려온 방향 그대로 놓고, 작업자가 어느 면이든 집는다.
+        이 함수는 항상 lift_down ack 뒤에 불린다(선반이 이미 바닥에 있음).
         """
-        if self._orient_for_picking(robot, shelf_id, ws_node):
-            return
-
-        self._ws_orienting.pop(robot.rid, None)
         self.robot_manager.set_robot_status(robot.rid, RobotStatus.WAITING_FOR_PICK)
         # CARRIED → AT_WORKSTATION 전환 → 이 선반을 기다리던 PENDING 태스크 재배정
         self._try_assign_pending_tasks()
@@ -446,10 +409,14 @@ class WorkflowMixin:
                 self.shelf_manager.mark_shelf_picked_up(next_st.shelf_id, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, next_st.shelf_id)
 
-                # REFACTOR E 3.4: lift_up도 큐를 거쳐 발행 (I1 단일 발행점).
-                # robot.command_queue에 push 후 _send_next_command가 큐 dispatch + publish.
-                robot.command_queue.append("lift_up")
-                self._send_next_command(robot.rid)
+                # 수정 79: 든 채 회전 금지 → 회전(출발방향) → lift_up → forward.
+                # 배달(DELIVER_TO_WS) 이동을 지금 계획하고 첫 forward 앞에 lift_up을 끼운다.
+                # 큐 = [turn, lift_up, forward…]. carrying은 위에서 세팅(A* 선반통과 배제용).
+                deliver_st = task.subtasks[task.current_subtask_idx + 1]  # PICKUP 다음 = DELIVER
+                self._plan_and_publish_move(
+                    robot.rid, robot.current_node, deliver_st.target_node,
+                    lift_cmd="lift_up",
+                )
                 return {
                     "type": "robot_arrived_ack",
                     "success": True,
@@ -458,23 +425,20 @@ class WorkflowMixin:
                 }
 
         elif st_type == SubTaskType.DELIVER_TO_WS:
-            # 작업대에 도착 → 픽업 대기
+            # 수정 79: 작업대 도착 → 선반을 바닥에 내려놓고(lift_down) 안 든 채 대기.
+            # WAITING_FOR_PICK 전이 + GUI 통지는 lift_down ack(_handle_putdown_ack DELIVER)에서.
+            # 서브태스크는 아직 DELIVER_TO_WS 유지 → ack가 완료 처리(DELIVER→WAIT_PICKING).
             self.shelf_manager.mark_shelf_at_workstation(
                 current_st.shelf_id, current_st.target_node
             )
-            result = self.task_manager.handle_subtask_complete(task.task_id)
-            next_st = task.get_current_subtask()
-
-            if next_st and next_st.subtask_type == SubTaskType.WAIT_PICKING:
-                # FLOWCHART PICK 노드 (일반 배달 경로)
-                self._enter_wait_picking(robot, next_st.shelf_id, current_st.target_node)
-                return {
-                    "type": "robot_arrived_ack",
-                    "success": True,
-                    "action": "wait_picking",
-                    "shelf_id": next_st.shelf_id,
-                    "items_to_pick": next_st.items_to_pick,
-                }
+            robot.command_queue.append("lift_down")
+            self._send_next_command(robot.rid)
+            return {
+                "type": "robot_arrived_ack",
+                "success": True,
+                "action": "waiting_shelf_putdown_ws",
+                "shelf_id": current_st.shelf_id,
+            }
 
         elif st_type in (SubTaskType.RETURN_SHELF, SubTaskType.FORWARD_SHELF):
             # 선반 복귀/포워딩 목적지 도착 → lift_down 명령 발행 (cmd_ack 대기)
@@ -492,6 +456,18 @@ class WorkflowMixin:
 
         return {"type": "robot_arrived_ack", "success": True, "action": "unknown_state"}
 
+    def _compute_return_node(self, shelf_id: int, robot) -> int:
+        """반납 목적지 노드 계산 — 홈이 비었으면 홈, 아니면 가장 가까운 빈 자리 (노드 0 유효)."""
+        home_node = self.shelf_manager.get_shelf_home(shelf_id)
+        return_node = home_node if home_node is not None else shelf_id
+        if home_node is not None and not self.shelf_manager.is_position_available(home_node):
+            alt = self.shelf_manager.find_nearest_empty_position(
+                robot.current_node, self.path_planner
+            )
+            if alt:
+                return_node = alt
+        return return_node
+
     def _handle_pickup_ack(self, robot, task, current_st) -> Dict[str, Any]:
         """pickup ack → PICKUP_SHELF 완료 → DELIVER_TO_WS 시작"""
         if current_st.subtask_type != SubTaskType.PICKUP_SHELF:
@@ -504,9 +480,15 @@ class WorkflowMixin:
 
         if next_st and next_st.subtask_type == SubTaskType.DELIVER_TO_WS:
             self.robot_manager.set_robot_status(robot.rid, RobotStatus.DELIVERING_TO_WS)
-            self._plan_and_publish_move(
-                robot.rid, robot.current_node, next_st.target_node
-            )
+            # 수정 79: 배달 이동은 픽업 도착 때 이미 계획됨(큐 = [turn, lift_up, forward…]).
+            # lift_up ack 시점엔 forward들이 큐에 남아 있으니 다음 것만 발행한다.
+            # 예외: '이미 든 채 도착' backstop 경로는 사전계획이 없어 큐가 비어 있음 → 여기서 계획.
+            if robot.command_queue:
+                self._send_next_command(robot.rid)
+            else:
+                self._plan_and_publish_move(
+                    robot.rid, robot.current_node, next_st.target_node
+                )
             return {
                 "type": "cmd_ack_response",
                 "success": True,
@@ -517,34 +499,45 @@ class WorkflowMixin:
 
         elif next_st and next_st.subtask_type == SubTaskType.RETURN_SHELF:
             # 포워딩된 선반 재픽업 완료 → 원래 위치(home)로 반납
-            shelf_id = current_st.shelf_id
-            home_node = self.shelf_manager.get_shelf_home(shelf_id)
-            # 노드 0도 유효 → truthiness로 판단하면 0번 노드를 '없음'으로 오인한다
-            return_node = home_node if home_node is not None else shelf_id
-            if home_node is not None and not self.shelf_manager.is_position_available(home_node):
-                alt = self.shelf_manager.find_nearest_empty_position(
-                    robot.current_node, self.path_planner
-                )
-                if alt:
-                    return_node = alt
-            next_st.target_node = return_node
-            self.robot_manager.set_robot_status(robot.rid, RobotStatus.RETURNING_SHELF)
-            self.staging_manager.mark_exiting(robot.current_node, robot.rid)
-            self._plan_and_publish_move(robot.rid, robot.current_node, return_node)
+            # 수정 79: 반납 이동은 재픽업 지점에서 이미 계획됨(큐=[turn, lift_up, forward…]).
+            # lift_up ack 시점엔 forward들이 큐에 남아 있으니 다음 것만 발행한다.
+            # 예외(backstop): 큐 비어 있으면 여기서 return_node 계산+계획.
+            if not robot.command_queue:
+                shelf_id = current_st.shelf_id
+                return_node = self._compute_return_node(shelf_id, robot)
+                next_st.target_node = return_node
+                self.robot_manager.set_robot_status(robot.rid, RobotStatus.RETURNING_SHELF)
+                self.staging_manager.mark_exiting(robot.current_node, robot.rid)
+                self._plan_and_publish_move(robot.rid, robot.current_node, return_node)
+            else:
+                self._send_next_command(robot.rid)
             return {
                 "type": "cmd_ack_response",
                 "success": True,
                 "action": "returning_forwarded_shelf",
-                "shelf_id": shelf_id,
-                "return_to": return_node,
+                "shelf_id": current_st.shelf_id,
+                "return_to": next_st.target_node,
             }
 
         return {"type": "cmd_ack_response", "success": True, "action": "pickup_done"}
 
     def _handle_putdown_ack(self, robot, task, current_st) -> Dict[str, Any]:
-        """putdown ack → RETURN_SHELF 또는 FORWARD_SHELF 완료 처리"""
+        """putdown ack → DELIVER_TO_WS(배달, 수정 79) / RETURN_SHELF / FORWARD_SHELF 완료 처리"""
         st_type = current_st.subtask_type
         shelf_id = current_st.shelf_id
+
+        if st_type == SubTaskType.DELIVER_TO_WS:
+            # 수정 79: 작업대에서 선반 내려놓기 완료 → 피킹 대기 진입.
+            self.task_manager.handle_subtask_complete(task.task_id)   # DELIVER → WAIT_PICKING
+            next_st = task.get_current_subtask()
+            if next_st and next_st.subtask_type == SubTaskType.WAIT_PICKING:
+                self._enter_wait_picking(robot, next_st.shelf_id, current_st.target_node)
+            return {
+                "type": "cmd_ack_response",
+                "success": True,
+                "action": "wait_picking",
+                "shelf_id": shelf_id,
+            }
 
         if st_type == SubTaskType.RETURN_SHELF:
             # 선반 반납 완료
@@ -722,7 +715,9 @@ class WorkflowMixin:
                 # Point C: AGV 작업대 퇴출 → 회랑 exiting 표시
                 self.staging_manager.mark_exiting(robot.current_node, robot.rid)
                 self.robot_manager.set_robot_status(robot.rid, RobotStatus.RETURNING_SHELF)
-                self._plan_and_publish_move(robot.rid, robot.current_node, return_to)
+                # 수정 79: 선반이 WS 바닥에 있음 → 회전(반납방향) → lift_up → forward.
+                self._plan_and_publish_move(robot.rid, robot.current_node, return_to,
+                                            lift_cmd="lift_up")
                 return {"success": True, "action": "returning_shelf", "return_to": return_to}
 
             elif robot and next_action == "forward":
@@ -736,7 +731,9 @@ class WorkflowMixin:
                 # 포워딩 로봇과 스테이징 해제 로봇이 gateway에서 충돌함
                 self.staging_manager.mark_exiting(source_ws, robot.rid)
                 # is_forwarding=True → 목적지 corridor busy 시 staging_node 대신 gateway에서 대기
-                self._plan_and_publish_move(robot.rid, source_ws, forward_ws, is_forwarding=True)
+                # 수정 79: 선반이 WS 바닥에 있음 → 회전(포워딩방향) → lift_up → forward.
+                self._plan_and_publish_move(robot.rid, source_ws, forward_ws,
+                                            is_forwarding=True, lift_cmd="lift_up")
                 return {"success": True, "action": "forwarding_shelf", "forward_to_ws": forward_ws}
 
         elif result.get("action") == "shelf_done_pickup_for_return":
@@ -747,10 +744,16 @@ class WorkflowMixin:
             if robot and shelf_id_r:
                 self.shelf_manager.mark_shelf_picked_up(shelf_id_r, robot.rid)
                 self.robot_manager.set_carrying_shelf(robot.rid, shelf_id_r)
-                self.robot_manager.set_robot_status(robot.rid, RobotStatus.PICKING_UP_SHELF)
-                # REFACTOR E 3.4: 큐 경유
-                robot.command_queue.append("lift_up")
-                self._send_next_command(robot.rid)
+                # 수정 79: 선반이 dest WS 바닥에 있음 → 회전(반납방향) → lift_up → forward.
+                # 반납 이동을 지금 계획(lift_up 주입). 서브태스크는 PICKUP 유지 →
+                # 주입된 lift_up의 ack가 _handle_pickup_ack로 라우팅돼 완료 처리한다.
+                return_st = task.subtasks[task.current_subtask_idx + 1]  # PICKUP(재) 다음 = RETURN
+                return_node = self._compute_return_node(shelf_id_r, robot)
+                return_st.target_node = return_node
+                self.robot_manager.set_robot_status(robot.rid, RobotStatus.RETURNING_SHELF)
+                self.staging_manager.mark_exiting(robot.current_node, robot.rid)
+                self._plan_and_publish_move(robot.rid, robot.current_node, return_node,
+                                            lift_cmd="lift_up")
                 self._forwarded_shelf_handlers.pop(shelf_id_r, None)
                 print(f"[RequestHandler] robot {robot.rid}: re-pickup shelf {shelf_id_r} for return")
                 return {"success": True, "action": "pickup_for_return", "shelf_id": shelf_id_r}

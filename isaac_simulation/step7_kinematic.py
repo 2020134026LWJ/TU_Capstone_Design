@@ -1808,6 +1808,67 @@ print()
 for _ in range(10):
     simulation_app.update()
 
+# ══ 충돌 오라클 (실측 치수, 읽기 전용 계측 — 동작 변경 없음) ═══════════════════
+# 실물: 선반 40cm, 노드 셀 50cm. 선반 대각선 40√2≈56.6cm > 셀 50cm → 회전 시 자기 칸을
+# 넘어 이웃 침범. 이웃까지 이상 여유는 ~1.7cm인데 **제어 오차 2cm**가 그걸 먹어 실제로 닿는다.
+# → 오차를 선반 반경에 반영: 20cm + 2cm = 22cm → 셀 단위 반경 0.44.
+# 매 프레임 '든 선반'(실측 각도)이 다른 선반 박스와 실제로 겹치는지 SAT로 검사(그라운드 트루스).
+ORACLE_ENABLED = os.environ.get("ORACLE", "0") == "1"            # 기본 OFF (검증 때만 ORACLE=1)
+ORACLE_CTRL_ERR = float(os.environ.get("ORACLE_CTRL_ERR", "2"))  # 제어 오차(cm)
+ORACLE_SHELF_HALF = (20.0 + ORACLE_CTRL_ERR) / 50.0              # 셀 단위 반경 (기본 0.44)
+_oracle_active: dict = {}          # frozenset(pair) → 시작 프레임 (연속 중복 억제)
+_oracle_frame = 0
+_oracle_log_path = os.path.join(_ROOT, "isaac_simulation", "collision_oracle.log")
+open(_oracle_log_path, "w").close()   # 런 시작 시 초기화
+
+def _sq_corners(cx, cy, ang, half):
+    ca, sa = np.cos(ang), np.sin(ang)
+    return [(cx + dx*ca - dy*sa, cy + dx*sa + dy*ca)
+            for dx in (-half, half) for dy in (-half, half)]
+
+def _boxes_overlap(c1, a1, c2, a2, half):
+    """회전 정사각형 두 개 겹침 판정 (SAT, 4축)."""
+    p1 = _sq_corners(c1[0], c1[1], a1, half)
+    p2 = _sq_corners(c2[0], c2[1], a2, half)
+    for ang in (a1, a2):
+        ca, sa = np.cos(ang), np.sin(ang)
+        for ax in ((ca, sa), (-sa, ca)):
+            d1 = [px*ax[0] + py*ax[1] for px, py in p1]
+            d2 = [px*ax[0] + py*ax[1] for px, py in p2]
+            if max(d1) <= min(d2) or max(d2) <= min(d1):
+                return False       # 분리축 존재 → 안 겹침
+    return True
+
+def collision_oracle():
+    """든 선반 박스가 다른 선반 박스와 실제 겹치면 로그 (그라운드 트루스)."""
+    global _oracle_frame
+    _oracle_frame += 1
+    boxes = []   # (sid, (x,y), angle, is_carried)
+    for _a in agvs.values():
+        if _a.carrying_shelf is not None:
+            boxes.append((_a.carrying_shelf, (float(_a.pos[0]), float(_a.pos[1])),
+                          float(_a.heading), True))
+    for _sid, (_sx, _sy) in shelf_origins.items():
+        boxes.append((_sid, (float(_sx), float(_sy)), 0.0, False))
+    hits = set()
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            si, ci, ai, ic = boxes[i]
+            sj, cj, aj, jc = boxes[j]
+            if not (ic or jc):            # 든 선반이 낀 쌍만 (정적끼리 무의미)
+                continue
+            if _boxes_overlap(ci, ai, cj, aj, ORACLE_SHELF_HALF):
+                hits.add(frozenset((si, sj)))
+    for pair in hits - set(_oracle_active):     # 새로 시작된 겹침만 로그
+        _oracle_active[pair] = _oracle_frame
+        a, b = tuple(pair)
+        msg = f"[{_ts()}] 🔴 COLLISION: 선반 {a} ↔ {b} 박스 실제 겹침"
+        print(msg, flush=True)
+        with open(_oracle_log_path, "a") as _f:
+            _f.write(msg + "\n")
+    for pair in set(_oracle_active) - hits:     # 끝난 겹침 정리
+        del _oracle_active[pair]
+
 # ─── 키보드 일시정지 ──────────────────────────────────────────────────────────
 _paused = False
 _space_was_down = False
@@ -1871,6 +1932,9 @@ while simulation_app.is_running():
 
     for agv in agvs.values():
         agv.poll_camera()
+
+    if ORACLE_ENABLED:
+        collision_oracle()   # 충돌 오라클 (읽기 전용 계측, ORACLE=1일 때만)
 
 for bridge in bridges.values():
     bridge.disconnect()

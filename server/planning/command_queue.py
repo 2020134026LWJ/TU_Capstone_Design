@@ -19,6 +19,9 @@ class CommandEntry:
     target_node: Optional[int] = None       # forward: 도착 예정 노드
     expected_heading: Optional[int] = None  # turn 후 예상 heading (0/90/180/270)
     issued_at: float = 0.0                  # publish 시각 (디버깅/타임아웃용)
+    in_place: bool = False                  # 수정 82: 제자리 유지 lift (안전망 '내려놓고 돌기').
+    #   True면 물리적으로만 내렸다 드는 것 — ack가 와도 워크플로우 전이(배달/반납 완료) 금지.
+    #   carrying_shelf/선반 status(CARRIED) 그대로 유지. (규칙 3: 선반 상태 오염 방지)
 
 
 class CommandQueue:

@@ -20,6 +20,10 @@ class PathPlanner:
         self.graph: Dict[int, List[Tuple[int, float]]] = {}
         self.shelf_nodes: Set[int] = set()
         self.workstation_nodes: Set[int] = set()
+        # 수정 80: 선반을 든 로봇이 이 위에서 회전하면 든 선반이 부풀어(s/2→s/√2)
+        # 직교 이웃의 선반과 충돌한다. "비선반인데 직교 이웃에 선반이 ≥2개"인 노드(현 맵=20,28).
+        # 하드코딩 금지(규칙 11) → 맵 기하에서 유도. 든 이동 시 excluded_transit에 넣는다.
+        self.carry_forbidden_nodes: Set[int] = set()
         self._load_map()
 
     def _load_map(self) -> None:
@@ -43,10 +47,19 @@ class PathPlanner:
             a, b, c = int(e["from"]), int(e["to"]), float(e.get("cost", 1.0))
             self.graph.setdefault(a, []).append((b, c))
 
+        # 수정 80: 든-채-회전 금지 노드 유도 (비선반 & 직교 이웃에 선반 ≥2개)
+        self.carry_forbidden_nodes = {
+            nid for nid in self.nodes
+            if nid not in self.shelf_nodes
+            and sum(1 for o in self.neighbors(nid) if o in self.shelf_nodes) >= 2
+        }
+
         print(f"[PathPlanner] Loaded {len(self.nodes)} nodes "
               f"(M={len(self.nodes) - len(self.shelf_nodes) - len(self.workstation_nodes)}, "
               f"S={len(self.shelf_nodes)}, W={len(self.workstation_nodes)}) "
               f"from {self.map_file}")
+        print(f"[PathPlanner] Carry-forbidden nodes (든 채 회전 금지): "
+              f"{sorted(self.carry_forbidden_nodes)}")
         for ws in self.workstation_nodes:
             print(f"[PathPlanner] Workstation {ws} edges: {self.graph.get(ws, [])}")
 

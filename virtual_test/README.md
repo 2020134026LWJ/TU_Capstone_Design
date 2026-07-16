@@ -134,6 +134,32 @@ AGV_ID=1 python3 -m hardware.rpi_main
 
 ---
 
+## 스트레스 퍼저 — 서버 알고리즘을 랜덤으로 대량 두들기기 (2026-07-15)
+
+**server.main/Isaac 필요 없음.** 서버 코드를 in-process로 직접 불러 초당 수천 개 랜덤 시나리오를
+던진다. **셋 다 다른 층·다른 버그류**를 잡는다 (겹치지 않음). 무한 반복, `Ctrl+C` 시 최종 집계.
+
+```bash
+cd TU_Capstone_Design
+
+python3 -m virtual_test.path_stress       # ① 경로: 최단경로 맞나 + 다중로봇 충돌회피  (~5800 it/s)
+python3 -m virtual_test.lifecycle_fuzz    # ② 예약청소: IDLE 로봇의 죽은 예약 안 남나 (수정 74류)
+python3 -m virtual_test.deadlock_fuzz     # ③ 교착: 정면교착 항상 감지+해소하나 (수정 54류)
+```
+
+| 퍼저 | 층 | 검사 | 검증방식 |
+|---|---|---|---|
+| `path_stress` | planning | A*가 최적경로? / 커밋경로 충돌0? | 독립 Dijkstra 오라클 대조 + 시공간 충돌검사 |
+| `lifecycle_fuzz` | handler 청소 | 이동한 로봇 IDLE 후 예약 잔존? | 실제 RequestHandler 몰아 예약 셀 잔존 검사 |
+| `deadlock_fuzz` | 교착 backstop | 마주 선 로봇 감지→해소 되나? | 감지/해소/재감지 3-불변식(우회로 BFS 대조) |
+
+- `✅ 무결점`이 계속 = 정상 / 문제 시 `[FAIL #n] ...` 줄 튀어나옴 + `*_fails.log` 파일 기록
+- 정해진 횟수만: `--max-iters N` (끝나면 집계 자동 출력). 예: `python3 -m virtual_test.path_stress --max-iters 50000`
+- ① 은 순수 알고리즘이라 빠름. ②③ 은 매 반복 `RequestHandler`를 세워서 느림(~200 it/s)
+- **커버 안 함(의도)**: 통신 타이밍/async(=HIL/SIL), staging·멱등 등 workflow(=algorithm/ pytest)
+
+---
+
 ## 그 외
 
 ```bash

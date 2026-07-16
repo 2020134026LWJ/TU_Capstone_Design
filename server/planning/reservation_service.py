@@ -38,6 +38,13 @@ class ReservationService:
         self._by_rid: Dict[int, List[Tuple[str, tuple]]] = {}
         self._indefinite_by_node: Dict[int, int] = {}  # node → rid
         self._release_callbacks: List[Callable[[int], None]] = []
+        # 수정 85: 회전 footprint. 든 로봇이 제자리 회전하면 선반이 대각(s√2)으로
+        # 부풀어 직교 이웃칸을 '회전하는 동안' 점유한다 → 그 물리적 사실을 예약으로 표현.
+        # 회전 dispatch 시 이웃칸 예약, 회전 ack 시 해제. 다른 로봇의 forward가 그 칸에
+        # 진입하려 하면 대기(is_turn_locked). indefinite(코리도, 단일소유)와 별개 자료구조:
+        # 회전은 시간축 없이 '지금 회전 중'만 표현하면 되고, 코리도 소유권을 건드리면 안 됨.
+        self._turn_footprint: Dict[int, int] = {}          # node → rid (회전 중 이웃 점유)
+        self._turn_footprint_by_rid: Dict[int, List[int]] = {}
 
     # ─── commit / release ───
 
@@ -238,6 +245,39 @@ class ReservationService:
                 self._by_rid[rid] = kept
             else:
                 self._by_rid.pop(rid, None)
+
+    # ─── turn footprint (수정 85: 든 채 회전 시 이웃칸 일시 점유) ───
+
+    def reserve_turn_footprint(self, rid: int, nodes: List[int]) -> None:
+        """rid가 든 채 회전하는 동안 이웃 nodes를 일시 점유. 회전 ack 시 release.
+
+        같은 rid 재호출은 기존 footprint 교체(idempotent). 이미 다른 rid가 점유한
+        노드는 건너뛴다 — 그 노드는 그 로봇이 회전 중이라 어차피 진입 불가.
+        (cell/edge/indefinite 예약과 독립: 회전은 '지금 회전 중'만 표현하면 됨.)
+        """
+        self.release_turn_footprint(rid)
+        held: List[int] = []
+        for n in nodes:
+            if self._turn_footprint.get(n) is None:
+                self._turn_footprint[n] = rid
+                held.append(n)
+        if held:
+            self._turn_footprint_by_rid[rid] = held
+
+    def release_turn_footprint(self, rid: int) -> None:
+        """rid의 회전 footprint 점유 전부 해제 (회전 완료/취소/이탈 시)."""
+        for n in self._turn_footprint_by_rid.pop(rid, []):
+            if self._turn_footprint.get(n) == rid:
+                del self._turn_footprint[n]
+
+    def is_turn_locked(self, node: int, exclude_rid: Optional[int] = None) -> bool:
+        """node가 다른 로봇의 회전 footprint로 점유됐는지 (forward 진입 차단용)."""
+        owner = self._turn_footprint.get(node)
+        return owner is not None and owner != exclude_rid
+
+    def turn_lock_owner(self, node: int) -> Optional[int]:
+        """node를 회전 footprint로 점유한 rid (없으면 None)."""
+        return self._turn_footprint.get(node)
 
     # ─── callbacks ───
 
