@@ -98,6 +98,10 @@ class RobotManager:
                     name=robot_info.get("name", f"AGV-{rid}"),
                     home_node=robot_info.get("home_node", rid),
                     current_node=robot_info.get("home_node", rid),
+                    # 실물 STM 펌웨어는 base_angle=90°(=물리 서쪽)로 부팅한다(main.c). 서버의
+                    # 초기 heading을 그 물리 방향(서쪽=270°)에 맞춰야 turn/forward가 맞물린다.
+                    # 로봇을 홈에 그 방향으로 놓고 시작할 것. (기본 0=북, config로 조정)
+                    heading=robot_info.get("initial_heading", 0),
                 )
 
             print(f"[RobotManager] Loaded {len(self.robots)} robots from {self.config.robot_config_file}")

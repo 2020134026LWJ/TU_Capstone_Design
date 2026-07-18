@@ -1,198 +1,196 @@
-# AGV 실물 통합 (HIL bring-up)
+# AGV 실물 통합 (HIL bring-up) — 명령어
 
-**위에서부터 순서대로.** 프로토콜/환경 상세는 [`README.md`](README.md). 여기는 순서·명령·성공 판정만.
+위에서부터 순서대로. 각 명령 앞의 **[기기]** = 어디서 실행하는지. 프로토콜/환경 상세는 [`README.md`](README.md).
 
-| 단계 | 내용 |
-|---|---|
-| 0 | 시작 전 3가지 (읽고 시작) |
-| 1 | 바닥 마커 배치 |
-| 2 | 라파 준비 + 카메라 초점 |
-| 3 | STM 단독 — **turn 방향** 확인 |
-| 4 | 전체 기동 순서 |
-| 5~6 | 1대 주행 + GUI / 트윈 |
-| 7~8 | HEADING_OFFSET 밸브 / 2대 동시 |
+## 기기 & SSH 접속
 
----
+| 기기 | 정체 | 접속 (PC에서) |
+|---|---|---|
+| **[PC]** | 이 노트북 — 서버·트윈·주문 발행 | (그냥 PC 터미널. 여러 개 띄움) |
+| **[AGV 라파]** | 실물 AGV의 라즈베리파이 (현재 1대) | `ssh agv1@agv1-RPi.local` |
+| **[GUI 라파]** | 작업대 터치스크린 | `ssh user1@raspberrypi.local` |
 
-## 0. 시작 전 3가지
-
-1. **turn 좌우(handedness)는 벤치로 검증 불가** → 3단계에서 실물로 제일 먼저 확인. 반대면 STM 매핑(5=left/6=right) 부호 하나 뒤집기.
-2. **AGV는 홈에 북향(heading 0)으로** 놓는다. 홈: AGV-1=**8**(W2), AGV-2=**32**(W1). (7단계 밸브 열면 제약 사라짐)
-3. ⛔ **카메라 왜곡보정 수식 고치지 말 것** — 주원이 STM이 그 값 기준으로 튜닝됨. (속도만 올리려면 `undistort→remap`, 출력 동일 — 이미 적용됨)
+- SSH 키 등록돼서 **비번 없음**. `.local`이 안 풀리면 핫스팟(SSID `LWJ`) 접속기기 목록에서 IP 확인.
+- 라파에서 서버 주소는 `hardware/config.py: MQTT_HOST="UB-Region5.local"` (mDNS, IP 바뀌어도 됨).
 
 ---
 
-## 1. 바닥 마커
+## 0. 시작 전 (실물로만 확인 — 3단계에서)
 
-- `marker_id == node_id`, 노드 **0~47**. **전부 같은 방향(북향)으로**, **낱장으로 잘라서** 붙인다.
-- 검은 사각형 **15mm** (= `camera.py`의 `marker_size`). 크기 다르면 offset(mm) 스케일 어긋남.
-- 낱장 재출력: `python3 -m hardware.make_marker_sheet 8 9 16 17 18`
+- `turn_left` → 실제 좌회전인지 (반대면 STM 매핑 `5`(left)↔`6`(right) 뒤집기)
+- AGV를 홈에 **북향(heading 0)**으로: AGV-1 = **8**(W2), AGV-2 = **32**(W1)
+- ⛔ 카메라 왜곡보정 수식 건드리지 말 것 (STM이 그 값 기준 튜닝됨)
 
 ---
 
-## 2. 라파 준비 (AGV 라파 각각)
+## 1. 라파 준비 (AGV 라파에서)
 
 ```bash
-# a) AGV 번호 (라파마다 다르게 — 없으면 rpi_main 에러)
-echo 'export AGV_ID=1' >> ~/.bashrc      # 2번 라파는 =2
+# [PC] AGV 라파 접속
+ssh agv1@agv1-RPi.local
+```
+```bash
+# [AGV 라파] 자기 번호 박기 (라파마다 다르게 — 없으면 rpi_main 에러)
+echo 'export AGV_ID=1' >> ~/.bashrc   # AGV_ID = 이 라파의 로봇 번호 (2번 라파는 =2)
+source ~/.bashrc
 
-# b) 카메라 살아있나 (Pi5+Ubuntu는 libpisp 소스빌드 선행 — README)
+# [AGV 라파] UART 켜기 — 한 번만. STM은 40핀 헤더 핀 8/10에 연결됨 → /dev/ttyAMA0 필요.
+#   ⚠️ Ubuntu 라파는 기본으로 헤더 UART가 꺼져 있어, config.txt에 enable_uart=1 을 넣어야
+#   /dev/ttyAMA0 이 생긴다. (안 넣으면 ttyAMA10=전용 디버그 커넥터만 있어 STM과 통신 안 됨)
+grep -q "enable_uart=1" /boot/firmware/config.txt || echo 'enable_uart=1' | sudo tee -a /boot/firmware/config.txt
+sudo usermod -aG dialout $USER     # 시리얼 포트 열기 권한 (없으면 Permission denied)
+sudo reboot                         # 재부팅해야 /dev/ttyAMA0 생기고 그룹 적용 → 재접속 후 계속
+#   [확인] 재접속 후:  ls /dev/ttyAMA*  → /dev/ttyAMA0 보여야 함 (config.py UART_PORT=/dev/ttyAMA0 와 일치)
+
+# [AGV 라파] 카메라 살아있나
 python3 -c "from picamera2 import Picamera2; print(Picamera2.global_camera_info())"
-#   → [{'Model': 'ov5647', ...}] 나오면 OK
+#   → [{'Model':'ov5647',...}] 나오면 OK
 
-# c) 카메라 초점 (ov5647 수동초점 — 반드시 맞추고 간다)
-python3 -m hardware.camera_preview        # PC 브라우저: http://<라파IP>:8000
-#   sharpness 최대가 되도록 렌즈를 돌린다. 아무것도 없는데 ID 뜨면 초점 불량.
-#   [주의] 카메라 독점 → rpi_main과 동시 실행 불가 (구동 중 화면은 5단계 --preview)
+# [AGV 라파] 초점 맞추기 (ov5647 수동초점 — 반드시)
+python3 -m hardware.camera_preview     # PC 브라우저 http://<라파IP>:8000 보며 sharpness 최대로 렌즈 돌림
+#   [주의] 카메라 독점 → rpi_main과 동시 실행 불가
 ```
 
-- 서버 주소: `hardware/config.py: MQTT_HOST = "UB-Region5.local"`, UART: `UART_PORT = "/dev/ttyAMA0"`.
-
 ---
 
-## 3. STM 단독 — turn 방향 (서버 없이, 제일 먼저)
+## 2. STM 단독 — turn 방향 (서버 없이 제일 먼저)
 
 ```bash
-python3 -m hardware.rpi_main 1                       # 라파 (bridge + camera)
-#   원격으로 화면 보며 하려면:  python3 -m hardware.rpi_main 1 --preview
-
-# PC에서 명령 직접 발행
+# [AGV 라파] bridge+camera 기동
+python3 -m hardware.rpi_main 1         # 인자 1 = AGV 번호 (생략 시 env AGV_ID). --preview = PC 브라우저(:8000)로 화면 관찰
+```
+```bash
+# [PC] 명령 직접 발행
 mosquitto_pub -h UB-Region5.local -t /agv/cmd -m '{"rid":1,"cmd":"turn_left"}'
-mosquitto_pub -h UB-Region5.local -t /agv/cmd -m '{"rid":1,"cmd":"forward","target_node":9}'
+mosquitto_pub -h UB-Region5.local -t /agv/cmd -m '{"rid":1,"cmd":"forward","target_node":9}'  # target_node = 도착 예정 노드
 mosquitto_pub -h UB-Region5.local -t /agv/cmd -m '{"rid":1,"cmd":"lift_up"}'
 
-# AGV가 뭘 말하는지 다 보기
-mosquitto_sub -h UB-Region5.local -t '/agv/#' -v
+# [PC] AGV가 주고받는 모든 메시지 보기
+mosquitto_sub -h UB-Region5.local -t '/agv/#' -v      # -v = 토픽명도 표시
 ```
-
-| 항목 | 성공 | 실패 시 |
-|---|---|---|
-| **turn 방향** | `turn_left` → 실제 좌회전(반시계) | STM 매핑 5↔6 뒤집기 |
-| turn 각도 | 90° 돌고 멈춤 | STM 튜닝 |
-| 직진 1칸 | 다음 노드 마커 위 정지 | STM 튜닝 |
-| cmd_ack | turn/lift 완료 시 `/agv/cmd_ack` 도착 | UART `0x81` 확인 |
-| forward 완료 | **마커 보고로 대신** — cmd_ack 안 옴이 정상 | — |
+성공: `turn_left`→좌회전(반시계) / 90°·1칸 정확 / turn·lift 후 `/agv/cmd_ack` 도착 (forward 완료는 마커 보고로 대신, cmd_ack 안 옴이 정상)
 
 ---
 
-## 4. 전체 기동 순서 (순서 지킬 것)
-
-| # | 어디서 | 명령 |
-|---|---|---|
-| 1 | PC | `sudo systemctl start mosquitto` (MQTT 브로커=메시지 버스. 보통 부팅 시 자동 — 이미 떠 있으면 통과) |
-| 2 | PC | `./warehouse_gui_server/reset_progress.sh` (테스트 시작 전 DB 초기화, 이어할 땐 생략) |
-| 3 | PC | `cd warehouse_gui_server && python3 warehouse_server_v2.py` (**반드시 그 폴더 안에서**) |
-| 4 | PC | `cd TU_Capstone_Design && python3 -m server.main` |
-| 5 | AGV 라파 ×2 | `python3 -m hardware.rpi_main` (헤드리스면 `--preview` 추가) |
-| 6 | GUI 라파 ×2 | 1번 `python3 warehouse_gui_ws1.py` / 2번 `python3 warehouse_gui_ws2.py` |
-| 7 | PC | `./isaac_simulation/run_twin.sh 3.0` (Isaac 트윈, `TWIN=1` 래퍼) |
-
-- **순서 규칙**: #1 브로커가 맨 먼저. #2 다음 **#3·#4는 서로 독립**(아무 순서나 OK — server.main은 주문 DB를 직접 읽음). 진짜 제약은 **AGV 서버(#4)·GUI 백엔드(#3) 둘 다 주문 GUI(#6)보다 먼저** — 사람이 주문 누를 때 떠 있어야 유실 없음.
-- **AGV는 홈에 북향** (AGV-1=**8**, AGV-2=**32**).
-- **`DEMO_MODE` = `False` 확인** (`server/core/request_handler.py:43`).
-- ⚠️ **트윈은 `run_twin.sh`(=`TWIN=1`)로만.** 맨 step7을 `TWIN=1` 없이 켜면 Isaac이 가짜 마커를 발행해 실물과 충돌.
-- GUI ws2 사본 함정: `warehouse_gui_v2.py`는 작업대 2로 발행됨(1번 라파에서 열지 말 것).
-- **끌 때 역순** (AGV 라파 먼저 내리면 브로커가 LWT로 offline 발행).
-
----
-
-## 5. 1대 단독 주행
-
-기동 순서에서 라파 하나만 켜고 끝까지 돌린다. 서버 로그에서:
-
-- `presence online rid=1` — 안 뜨면 태스크 배정 안 됨.
-- 마커 보고 시 `current_node`가 **인접 노드로만** 갱신 (순간이동하면 → 마커 낱장/초점).
-- `[heading] ... 차이 0°` — 7단계에서 쓸 값 (지금은 로그만).
-
-**GUI 한 바퀴**: 주문 → 선반 싣고 작업대 도착 → GUI 셀 파란불 → 피킹완료 터치 → 선반 반납. 여기까지 = 통합 성공.
-
----
-
-## 6. Isaac 트윈 (필수, 실물과 병행)
+## 3. 전체 기동 (기기별로, 각각 다른 터미널)
 
 ```bash
-./isaac_simulation/run_twin.sh 3.0        # 3.0 = 실물 1칸 소요초 (모르면 생략, EMA로 맞춰감)
-```
+# [PC] 터미널 1 — MQTT 브로커 (보통 부팅 시 자동, 이미 떠 있으면 통과)
+sudo systemctl start mosquitto
 
-- 실물 주행을 **트윈 띄운 채로** 한다 — 로그로 안 보이는 heading 어긋남/순간이동을 화면에서 잡는다.
-- **회전은 절대값으로 실시간 추종**(수정 77, 기본값), 직진은 시간 보간. `/agv/pose` 전용(서버 안 봄).
-- 트윈이 이상하게 돌면 옛 델타 방식으로: `TWIN_ABS_HEADING=0 ./isaac_simulation/run_twin.sh 3.0`
+# [PC] 터미널 2 — DB 초기화 (이어할 땐 생략)
+./warehouse_gui_server/reset_progress.sh
+
+# [PC] 터미널 3 — 협업자 서버 (반드시 이 폴더 안에서)
+cd warehouse_gui_server && python3 warehouse_server_v2.py
+
+# [PC] 터미널 4 — AGV 서버 (터미널3과 순서 무관)
+python3 -m server.main
+```
+```bash
+# [AGV 라파] — AGV 기동 (ssh 세션에서)
+python3 -m hardware.rpi_main           # env AGV_ID 사용. --preview 옵션 가능
+```
+```bash
+# [GUI 라파] — 작업대 GUI (ssh 세션에서)
+ssh user1@raspberrypi.local
+cd ~/Desktop/TU_Capstone_Design/warehouse_gui_server && python3 warehouse_gui_ws1.py
+#   1번 라파=ws1 / 2번 라파=ws2 (warehouse_gui_v2.py는 작업대2 사본=함정, 열지 말 것)
+```
+```bash
+# [PC] 터미널 5 — Isaac 트윈 (4단계 옵션 참고)
+./isaac_simulation/run_twin.sh 3.0
+```
+- **순서 규칙**: 브로커 먼저. 협업자 서버(터미널3)·AGV 서버(터미널4) 둘 다 **주문 GUI보다 먼저**.
+- `DEMO_MODE=False` 확인(`server/core/request_handler.py:43`). 끌 땐 **역순** (AGV 라파 먼저 내림).
 
 ---
 
-## 6.5 로그 저장 & 시각순 병합 (통신 타이밍 디버깅)
-
-서버·트윈 로그 앞엔 `[HH:MM:SS.mmm]` 시각이 붙는다(통신 이벤트만). 두 콘솔을 파일로 남겨
-시각순으로 합치면 **"서버가 명령 낸 시각 → 트윈이 실행한 시각"** 지연을 한 타임라인에서 볼 수 있다.
+## 4. Isaac 트윈 (실물과 병행, 필수)
 
 ```bash
-# 1) 각 터미널에서 화면+파일 동시 기록 (tee)
+# [PC]
+./isaac_simulation/run_twin.sh 3.0
+#   3.0 = 1칸 주행 추정 초 (생략하면 3.0, 실측 1회면 자동 대체). run_twin.sh가 TWIN=1 을 자동 설정
+#   ⚠️ TWIN=1 없이 step7 직접 실행 = Isaac이 '트윈'이 아니라 'AGV 본인'이 되어 마커 직접 발행 → 실물과 동시에 켜면 상태 꼬임
+
+# [PC] 트윈 회전이 이상할 때만: 옛 델타 방식 (기본=절대값 실시간 추종)
+TWIN_ABS_HEADING=0 ./isaac_simulation/run_twin.sh 3.0
+```
+
+---
+
+## 5. 1대 주행 (지금 단계)
+
+3단계에서 라파 **1대만** 켠다.
+
+```bash
+# [PC] 서버 로그에서 확인: presence online rid=1  (안 뜨면 태스크 배정 안 됨)
+
+# [PC] GUI 없이 빠르게 주문 한 건 넣기 (또는 GUI 라파에서 터치)
+mosquitto_pub -h localhost -t warehouse/order/start -m '{"사용자ID":1,"주문번호":1,"작업대":2}'
+```
+- 한 바퀴: 주문 → 배달 → 셀 파란불 → 피킹완료 터치 → 반납. 여기까지 = **통합 성공**
+
+---
+
+## 6. 로그 병합 (통신 타이밍 디버깅)
+
+```bash
+# [PC] 두 콘솔을 화면+파일 동시 기록 후 시각순 병합
 python3 -m server.main                    2>&1 | tee server.log
 TWIN=1 ./isaac_simulation/run_twin.sh 3.0 2>&1 | tee twin.log
-
-# 2) 끝난 뒤 시각순 병합 — 타임스탬프 줄만 골라 정렬 (0채움이라 글자순=시각순)
-cat server.log twin.log | grep -E '^\[[0-9]{2}:[0-9]{2}:' | sort
+cat server.log twin.log | grep -E '^\[[0-9]{2}:[0-9]{2}:' | sort   # 타임스탬프 줄만 시각순 정렬
 ```
-
-읽는 법: `[AGVServer] ...`=서버 수신 / `[MQTTClient] → AGV n:`=서버가 AGV로 발행 /
-`[AGVServer] → GUI shelf_arrived`=서버가 GUI로 발행(파란불) / `[AGV n] <- ...`·`Reached node`=트윈 실행.
-- 서버 발행 → 트윈 실행 지연이 **수십~수백 ms** = 정상(MQTT). **초 단위로 벌어지면** 브로커/페이싱 의심.
-- 어떤 cmd에 **트윈 대응 줄이 아예 없으면** = 명령 유실(`client_id` 충돌 수정 63 / 구독 누락) 의심.
-- GUI 파란불이 안 켜졌을 때: `→ GUI shelf_arrived`가 로그에 **찍혔나**로 서버(안 보냄) vs GUI(받고 안 켬) 갈라냄.
-
-> [주의] 시각순 정렬은 **한 PC에서 서버·트윈을 같이 돌릴 때**만 정확(시계 공유). 실물 라파 로그를
-> PC 서버 로그와 섞을 땐 두 기기 NTP가 안 맞으면 오차 → 기기 시계부터 맞출 것.
+- 서버 발행→트윈 실행 지연 수십~수백ms=정상, 초 단위=브로커/페이싱 의심. **한 PC에서 돌릴 때만** 시각 정확(시계 공유).
 
 ---
 
-## 7. HEADING_OFFSET 밸브 (마지막)
-
-지금 서버는 카메라 heading을 안 믿고(`server/config.py: TRUST_CAMERA_HEADING=False`) 로그만 찍는다. **남은 건 로그 읽기.**
+## 7. HEADING_OFFSET (마지막, 밸브)
 
 ```
-측정: AGV를 홈에 북쪽 보게 → yaw 읽기 → HEADING_OFFSET = (0 - yaw) % 360
-      → hardware/config.py 의 HEADING_OFFSET 에 기입 (현재 0 = 주원 합의값, 대개 그대로 맞음)
-밸브: 주행 중 서버 로그가 계속 '[heading] ... 차이 0°' → server/config.py: TRUST_CAMERA_HEADING = True
+# 측정: AGV 홈에 북향으로 → [PC] 서버 로그의 yaw 읽기 → HEADING_OFFSET = (0 - yaw) % 360
+#       → hardware/config.py 의 HEADING_OFFSET 에 기입 (현재 0)
+# 밸브: 주행 중 로그가 계속 '[heading] ... 차이 0°' 면 → server/config.py: TRUST_CAMERA_HEADING = True
 ```
-
-밸브 열면 0-② "북향" 제약이 사라진다. (yaw 규약: 시계방향=yaw 증가, 서버 heading과 같은 부호 → 덧셈)
+- 밸브 열면 0단계 "북향" 제약 사라짐. (yaw 규약: 시계방향=yaw 증가, 서버 heading과 같은 부호)
 
 ---
 
-## 8. 2대 동시
+## 8. 2대 동시 (1대 완주 후, AGV 라파 2대일 때)
 
-1대 완주 후 붙인다.
-
-- 라파별 `echo $AGV_ID`가 **다른지** 확인 (둘 다 1이면 명령 뺏김).
-- 홈: AGV-1=**8**(W2), AGV-2=**32**(W1) — 교착 회피 교차 배치, 바꾸지 말 것.
-- 볼 것: 회랑 진입 순서(STG) / 트리거 통과 시 대기 해제(TRG) / 정면 교착 해소.
+```bash
+# [AGV 라파 각각] 자기 번호 확인 (둘 다 1이면 명령 뺏김)
+echo $AGV_ID
+```
+- 홈: AGV-1=**8**, AGV-2=**32** (교차 배치, 바꾸지 말 것)
+- **정상 동작**: 선반 내렸다 돌고 다시 들기(수정 82/85) / 잠깐 멈춰 상대 대기(수정 84) = 충돌 회피, 고장 아님
+- ⚠️ **미해결 [③] 회랑 정면 교착**: 왼쪽 1차선(0-8-16-24-32-40) 마주침 시 간헐적 교착 (2대 본격 운용 전 수정 예정, 1대엔 무관). 상세 `FLOWCHART.md` "알려진 이슈"
 
 ---
 
-## 증상별 원인
+## 증상별 원인 (빠른 참조)
 
 | 증상 | 먼저 의심 |
 |---|---|
-| 순간이동 / 엉뚱한 노드 | 마커 시트 낱장 아님 → 초점 |
-| 아무것도 없는데 마커 검출 | 초점 (`camera_preview` sharpness) |
-| `turn_left`인데 우회전 | handedness (3단계), STM 매핑 5↔6 |
+| 순간이동 / 엉뚱한 노드 | 마커 낱장 아님 → 초점 |
+| `turn_left`인데 우회전 | handedness → STM 매핑 5↔6 |
 | 서버가 태스크 안 줌 | presence online 미발행 → MQTT 연결 |
-| GUI 주문했는데 반응 없음 | `server.main` 미기동 / presence offline |
-| GUI 재고·진행 안 뜸 | `warehouse_server_v2.py` (HTTP :5000) 미기동 |
-| 도착했는데 GUI 파란불 안 켜짐 | 중복주문이면 협업자 GUI 버그 (AGV 서버는 정상) |
+| GUI 주문 반응 없음 | `server.main` 미기동 |
+| GUI 재고·진행 안 뜸 | `warehouse_server_v2.py` 미기동 |
 | turn/lift 후 다음 명령 안 나감 | `cmd_ack` 미도착 → UART `0x81` |
 | forward 후 멈춤 | 마커 못 봄 → 초점/마커 위치 |
-| 트윈 `heading 방향 노드 없음` | heading 장부 어긋남 → 마커/초점 |
+| `.local` 접속 안 됨 | 핫스팟(LWJ) 미접속 → 기기목록서 IP 직접 |
 
 ---
 
-## 실물 없이 미리
+## 실물 없이 미리 (전부 [PC])
 
-| 하네스 | 실행 |
-|---|---|
-| 알고리즘 회귀 (100) | `pytest` (repo 루트) |
-| SIL (가짜 STM + pty UART) | `python3 -m virtual_test.software_in_the_loop.run_sil` |
-| 벤치 (카메라 + 손 마커) | `python3 -m virtual_test.bench_camera.run_bench 1` |
-| 벤치 (PC 단독 자동주행) | `python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 8` |
-
-> ⚠️ 어느 것도 turn handedness는 검증 못 함 (0-①) — 실물 전용.
+```bash
+pytest                                                              # 알고리즘 회귀 100
+python3 -m virtual_test.software_in_the_loop.run_sil               # SIL (가짜 STM + pty 가상 UART)
+python3 -m virtual_test.bench_camera.run_bench 1                   # 벤치: 카메라+손 마커. 인자 1=AGV 번호
+python3 -m virtual_test.bench_camera.run_bench 1 --no-camera --auto-walk 8
+#   --no-camera = 카메라 없이 PC 단독 / --auto-walk N = 가짜 로봇이 노드 N(8=AGV-1 홈)에서 시작해 명령대로 자동 주행
+```
+⚠️ 어느 것도 turn handedness는 검증 못 함 — 실물 전용.

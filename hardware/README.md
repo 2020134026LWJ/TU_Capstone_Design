@@ -237,7 +237,7 @@ python3 -m virtual_test.software_in_the_loop.run_sil   # repo 루트에서
 | 항목 | 값 | 비고 |
 |---|---|---|
 | `MQTT_HOST` | `UB-Region5.local` | PC 서버 mDNS 이름 (IP 바뀌어도 자동 해석). IP 직접 쓰려면 여기 교체 |
-| `UART_PORT` / `UART_BAUD` | `/dev/ttyAMA10` / `115200` | 주원이 카메라와 동일 |
+| `UART_PORT` / `UART_BAUD` | `/dev/ttyAMA0` / `115200` | 헤더 핀 8/10(GPIO14/15). ⚠️ Ubuntu 라파는 config.txt에 `enable_uart=1` 넣어야 이 장치가 생김 (ttyAMA10=전용 디버그 커넥터라 STM과 안 통함). 수정 77서 ttyAMA10→ttyAMA0 |
 | `UART_ENABLED` | `True` | 실물 전용 (SIL은 monkeypatch로 덮음) |
 | `CALIB_FILE` | (자동) | `hardware/camera_calibration.pkl`, cwd 무관 |
 | `SHOW_PREVIEW` | `True` | 헤드리스(디스플레이 없는) 라파면 `False` |

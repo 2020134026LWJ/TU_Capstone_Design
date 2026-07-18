@@ -69,6 +69,22 @@ CMD_CODE = {
 EVT_DONE = 0x81  # STM → 동작 완료
 EVT_ACK  = 0xFF  # STM → 명령 수신 확인
 
+# forward 완료(EVT_DONE) 후 마커 발행까지의 안정 대기 (2026-07-17).
+# 모터가 멈춘 직후 BNO055 yaw가 진동/관성으로 흔들려, 바로 turn을 파싱하면 STM이
+# 회전량을 잘못 잡아 no-op이 된다(실측: 대기 없으면 32ms에 "완료"=안 돎, 3초 대기하면 정상).
+# EVT_DONE 후 이 시간만큼 마커 발행을 늦춰 서버가 다음 명령을 늦게 내게 한다.
+# 그동안 카메라가 STM에 offset을 계속 흘려 yaw가 안정된다. env로 튜닝: FWD_SETTLE_SECS
+FORWARD_SETTLE_SECS = float(os.environ.get("FWD_SETTLE_SECS", "1.5"))
+
+# 반복 이벤트 병합 창 (2026-07-18).
+# 주원이 STM 펌웨어(hardware/stm32/rpi_uart.c Send_Event)는 통신유실 대비로 EVT_DONE/EVT_ACK를
+# 매번 3회 반복 전송한다(10ms 간격 → ~20ms 구간에 0x81 3개 / 0xFF 3개). 브릿지가 이 반복을
+# 그대로 처리하면, 앞 명령의 2·3번째 반복 바이트가 방금 arm된 다음 명령(_last_cmd)의 ack으로
+# 잘못 붙어 dispatch 직후 ~12ms에 '유령 ack'이 터진다(리프트 no-op의 근본원인). 실제 이벤트는
+# 어떤 것도 이 창 안에 두 번 오지 않으므로(turn/lift/forward 모두 완료까지 >1초), 같은 이벤트
+# 값이 이 시간 안에 또 오면 반복으로 보고 버린다 → 첫 바이트만 그 명령 것으로 센다.
+EVENT_DEDUP_SECS = float(os.environ.get("EVENT_DEDUP_SECS", "0.1"))
+
 
 class Bridge:
     """AGV UART 브릿지 (실물 RPi 전용, 단일 로봇)"""
@@ -98,8 +114,26 @@ class Bridge:
         self._uart_thread: Optional[threading.Thread] = None
         self._running = False
 
+        # UART write 락 — 카메라 스레드(offset 스트리밍)와 MQTT 스레드(명령)가
+        # 동시에 write하면 바이트가 뒤섞여 STM이 깨진 패킷을 읽는다(급발진 원인).
+        # 한 패킷(write+flush)을 통째로 원자화한다. jw_headless가 단일 스레드로
+        # 얻던 효과를 락으로 재현.
+        self._uart_lock = threading.Lock()
+
         # 마지막으로 전송한 명령 추적 (DONE 수신 시 ack 타입 결정)
         self._last_cmd: Optional[str] = None
+
+        # 반복 이벤트 병합용 — 각 이벤트 값(0x81/0xFF)의 마지막 처리 시각.
+        # STM이 3회 반복 전송하는 EVT_DONE/EVT_ACK를 한 번으로 합친다(EVENT_DEDUP_SECS).
+        self._evt_last_ts: dict = {}
+
+        # forward 마커 게이팅 (2026-07-17): forward 주행 중엔 카메라 마커 발행을 붙잡았다가
+        # STM EVT_DONE(=실물이 실제로 멈춘 시점)에 발행한다. 두 가지를 동시에 얻는다:
+        #   ① forward 완료를 카메라(이른 시점)가 아닌 실물 완료로 통일 (turn/lift와 동일 기준)
+        #   ② 주행 중 옆칸 마커 오검출이 서버로 안 감 (mismatch 자체가 안 생김)
+        self._fwd_active = False               # forward dispatch ~ settle 끝까지 (마커 버퍼링 구간)
+        self._fwd_marker: Optional[tuple] = None  # 주행 중/안정 중 본 최신 마커 (settle 후 발행)
+        self._fwd_settling = False             # EVT_DONE 받고 settle 타이머 도는 중 (중복 방지)
 
         # 현재 STM으로 실어 보내는 명령 코드 (0=carrier/무명령).
         # MQTT 명령 수신 시 set → EVT_ACK 오면 0으로 복귀 (주원이 카메라와 동일 흐름)
@@ -174,6 +208,11 @@ class Bridge:
         print(f"[Bridge-{self.rid}] <- cmd: {cmd}")
         if cmd != "forward":
             self._last_cmd = cmd      # DONE 수신 시 ack 타입 결정용
+        else:
+            # forward 시작 → 완료+안정까지 마커 발행 보류 (버퍼·타이머 상태 새로 시작)
+            self._fwd_active = True
+            self._fwd_marker = None
+            self._fwd_settling = False
         self._pending_code = code     # arm: 다음 패킷부터 실려 나감 (EVT_ACK까지 반복)
         self._uart_send_packet()      # 즉시 1회도 송신 (마커 안 보여도 명령 전달 보장)
 
@@ -212,7 +251,19 @@ class Bridge:
             그 차이가 일정하면 그게 곧 HEADING_OFFSET 보정값이다.
             **캘리브레이션이 '코드 짜기'가 아니라 '로그 읽기'가 된다.**
           확정되면 server.config.TRUST_CAMERA_HEADING = True 로 밸브를 연다.
+
+        2026-07-17: forward 주행 중(_fwd_active)엔 즉시 발행하지 않고 버퍼링만 한다.
+          → 실물이 멈춘 시점(EVT_DONE)에 마지막 마커만 발행 (_handle_uart_event).
+          idle/turn/lift 중엔 _fwd_active=False 라 평소대로 즉시 발행(heading 초기화 등).
         """
+        if self._fwd_active:
+            self._fwd_marker = (marker_id, heading_deg, heading_observed)
+            return
+        self._publish_marker_now(marker_id, heading_deg, heading_observed)
+
+    def _publish_marker_now(self, marker_id: int, heading_deg: Optional[int] = None,
+                            heading_observed: Optional[int] = None):
+        """실제 /agv/marker 발행 (게이팅 통과분)."""
         msg = {
             "rid": self.rid,
             "marker_id": marker_id,
@@ -262,6 +313,8 @@ class Bridge:
         _pending_code=0이면 carrier 패킷(오프셋만, STM PID 정렬용).
         """
         x, y, yaw = self._latest_offset
+        if self._pending_code != 0:   # [진단] 명령 패킷에 실려 나가는 오프셋 — turn 상쇄(dyaw) 확인용
+            print(f"[Bridge-{self.rid}]    → STM cmd={self._pending_code} 오프셋 x={x:+.1f} y={y:+.1f} yaw={yaw:.1f}")
         # 주원이 포맷: <command,±xxxx,±yyyy,±wwww>  (offset은 ×10 정수, STM이 /10 복원)
         msg = f"<{self._pending_code},{int(x * 10):+05d},{int(y * 10):+05d},{int(yaw * 10):+05d}>"
         self._uart_write(msg.encode())
@@ -270,8 +323,9 @@ class Bridge:
         if not UART_ENABLED or not self._serial:
             return
         try:
-            self._serial.write(data)
-            self._serial.flush()
+            with self._uart_lock:      # 두 스레드가 한 패킷을 통째로 배타적으로 씀 (바이트 섞임 방지)
+                self._serial.write(data)
+                self._serial.flush()
         except Exception as e:
             print(f"[Bridge-{self.rid}] UART write error: {e}")
 
@@ -292,11 +346,33 @@ class Bridge:
 
     def _handle_uart_event(self, event: int):
         """STM32 단일 바이트 이벤트 → cmd_ack 발행"""
+        # ── 반복 이벤트 병합 (2026-07-18) ──────────────────────────────────────
+        # STM이 EVT_DONE/EVT_ACK를 3회 반복 전송한다(위 EVENT_DEDUP_SECS 주석). 같은 값이
+        # 창 안에 또 오면 반복분이므로 버린다 — 첫 바이트만 처리해 '유령 ack'을 막는다.
+        # (앞 명령의 2·3번째 반복이 다음 명령 ack으로 새던 리프트 no-op의 근본 차단)
+        now = time.time()
+        last = self._evt_last_ts.get(event, 0.0)
+        self._evt_last_ts[event] = now      # 반복이 이어지는 동안 창을 계속 갱신
+        if now - last < EVENT_DEDUP_SECS:
+            return
         if event == EVT_DONE:
-            # forward 완료는 카메라 마커가 서버에 보고함(_marker_mixin이 forward의 ACK로 사용).
-            # → forward DONE은 서버로 보내지 않음 (중복 + 다음 in_flight 명령 오ack 방지, 문제 #1).
-            #   forward는 _dispatch_cmd에서 _last_cmd를 안 set하므로 None → 여기서 자동 스킵.
-            #   turn/lift만 _last_cmd가 있어 cmd_ack 발행.
+            # ── 수신확인(EVT_ACK) 전에 온 DONE 은 버린다 (2026-07-18) ─────────────
+            # STM 프로토콜은 항상 EVT_ACK(수신) → EVT_DONE(완료) 순서다. _pending_code 는
+            # 명령을 arm할 때 코드로 세팅되고 EVT_ACK 가 와야 0 으로 풀린다. 즉 아직 !=0 이면
+            # STM 이 '현재 명령을 받았다'고 알린 적조차 없는데 완료가 온 것 = 받은 적 없는
+            # 명령을 완료했을 리 없으니 앞 명령의 잔여/유령 0x81 이다 → 버린다.
+            # (dedup 창을 넘겨 새는 유령 ack까지 프로토콜 레벨에서 원천 차단. 실측: lift_up
+            #  dispatch 후 _pending_code=3 그대로인데 0x81이 와 16ms 유령 ack이 터지던 문제)
+            if self._pending_code != 0:
+                return
+            # forward 완료(2026-07-17): 바로 마커를 발행하지 않고 FORWARD_SETTLE_SECS 만큼 기다린
+            #   뒤 발행한다(_forward_settle_publish). 모터 멈춘 직후 IMU yaw가 흔들려 곧바로 turn을
+            #   내면 no-op이 되기 때문(위 상수 주석). 그동안 카메라 offset이 계속 흘러 yaw가 안정된다.
+            #   STM은 EVT_DONE을 3회 반복 → 첫 번째만 타이머 예약(_fwd_settling 가드).
+            if self._fwd_active and not self._fwd_settling:
+                self._fwd_settling = True
+                threading.Timer(FORWARD_SETTLE_SECS, self._forward_settle_publish).start()
+            # turn/lift만 _last_cmd가 있어 cmd_ack 발행. forward는 _last_cmd=None → 스킵.
             cmd = self._last_cmd
             self._last_cmd = None
             if cmd is not None:
@@ -304,6 +380,21 @@ class Bridge:
         elif event == EVT_ACK:
             # STM이 명령 수신 확인 → carrier(0)로 복귀 (다음 패킷부터 오프셋만 스트리밍)
             self._pending_code = 0
+
+    def _forward_settle_publish(self):
+        """forward EVT_DONE 후 안정 시간이 지나면 호출(Timer). 버퍼된 마커를 발행 → forward ACK.
+
+        settle 동안 카메라가 계속 _fwd_marker를 갱신하므로, 여기서 발행하는 건 '안정된 뒤'의
+        마커다. 발행 직전 _fwd_active=False로 풀어 이후 마커는 평소대로 즉시 발행되게 한다.
+        """
+        if not self._fwd_settling:
+            return                      # 새 forward가 끼어들어 무효화됨 → 이 타이머는 버린다
+        self._fwd_active = False
+        self._fwd_settling = False
+        buffered = self._fwd_marker
+        self._fwd_marker = None
+        if buffered is not None:
+            self._publish_marker_now(*buffered)
 
     # ─── UART 초기화 ──────────────────────────────────────────────────────────
 
