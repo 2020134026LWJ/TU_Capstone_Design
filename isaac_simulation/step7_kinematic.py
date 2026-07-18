@@ -98,15 +98,17 @@ TWIN_MODE = os.environ.get("TWIN", "0") == "1"
 #   해결: (1) 한 칸을 실물이 몇 초에 가는지 실측(forward 발행 → 마커 도착)해서 그 시간에
 #         맞춰 시뮬 속도를 정하고, (2) 엣지 끝까지 가지 않고 HOLD_RATIO 지점에서 멈춰
 #         실물 마커를 기다린다. 실물이 도착해야 트윈도 노드에 안착한다.
-# 첫 칸 추정값 — 실측이 1회 들어오면 EMA가 바로 끌고 간다. 즉 "첫 칸만" 이 값으로 달린다.
-# 실물 1칸 시간을 이미 알면 실행 시 넘겨라:  TWIN=1 TWIN_EDGE_SECS=3.2 python.sh ...
-# (로그의 "실측 1칸 N초"가 안정되면 그 값을 기본값으로 박아두면 첫 칸도 안 어긋난다)
-TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "4.0"))
-# 회전·리프트도 같은 방식으로 페이싱한다. 완료 신호가 마커가 아니라 cmd_ack라는 것만 다르다
-# (명령 발행 → 실물의 cmd_ack 도착 = 실물이 그 동작에 쓴 시간).
-TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "1.0"))
-TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.0"))
-TWIN_EMA_ALPHA      = 0.4    # 실측 반영 비율 (0=고정, 1=직전값만)
+# 트윈 스텝 애니메이션 시간 — 고정값(2026-07-18). EMA_ALPHA=0 이라 실측으로 안 바뀌고
+# 이 값이 매 스텝에 그대로 쓰인다. 홀드-대기는 별개로 유지되므로(끝점에서 실물 마커/ack를
+# 기다림) 실물을 앞질러 가진 않는다. 값이 실물보다 '짧으면' 먼저 닿아 잠깐 대기(안전한 방향),
+# '길면' 순간이동으로 끌려간다 → 실물보다 살짝 짧게 두는 게 안전.
+# 실측 참고(HIL 2026-07-18): 직진 ~4.3초 / 회전 ~2.3초 / 리프트 ~2.1초.
+#   매끄럽게(대기 최소) = 실측값에 맞추기 / 빠릿하게(먼저 가서 대기) = 짧게.
+# env로도 덮을 수 있다:  TWIN_EDGE_SECS=4 TWIN=1 python.sh ...
+TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "2.0"))   # 직진
+TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "1.5"))   # 회전
+TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.0"))   # 리프트
+TWIN_EMA_ALPHA      = 0.0    # 0=고정(실측 학습 끔). >0 이면 실측으로 자동 보정(구방식)
 # 엣지의 이 지점까지만 가고 실물 마커를 기다린다. 1.0 = 노드까지 완전히 가서 기다린다.
 TWIN_HOLD_RATIO     = float(os.environ.get("TWIN_HOLD_RATIO", "1.0"))
 TWIN_SPEED_MIN      = 0.05   # m/s — 페이싱 속도 하한 (실물이 오래 멈춰도 기어가지 않게)
@@ -172,6 +174,10 @@ shelf_node_ids = set(map_cfg["shelf_nodes"])
 ws_node_ids    = set(map_cfg["workstation_nodes"])
 robot_homes    = {int(rid): info["home_node"]
                   for rid, info in robot_cfg["robots"].items()}
+# 초기 heading(0=N/90=E/…) — 서버 RobotManager가 robot.heading을 이 값으로 초기화한다.
+# 트윈도 같은 값에서 몸체를 시작해야 서버 회전 계산과 일치한다 (단일 진실 = robot_config.json).
+robot_init_headings = {int(rid): info.get("initial_heading", 0)
+                       for rid, info in robot_cfg["robots"].items()}
 
 # 양방향 인접 그래프 (forward 명령 시 다음 노드 탐색용)
 adjacency: dict[int, list[int]] = {}
@@ -194,11 +200,12 @@ def server_deg_to_rad(deg: float) -> float:
     return np.radians((90.0 - deg) % 360.0)
 
 
-# 트윈 모드 초기 heading — 서버가 '실물의 첫 마커'에서 가정하는 값과 반드시 같아야 한다.
-# 실물 라파는 heading을 안 보낸다(옵션 a) → 서버는 robot.heading 기본값 0°(북)를 유지.
-# 여기서 안 맞추면 서버는 '북쪽을 본다'고 믿고 회전을 계산하는데 Isaac 몸체는 동쪽을
-# 보고 있어, 같은 명령이 서로 다른 노드로 향한다 (트윈이 엉뚱한 데로 감).
-TWIN_INIT_HEADING_DEG = 0    # 서버 RobotManager의 heading 기본값과 일치
+# 트윈 모드 초기 heading — 서버가 robot.heading을 초기화하는 값과 반드시 같아야 한다.
+# 단일 진실 = robot_config.json의 initial_heading (현재 90=동). 실물을 홈에 **동쪽**으로 놓고
+# 켜므로 서버도 90으로 시작 → 트윈 몸체도 동쪽에서 시작해야 한다.
+# 안 맞추면 서버는 한 방향을 믿고 회전을 계산하는데 Isaac 몸체는 다른 방향 → 엉뚱한 노드로 감.
+# (per-robot 값은 __init__에서 robot_init_headings로 적용. 아래는 rid 못 찾을 때 폴백.)
+TWIN_INIT_HEADING_DEG = robot_init_headings.get(1, 0)
 
 # 수정 71 — 트윈을 **서버 도중에** 붙일 때 AGV의 실제 위치를 명시한다.
 #   TWIN_START_NODE="1:19,2:27"  → AGV-1은 19번, AGV-2는 27번에 있다
@@ -256,8 +263,10 @@ class IsaacAGV:
         # IDLE / TURNING / MOVING
         self.state            = "IDLE"
         # 일반 모드: 0 rad(동). Isaac이 자기 heading을 마커와 함께 발행 → 서버가 90°로 맞춤.
-        # 트윈 모드: 실물은 heading을 안 보내 서버가 0°(북)로 가정 → 몸체도 북을 봐야 일치.
-        self.heading          = (server_deg_to_rad(TWIN_INIT_HEADING_DEG)
+        # 트윈 모드: 실물을 홈에 동쪽(initial_heading=90)으로 놓고 켜므로 몸체도 동쪽에서 시작.
+        #   robot_config.json의 per-robot initial_heading을 그대로 따른다(단일 진실).
+        _init_deg = robot_init_headings.get(rid, TWIN_INIT_HEADING_DEG)
+        self.heading          = (server_deg_to_rad(_init_deg)
                                  if TWIN_MODE else 0.0)   # 라디안, 0=East, π/2=North
         self.heading_target   = self.heading   # TURNING 목표 방향
 
@@ -1789,8 +1798,9 @@ print("  Isaac Sim 5.1.0 — Step 7: Kinematic Physics + cmd-based 제어")
 print("=" * 60)
 print(f"  모드: {'디지털 트윈 (실물 마커 추종 · 발행 안 함)' if TWIN_MODE else '일반 시뮬 (Isaac이 AGV 역할)'}")
 if TWIN_MODE:
-    print(f"  페이싱 초기추정: 1칸 {TWIN_EDGE_SECS_INIT:.1f}초 / 회전 {TWIN_TURN_SECS_INIT:.1f}초 "
-          f"/ 리프트 {TWIN_LIFT_SECS_INIT:.1f}초 → 실측으로 자동 보정")
+    _pace_mode = "실측 자동보정(EMA)" if TWIN_EMA_ALPHA > 0 else "고정(EMA 꺼짐)"
+    print(f"  페이싱: 1칸 {TWIN_EDGE_SECS_INIT:.1f}초 / 회전 {TWIN_TURN_SECS_INIT:.1f}초 "
+          f"/ 리프트 {TWIN_LIFT_SECS_INIT:.1f}초 → {_pace_mode}")
     print(f"          동작 {TWIN_HOLD_RATIO*100:.0f}% 지점에서 실물 신호 대기 "
           f"(직진=마커, 회전·리프트=cmd_ack) → 먼저 끝내지 않는다")
 print(f"  AGV-1 홈: {robot_homes[1]}  AGV-2 홈: {robot_homes[2]}")

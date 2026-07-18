@@ -15,10 +15,16 @@
 
 ---
 
-## 0. 시작 전 (실물로만 확인 — 3단계에서)
+## 0. 시작 전 (매 런마다!)
 
+- **① STM 리셋** — IMU·base_angle을 깨끗이 초기화. **안 하면 드리프트가 누적**돼 회전이 "이미 다
+  돌았다"고 착각(no-op)해서 **안 돌고 직진 → 맵 밖**으로 나간다. **오늘(2026-07-18) 최대 교훈.**
+- **② AGV를 홈에 동쪽(heading 90)으로**: AGV-1 = **8**(W2), AGV-2 = **32**(W1)
+  (`robot_config.json`의 `initial_heading=90`=동쪽. STM 부팅 `base_angle=90`과 정렬. ⚠️옛 문서의 "북향"은 폐기)
+- **③ 서버 재시작** — STM만 리셋하고 서버 장부 그대로면 heading이 어긋난다. ①②③④는 **세트**.
+- **④ rpi_main 재시작**
 - `turn_left` → 실제 좌회전인지 (반대면 STM 매핑 `5`(left)↔`6`(right) 뒤집기)
-- AGV를 홈에 **북향(heading 0)**으로: AGV-1 = **8**(W2), AGV-2 = **32**(W1)
+- **배터리 커넥터 고정**(테이프/타이) — 큰 회전 진동에 빠져 구동부가 죽는다(급정지 원인)
 - ⛔ 카메라 왜곡보정 수식 건드리지 말 것 (STM이 그 값 기준 튜닝됨)
 
 ---
@@ -110,8 +116,9 @@ cd ~/Desktop/TU_Capstone_Design/warehouse_gui_server && python3 warehouse_gui_ws
 
 ```bash
 # [PC]
-./isaac_simulation/run_twin.sh 3.0
-#   3.0 = 1칸 주행 추정 초 (생략하면 3.0, 실측 1회면 자동 대체). run_twin.sh가 TWIN=1 을 자동 설정
+./isaac_simulation/run_twin.sh          # 직진 2.0초·회전 1.5초 고정 (EMA 꺼짐, 2026-07-18). 리프트 2초
+#   조절: run_twin.sh 4.0 2.3 (실측에 맞춰 매끄럽게) — 짧으면 먼저 가서 대기, 길면 순간이동
+#   run_twin.sh가 TWIN=1 + 초기 heading(=initial_heading 90=동쪽)을 자동 설정
 #   ⚠️ TWIN=1 없이 step7 직접 실행 = Isaac이 '트윈'이 아니라 'AGV 본인'이 되어 마커 직접 발행 → 실물과 동시에 켜면 상태 꼬임
 
 # [PC] 트윈 회전이 이상할 때만: 옛 델타 방식 (기본=절대값 실시간 추종)
@@ -122,7 +129,8 @@ TWIN_ABS_HEADING=0 ./isaac_simulation/run_twin.sh 3.0
 
 ## 5. 1대 주행 (지금 단계)
 
-3단계에서 라파 **1대만** 켠다.
+3단계에서 라파 **1대만** 켠다. `robot_config.json`에 AGV-2가 있어도 **접속만 안 하면 장애물이 아니다**
+(never-online = ever_seen=False → A*·런타임 둘 다 무시, 2026-07-18 수정). → **config 그대로 두고 1대로 완주 가능.**
 
 ```bash
 # [PC] 서버 로그에서 확인: presence online rid=1  (안 뜨면 태스크 배정 안 됨)
@@ -179,7 +187,10 @@ echo $AGV_ID
 | GUI 주문 반응 없음 | `server.main` 미기동 |
 | GUI 재고·진행 안 뜸 | `warehouse_server_v2.py` 미기동 |
 | turn/lift 후 다음 명령 안 나감 | `cmd_ack` 미도착 → UART `0x81` |
+| **회전 안 하고 직진 / 맵 밖** | **IMU 드리프트 → STM 리셋**(매 런, 0단계) |
 | forward 후 멈춤 | 마커 못 봄 → 초점/마커 위치 |
+| **큰 회전 직후 급정지** | **배터리 커넥터 빠짐 → 고정** |
+| 먼 선반 배달 중 `blocked → node N` | 다른 AGV가 그 칸 점유(2대 운용). 1대면 ever_seen으로 해결됨 |
 | `.local` 접속 안 됨 | 핫스팟(LWJ) 미접속 → 기기목록서 IP 직접 |
 
 ---

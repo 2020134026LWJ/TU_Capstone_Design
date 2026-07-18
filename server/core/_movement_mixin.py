@@ -509,6 +509,12 @@ class MovementMixin:
             for other_rid, other in self.robot_manager.robots.items():
                 if other_rid == rid:
                     continue
+                # 수정 75: 한 번도 안 켠 AGV는 바닥에 없다 → 막으면 안 된다.
+                # A* 계획부(_plan_and_publish_move)는 이미 ever_seen으로 게이팅하는데,
+                # 이 진입 직전 점유 체크가 빠져 있어 계획은 통과시킨 칸을 런타임이 막았다
+                # (실측: AGV-2 미접속인데 홈 노드 32가 AGV-1 경로를 영구 차단 → 데드락).
+                if not other.ever_seen:
+                    continue
                 occupied = other.current_node == next_node
                 reserved = self._is_node_reserved_by(next_node, other_rid)
                 if occupied or reserved:
