@@ -1,0 +1,4 @@
+
+# 협업자 GUI/서버 (별도 관리)
+warehouse_gui_server/warehouse.db
+warehouse_gui_server/*.xlsx
