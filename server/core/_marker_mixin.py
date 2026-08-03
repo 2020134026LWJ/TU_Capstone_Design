@@ -176,6 +176,17 @@ class MarkerMixin:
         if queue is not None and queue.in_flight is not None:
             in_flight = queue.in_flight
 
+            # 수정 92: 회전/리프트 in-flight 중 들어온 마커는 무시 (수정 64의 turn/lift 판).
+            # 회전·리프트는 cmd_ack로만 완료되고 그동안 로봇은 같은 노드에 머문다. 그 사이 들어온
+            # 마커는 유령(회전 중 옆칸 오검출)이거나 같은 노드 중복 → ack하면 회전을 조기 종료하고
+            # 위치를 점프시켜 경로가 통째로 어긋난다(실측 2026-07-21: 회전 중 마커 17 → 노드 25로 이탈).
+            # forward만이 마커로 완료된다 — 완료 신호를 in-flight 종류별로 분리한다.
+            if in_flight.cmd in ("turn_left", "turn_right", "turn_180",
+                                 "lift_up", "lift_down"):
+                print(f"[RequestHandler] Robot {rid}: {in_flight.cmd} 중 마커 {node} 무시 "
+                      f"(회전/리프트는 cmd_ack로만 완료)")
+                return {"type": "marker_ack", "success": False, "action": "marker_during_turn_ignored"}
+
             # 수정 64: forward 중이면 도착할 수 있는 곳은 **목표 노드 하나뿐**이다.
             #
             # 예전엔 불일치를 감지하고도 WARN만 찍고 **그대로 믿었다**. 실측(2026-07-12):
@@ -337,6 +348,18 @@ class MarkerMixin:
                     self._try_dispatch_all()
                     self._try_assign_pending_tasks()
                     return result
+
+        # 수정 89: 복귀 중 인터셉트를 '마커 직후(in-flight 비어있는 이 순간)'에 시도.
+        # _try_assign_pending_tasks는 _send_next_command 뒤에 호출돼 항상 in-flight가 다시
+        # 차서 인터셉트가 영영 skip됐다(수정 87로 태스크엔 도달하나 이 타이밍 게이트에 막힘).
+        # 여기(다음 복귀 명령 전, fresh 상태)서 검사 → 안전하게 우회. 다운스트림 링크(새 태스크
+        # 소비)는 기존 포워딩 도착 핸들러(FORWARD_SHELF, 수정 15)가 담당하므로 소유권 이전 불요.
+        # 이미 복귀 목적지에 도착한 경우는 위 _process_arrival이 먼저 처리 → 여기 도달 안 함(자연 폴백).
+        if (robot.status == RobotStatus.RETURNING_SHELF
+                and self._try_intercept_for_carried_shelf(rid)):
+            self._try_dispatch_all()
+            self._try_assign_pending_tasks()
+            return {"type": "marker_ack", "success": True, "action": "intercepted"}
 
         # 목표 노드가 아닌 중간 노드 → 다음 cmd 발행
         # (REFACTOR F Phase 4.1: lookahead_replan 삭제 — reservation이 plan 시점에 차단)

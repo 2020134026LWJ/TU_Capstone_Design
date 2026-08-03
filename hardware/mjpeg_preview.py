@@ -24,7 +24,7 @@ import cv2
 PORT = 8000
 
 _PAGE = """<!DOCTYPE html>
-<html><head><title>AGV 카메라</title>
+<html><head><title>AGV camera</title>
 <style>
  body {{ background:#111; color:#eee; font-family:sans-serif; text-align:center; margin:0; padding:16px; }}
  img {{ width:80vw; max-width:960px; border:1px solid #444; }}
@@ -32,7 +32,7 @@ _PAGE = """<!DOCTYPE html>
  b  {{ color:#fff; }}
 </style></head>
 <body>
-<h2>AGV 카메라</h2>
+<h2>AGV camera</h2>
 <img src="stream.mjpg">
 <p>{note}</p>
 </body></html>"""

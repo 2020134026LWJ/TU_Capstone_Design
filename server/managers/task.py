@@ -322,6 +322,12 @@ class TaskManager:
             if item not in task.items_picked:
                 task.items_picked.append(item)
 
+        # 수정 91(근본): 픽이 끝난 순간 이 태스크의 이 선반 수요는 '만족됨=죽은 데이터'다.
+        # 지금 지워야 shelf_demand에 유령 수요가 안 남는다(수정 90은 조회 시 거르는 안전망).
+        # 안전: 제거 대상은 자기 태스크·자기 선반뿐 — _check_shelf_needed_elsewhere는 '다른 WS'
+        # 수요만 보고, 포워딩 대상(T2) 수요는 forward 시 별도 제거된다(수정 15). idempotent.
+        self.remove_shelf_demand_for_shelf(task_id, current_st.shelf_id)
+
         # 포워딩 재픽업 사이클 확인: 다음 서브태스크가 PICKUP_SHELF(같은 선반)이면
         # → _decide_shelf_action 대신 재픽업 액션 반환
         next_idx = task.current_subtask_idx + 1
@@ -457,6 +463,11 @@ class TaskManager:
             if not other_task or other_task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
                 continue
 
+            # 수정 90: 이미 다 픽한(satisfied) 수요는 skip. 운반하던 태스크 자신의 낡은 self-수요를
+            # 집으면 방금 삽입한 WAIT+PICKUP+RETURN을 되레 지운다(인터셉트 후 GUI 파란불 누락).
+            if all(i in other_task.items_picked for i in demand["items"]):
+                continue
+
             # 해당 작업에서 이 선반 관련 서브태스크 찾아서 수정
             for st in other_task.subtasks:
                 if st.shelf_id != shelf_id:
@@ -557,13 +568,20 @@ class TaskManager:
         return next_st
 
     def get_demand_items_for_ws(self, shelf_id: int, ws_id: int) -> List[str]:
-        """dest WS에서 아직 필요한 선반의 물품 목록 반환"""
+        """dest WS에서 아직 필요한 선반의 물품 목록 반환.
+
+        수정 90: 첫 ws 매칭에서 곧장 return하지 않는다. 이미 다 픽한(remaining 빈) 수요는
+        'satisfied=수요 아님'이라 건너뛰고 다음 수요를 본다. 인터셉트로 같은 WS에서 두 주문이
+        겹칠 때, 운반하던 태스크의 낡은 self-수요가 새 주문 수요를 가리던 문제(GUI 파란불 누락).
+        """
         demands = self.shelf_demand.get(shelf_id, [])
         for d in demands:
             if d["workstation_id"] == ws_id:
                 other_task = self.tasks.get(d["task_id"])
                 if other_task:
-                    return [i for i in d["items"] if i not in other_task.items_picked]
+                    remaining = [i for i in d["items"] if i not in other_task.items_picked]
+                    if remaining:
+                        return remaining
         return []
 
     def find_task_waiting_for_shelf(self, shelf_id: int) -> Optional["PickingTask"]:

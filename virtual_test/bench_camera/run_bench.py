@@ -173,6 +173,12 @@ class BenchBridge(br.Bridge):
         """가짜 로봇이 다음 노드에 도착 — 카메라가 마커를 봤을 때와 동일한 발행"""
         self.robot.node = node
         self.publish_marker(node)
+        # forward 중이면 마커가 _fwd_active로 버퍼링된다(2026-07-17 게이팅). 실물은 STM이
+        # forward 끝에 EVT_ACK→EVT_DONE을 보내 버퍼를 flush한다 → 가짜 STM도 재현해야
+        # forward가 완료된다(없으면 마커가 버퍼에 갇혀 진행이 멈춤).
+        if self._fwd_active:
+            self._pending_code = 0                 # EVT_ACK: 수신확인 → guard 통과
+            self._handle_uart_event(br.EVT_DONE)   # EVT_DONE: settle 타이머로 버퍼 마커 flush
 
 
 def _run_manual(bridge: "BenchBridge", robot: "VirtualRobot", rid: int):

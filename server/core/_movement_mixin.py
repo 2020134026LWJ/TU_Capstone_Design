@@ -44,11 +44,9 @@ from ..managers.shelf import ShelfStatus
 from ..planning.command_queue import CommandEntry  # REFACTOR E 2.3
 
 # 수정 82: 안전망('내려놓고 돌기') 토글. 기본 ON. SAFETY_NET=0 이면 끔(오라클 대조검증용).
+# 수정 93: 근본설계 전환 — 정적선반만 내려놓기, 살아있는 든로봇은 대기(교착감지가 backstop).
+#   구 TURN_DEFER_MAX/_turn_defer_count(스냅샷 '움직이나?' 추측)는 폐지.
 SAFETY_NET_ENABLED = os.environ.get("SAFETY_NET", "1") == "1"
-
-# 수정 84: 든로봇(움직이는) 위험엔 내려놓기 전에 잠깐 '대기'(상대가 곧 비킴). 정적선반은
-# 대기 불가(안 비킴)→즉시 내려놓기. 대칭교착 방지로 N회 초과 시 폴백=내려놓고 돌기.
-TURN_DEFER_MAX = int(os.environ.get("TURN_DEFER_MAX", "3"))
 
 
 class MovementMixin:
@@ -129,12 +127,15 @@ class MovementMixin:
         return None
 
     def _detect_deadlock_cycle(self) -> Optional[List[int]]:
-        """일반 교착(wait-for 사이클) 감지 (수정 54).
+        """일반 교착(wait-for 사이클) 감지 (수정 54 + 93).
 
         로봇 상태에서 wait_for 맵(rid → 가려는 노드를 점유한 상대)을 만들고,
         순수 사이클 찾기는 planning.deadlock_detector.find_wait_cycle에 위임
-        (layering: 감지=도구, 해소=core). 막힌(_is_blocked) + 다음 cmd가 forward인
-        로봇만 대상 — turn 대기 중이면 아직 노드 점유 경쟁 아님.
+        (layering: 감지=도구, 해소=core). 엣지 종류:
+          - forward-대기: 막힌(_is_blocked) + 다음 cmd가 forward → 가려는 노드 점유자.
+          - staging-대기: 회랑 앞에서 줄 선 로봇 → 그 회랑 점유자.
+          - 회전-대기(수정 93): 든 채 회전하려는데 footprint 이웃칸을 다른 든 로봇이 점유
+            → 그 로봇. 이게 없으면 '회전 마주 막힘'(둘이 서로의 이웃 점유)이 감지 안 돼 hang.
         """
         wait_for: Dict[int, int] = {}
         for rid, robot in self.robot_manager.robots.items():
@@ -157,6 +158,14 @@ class MovementMixin:
             owner = self.reservation.corridor_owner(target_ws)
             if owner is not None and owner != rid:
                 wait_for[rid] = owner
+        # 수정 93: 든 채 회전 대기도 wait-for에 등록 → 상호 회전 교착(길이-2 사이클) 감지.
+        # (위 forward 루프는 다음 cmd가 turn이면 건너뛰므로 여기서 별도로 채운다.)
+        for rid in self.robot_manager.robots:
+            if rid in wait_for:
+                continue
+            blocker = self._turn_wait_blocker(rid)
+            if blocker is not None:
+                wait_for[rid] = blocker
         return find_wait_cycle(wait_for)
 
     def _staging_target_ws(self, rid: int) -> Optional[int]:
@@ -167,14 +176,66 @@ class MovementMixin:
                     return ws_node
         return None
 
-    def _resolve_deadlock(self, cycle: List[int]) -> bool:
-        """교착 사이클 해소: 멤버 1명(양보자)을 contested 노드 피해 우회 재계획 (수정 54).
+    def _corridor_eta_contender(self, rid: int, ws_node: int) -> Optional[int]:
+        """ETA 우선권(수정 94): 같은 작업대 회랑으로 곧 배달 올 다른 로봇 중
+        rid보다 **엄격히 더 먼저 도착할**(ETA 짧은) 로봇의 rid를 반환. 없으면 None.
 
-        사이클은 링크 하나만 끊으면 사슬로 풀린다 → 전원 동시 재계획 불필요(재교착 위험).
-        양보자가 가려던 노드(contested)를 excluded_transit에 넣어 A*가 bypass(row1/row6)로
-        우회 → 양보자가 자기 현재 노드를 비우면 뒤 로봇이 전진, 나머지는 _try_dispatch_all
-        재시도로 자연 unwind. 양보자는 결정론(낮은 rid부터), A* 실패 시 다음 멤버 시도.
+        왜: 회랑 점유는 '픽업(배달 커밋)을 먼저 끝낸' 순서로 정해졌다. 픽업이 몇 초
+        빨랐어도 경로가 더 길면, 정작 작업대엔 늦게 도착하면서 먼저 온 로봇을 세워둔다.
+        여기서 '누가 먼저 도착하나'로 다시 판정해, 먼저 도착할 로봇에게 선점권을 준다.
+
+        contender 조건(보수적 — 곧 should_stage를 부를 게 확실한 로봇만):
+          선반을 든 채(carrying_shelf) PICKING_UP_SHELF / DELIVERING_TO_WS 상태이고,
+          현재 태스크의 목표 작업대가 이 ws_node인 로봇. 동률은 제외(선착순 유지).
+        ETA = A* 휴리스틱 잔여 거리(빠른 추정). 실제 예약과 무관 = 부작용 없음.
         """
+        robot = self.robot_manager.get_robot(rid)
+        if robot is None or robot.current_node is None:
+            return None
+        best_rid = None
+        best_eta = self.path_planner._heuristic(robot.current_node, ws_node)
+        for other in self.robot_manager.get_all_robots():
+            if other.rid == rid or other.current_node is None:
+                continue
+            if other.carrying_shelf is None:
+                continue
+            if other.status not in (RobotStatus.PICKING_UP_SHELF,
+                                    RobotStatus.DELIVERING_TO_WS):
+                continue
+            if other.current_task_id is None:
+                continue
+            otask = self.task_manager.get_task(other.current_task_id)
+            if otask is None or otask.workstation_id != ws_node:
+                continue
+            oeta = self.path_planner._heuristic(other.current_node, ws_node)
+            if oeta < best_eta:  # 엄격히 더 짧아야 선점 (동률/더 김 → 선착순 유지)
+                best_rid, best_eta = other.rid, oeta
+        return best_rid
+
+    def _resolve_deadlock(self, cycle: List[int]) -> bool:
+        """교착 사이클 해소 (수정 54 + 93). 피해자 종류별로 다른 해소책.
+
+        - 회전-대기 피해자(수정 93): 한쪽을 내려놓고 돌기로 강제 → 맨몸 회전 → 자기 칸
+          비우고 나감 → 사이클 unwind. (A* 우회는 회전 교착엔 안 맞다 — 양보자가 못 돎.)
+        - forward-대기 피해자(수정 54): 양보자가 가려던 노드(contested)를 excluded_transit에
+          넣어 A*가 bypass(row1/row6)로 우회 → 자기 현재 노드를 비우면 뒤 로봇이 전진.
+        사이클은 링크 하나만 끊으면 사슬로 풀린다 → 전원 동시 개입 불필요(재교착 위험).
+        나머지는 _try_dispatch_all 재시도로 자연 unwind. 결정론(낮은 rid부터), 실패 시 다음 멤버.
+        """
+        # 수정 93: 회전-대기 피해자 우선 — 내려놓고 돌기로 강제 해소.
+        for member in sorted(cycle):
+            if self._turn_wait_blocker(member) is None:
+                continue
+            robot = self.robot_manager.get_robot(member)
+            if robot is None or not robot.command_queue:
+                continue
+            turn_cmd = robot.command_queue[0]
+            print(f"[RequestHandler] 교착 사이클 {cycle}: AGV-{member} 내려놓고 돌기로 해소 "
+                  f"(회전 마주 막힘)")
+            robot.command_queue[:1] = ["lift_down_hold", turn_cmd, "lift_up_hold"]
+            if self._send_next_command(member):   # lift_down_hold dispatch → 맨몸 회전
+                return True
+        # forward-대기 교착 → A* 우회 재계획 (수정 54)
         for yielder in sorted(cycle):
             y = self.robot_manager.get_robot(yielder)
             if not y or not y.planned_path:
@@ -314,6 +375,22 @@ class MovementMixin:
                 occupied.add(shelf.current_node)
         return occupied
 
+    def _carry_turn_hazard_nodes(self) -> Set[int]:
+        """든 채 회전 시 '내려놓고 돌기'가 강제되는 노드 집합 (수정 95 — A* 재료).
+
+        = 정적(비-CARRIED) 선반과 직교 인접한 노드들. 그 위에서 선반을 든 채 돌면
+        옆 정적선반을 쓸어 `_turn_hazard_kind`의 '정적선반' 게이트가 발동 → lift_down+turn
+        +lift_up(≈6초). 그 결정적 비용을 A* 계획 단계에서 미리 반영하기 위한 재료다.
+        움직이는 '든로봇' 위험은 전이적이라 제외한다(비용에 넣으면 경로가 흔들림 = thrashing).
+        """
+        hazard: Set[int] = set()
+        for shelf in self.shelf_manager.shelves.values():
+            if shelf.status == ShelfStatus.CARRIED or shelf.current_node is None:
+                continue
+            for nb in self.path_planner.neighbors(shelf.current_node):
+                hazard.add(nb)
+        return hazard
+
     def _turn_hazard_kind(self, rid: int, node: int) -> Optional[str]:
         """수정 82(안전망): node에서 든 채 회전 시 위험물 종류.
         None=안전 / "정적선반"(안 비킴→내려놓고돌기 필수) / "든로봇"(움직임→기다리면 됨) /
@@ -346,21 +423,43 @@ class MovementMixin:
             return "든로봇"
         return None
 
-    def _intransit_carrier_adjacent(self, rid: int, node: int) -> bool:
-        """node의 직교 이웃으로 '이동 중(in_flight forward)'인 다른 든 로봇이 진입 중인가.
+    def _holding_turn(self, robot) -> bool:
+        """물리적으로 선반을 '든 채' 제자리 회전하려는가 (수정 85/93).
 
-        수정 84: 든로봇 위험에 '대기'가 안전하려면 상대가 실제로 움직여야 한다 —
-        그 로봇의 마커 도착이 _try_dispatch_all 재시도를 유발해 대기가 곧 풀린다.
-        정지한 든 로봇 옆(current_node==nb)은 안 비키고 재시도 트리거도 없어 → 대기 금지.
+        ★물리적으로 이미 든 경우만. 픽업/반납/포워딩의 pre-lift turn은 큐에 lift_up이
+        남아있다(수정 79) — carrying_shelf가 세팅됐어도 선반은 아직 바닥에 있다.
+        '내려놓고 돌기'(수정 82) 중의 turn은 다음이 lift_up_hold → 이미 내려놨으므로 제외.
         """
-        for nb in self.path_planner.neighbors(node):
-            for orid, other in self.robot_manager.robots.items():
-                if orid == rid or other.carrying_shelf is None:
+        q = robot.command_queue
+        return (bool(q)
+                and q[0] in ("turn_left", "turn_right", "turn_180")
+                and robot.carrying_shelf is not None
+                and "lift_up" not in q
+                and not (len(q) >= 2 and q[1] == "lift_up_hold"))
+
+    def _turn_wait_blocker(self, rid: int) -> Optional[int]:
+        """rid가 '든 채 회전 대기' 중이면 그를 막는(이웃칸 점유) 다른 든 로봇 rid, 아니면 None.
+
+        수정 93: 회전-대기를 wait-for 그래프 엣지로 표현하기 위한 조회 — 상호 회전 교착
+        (든 로봇 둘이 서로의 footprint 이웃칸 점유) 감지의 재료. 정적선반이 끼면 대기가
+        아니라 내려놓기라 대상 아님(→ None). footprint 이웃칸에 '서있는'(current_node) 다른
+        든 로봇 = 비켜줘야 할 상대. 이동 중(진입만) 든 로봇은 곧 지나가 교착 아님 → 제외.
+        결정론: 낮은 rid 우선.
+        """
+        robot = self.robot_manager.get_robot(rid)
+        if robot is None or not self._holding_turn(robot):
+            return None
+        kind = self._turn_hazard_kind(rid, robot.current_node)
+        if kind is None or "정적선반" in kind:
+            return None
+        for nb in self.path_planner.neighbors(robot.current_node):
+            for orid in sorted(self.robot_manager.robots):
+                if orid == rid:
                     continue
-                oq = self.command_queues.get(orid)
-                if oq is not None and oq.peek_expected_node() == nb:
-                    return True
-        return False
+                other = self.robot_manager.robots[orid]
+                if other.carrying_shelf is not None and other.current_node == nb:
+                    return orid
+        return None
 
     # ─── 명령 발행 (충돌 체크 포함) ───
 
@@ -433,65 +532,33 @@ class MovementMixin:
         next_cmd = robot.command_queue[0]
         next_node: Optional[int] = None
 
-        # 수정 82(안전망 '내려놓고 돌기'): 든 로봇이 회전하려는데 직교 옆칸에 '서있는 선반'
-        # 또는 '다른 든 로봇'이 있으면, 든 채 돌면 선반이 부풀어(s/√2) 충돌한다. → 내려놓고
-        # 돌고 다시 든다: [turn] → [lift_down_hold, turn, lift_up_hold]. **발행 직전 '지금'
-        # 위치로 검사**하므로 시공간 예측 드리프트가 없다. 이미 감싸졌으면(다음이 lift_up_hold)
-        # 재삽입 안 함(무한루프 방지). hold lift는 물리 동작만 — 상태 오염 없음(수정 82 in_place).
-        # holding_turn: 물리적으로 선반을 '든 채' 제자리 회전하려는가? (수정 85)
-        #   ★물리적으로 이미 든 경우만. 픽업/반납/포워딩의 pre-lift turn은 큐에 lift_up이
-        #   남아있다(수정 79) — 그땐 carrying_shelf가 세팅됐어도 선반은 아직 바닥에 있다.
-        #   '내려놓고 돌기'(수정 82) 중의 turn은 다음이 lift_up_hold → 이미 내려놨으므로 제외.
-        holding_turn = (
-            next_cmd in ("turn_left", "turn_right", "turn_180")
-            and robot.carrying_shelf is not None
-            and "lift_up" not in robot.command_queue
-            and not (len(robot.command_queue) >= 2
-                     and robot.command_queue[1] == "lift_up_hold")
-        )
-        _hazard = None
-        if SAFETY_NET_ENABLED and holding_turn:
-            _hazard = self._turn_hazard_kind(rid, robot.current_node)
-        if _hazard:
-            # 수정 84: 위험물이 '든로봇'뿐(움직임)이면 곧 비키므로 내려놓지 말고 잠깐 대기.
-            # '정적선반'이 끼면(안 비킴) 즉시 내려놓고 돌기. 무한대기(대칭교착) 방지 위해
-            # 든로봇 대기 N회 초과 시 폴백=내려놓고 돌기(양쪽이 내려놓으면 위험 소멸).
-            defer = getattr(self, "_turn_defer_count", None)
-            if defer is None:
-                defer = self._turn_defer_count = {}
-            # 대기는 (정적선반 없음) AND (이동 중 든 로봇이 이웃 진입 중)일 때만 안전.
-            # 정지 든로봇 옆은 안 비키고 재시도 트리거도 없어 대기 금지(→ 내려놓고 돌기).
-            only_moving = ("정적선반" not in _hazard
-                           and self._intransit_carrier_adjacent(rid, robot.current_node))
-            if only_moving and defer.get(rid, 0) < TURN_DEFER_MAX:
-                defer[rid] = defer.get(rid, 0) + 1
-                print(f"[RequestHandler] Robot {rid}: 든 채 회전 위험 @{robot.current_node} "
-                      f"[위험물: {_hazard}] → 대기 (defer {defer[rid]}/{TURN_DEFER_MAX}, "
-                      f"움직이는 로봇이라 곧 비킴)")
-                return False   # 턴 보류 — _try_dispatch_all이 상대 이탈 시 재시도
-            # 정적선반 포함 / 정지 든로봇 옆 / 든로봇 대기 N회 초과 → 내려놓고 돌기
-            defer.pop(rid, None)
-            if "정적선반" in _hazard:
-                _why = "정적선반=못 기다림"
-            elif only_moving:
-                _why = "든로봇 대기초과→폴백"
-            else:
-                _why = "정지 든로봇=대기 무의미"
+        # 수정 82/93(안전망 '내려놓고 돌기' → 근본설계): 든 로봇이 회전하려는데 직교 옆칸에
+        # 선반/다른 든 로봇이 있으면, 든 채 돌면 선반이 부풀어(s/√2) 충돌한다. 점유자를 둘로 가른다:
+        #   - 정적 선반(안 비킴) 옆 → 즉시 내려놓고 돌기 [lift_down_hold, turn, lift_up_hold].
+        #   - 살아있는 든 로봇(언젠가 비킴) 옆 → 대기(return False). 상대 이동 시 재시도로 해제.
+        #     안 비키는 유일한 경우=상호 회전 교착 → _detect_deadlock_cycle가 회전-대기 엣지로
+        #     잡아 _resolve_deadlock가 한쪽을 내려놓게 함(감지+해소가 진행 보장, 수정 93).
+        #   발행 직전 '지금' 위치로 검사 → 시공간 예측 드리프트 없음. 이미 감싸졌으면(다음이
+        #   lift_up_hold) _holding_turn=False라 재삽입 안 함(무한루프 방지). hold lift=물리 동작만.
+        holding_turn = self._holding_turn(robot)
+        _hazard = self._turn_hazard_kind(rid, robot.current_node) if (
+            SAFETY_NET_ENABLED and holding_turn) else None
+        if _hazard and "정적선반" in _hazard:
             print(f"[RequestHandler] Robot {rid}: 든 채 회전 위험 @{robot.current_node} "
-                  f"[위험물: {_hazard}] → 내려놓고 돌기 ({_why})")
+                  f"[위험물: {_hazard}] → 내려놓고 돌기 (정적선반=안 비킴)")
             robot.command_queue[:1] = ["lift_down_hold", next_cmd, "lift_up_hold"]
             next_cmd = robot.command_queue[0]   # = "lift_down_hold"
-        else:
-            # 위험 해소(또는 non-holding) → 이 로봇의 defer 카운터 리셋
-            defer = getattr(self, "_turn_defer_count", None)
-            if defer is not None:
-                defer.pop(rid, None)
-            if holding_turn:
-                # 수정 85(순서2): 지금 이웃은 비었지만 회전하는 '동안' 다른 든 로봇이 이웃칸
-                # 으로 진입할 수 있다(in-transit). 회전 = 이웃 4칸을 회전 시간만큼 점유한다는
-                # 물리 사실을 footprint 예약으로 표현 → 진입 forward가 is_turn_locked로 대기.
-                self.reservation.reserve_turn_footprint(
-                    rid, self.path_planner.neighbors(robot.current_node))
+        elif _hazard:
+            # 살아있는 든로봇뿐 → 대기. 곧 비키거나(재시도) 상호 회전 교착이면 감지기가 해소.
+            print(f"[RequestHandler] Robot {rid}: 든 채 회전 위험 @{robot.current_node} "
+                  f"[위험물: {_hazard}] → 대기 (살아있는 든로봇, 곧 비킴/교착이면 감지기 해소)")
+            return False   # 턴 보류 — _try_dispatch_all이 상대 이탈/교착해소 시 재시도
+        elif holding_turn:
+            # 수정 85(순서2): 지금 이웃은 비었지만 회전하는 '동안' 다른 든 로봇이 이웃칸으로
+            # 진입할 수 있다(in-transit). 회전 = 이웃 4칸을 회전 시간만큼 점유한다는 물리
+            # 사실을 footprint 예약으로 표현 → 진입 forward가 turn_lock으로 대기.
+            self.reservation.reserve_turn_footprint(
+                rid, self.path_planner.neighbors(robot.current_node))
 
         # forward 명령일 때만 충돌 체크
         if next_cmd == "forward":
@@ -621,6 +688,13 @@ class MovementMixin:
         actual_goal = goal
         staging_excluded_node: Optional[int] = None  # staging redirect 시 corridor ws_node 통과 금지
         if not self.DEMO_MODE and goal in self.staging_manager.corridors:
+            # ETA 우선권(수정 94): 회랑이 비어 지금 rid가 그냥 점유해버릴 상황이라도,
+            # 같은 작업대로 더 먼저 도착할 로봇이 있으면 그쪽에 선점권을 넘겨
+            # rid가 스테이징하도록 한다 (should_stage가 held로 보게 됨).
+            if not self.reservation.is_corridor_held(goal):
+                winner = self._corridor_eta_contender(rid, goal)
+                if winner is not None:
+                    self.staging_manager.reserve_for(goal, winner)
             staging_node = self.staging_manager.should_stage(goal, rid, is_forwarding=is_forwarding)
             if staging_node is not None:
                 self._refactor_f_counters['staging_redirect'] += 1
@@ -716,6 +790,9 @@ class MovementMixin:
         # A* 경로 계획 (reservation 기반 시공간 충돌 회피)
         # in_flight None이 보장되므로 robot.heading이 곧 ground-truth (예측 불필요)
         planning_heading = robot.heading if robot else None
+        # 수정 95: 선반을 든 채라면 '정적선반 옆 회전=내려놓고돌기' 비용을 A* 재료로 편입.
+        carry_turn_hazard = (self._carry_turn_hazard_nodes()
+                             if robot and robot.carrying_shelf is not None else None)
         timed_path = self.path_planner.astar_with_time(
             start=start,
             goal=actual_goal,
@@ -725,6 +802,7 @@ class MovementMixin:
             excluded_transit=excluded_transit,
             start_heading=planning_heading,
             soft_avoid=soft_avoid or None,
+            carry_turn_hazard=carry_turn_hazard,
         )
 
         if timed_path is None:

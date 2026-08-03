@@ -102,12 +102,13 @@ TWIN_MODE = os.environ.get("TWIN", "0") == "1"
 # 이 값이 매 스텝에 그대로 쓰인다. 홀드-대기는 별개로 유지되므로(끝점에서 실물 마커/ack를
 # 기다림) 실물을 앞질러 가진 않는다. 값이 실물보다 '짧으면' 먼저 닿아 잠깐 대기(안전한 방향),
 # '길면' 순간이동으로 끌려간다 → 실물보다 살짝 짧게 두는 게 안전.
-# 실측 참고(HIL 2026-07-18): 직진 ~4.3초 / 회전 ~2.3초 / 리프트 ~2.1초.
+# 실측(HIL 2026-07-21, 최소값 기반 — 트윈이 실물보다 살짝 짧아야 홀드로 맞춤):
+#   칸 이동 3.31초 [3.31~3.45] / 90° 회전 2.04초 [2.04~2.38] / 리프트 2.13초 [2.13~2.15].
 #   매끄럽게(대기 최소) = 실측값에 맞추기 / 빠릿하게(먼저 가서 대기) = 짧게.
 # env로도 덮을 수 있다:  TWIN_EDGE_SECS=4 TWIN=1 python.sh ...
-TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "2.0"))   # 직진
-TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "1.5"))   # 회전
-TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.0"))   # 리프트
+TWIN_EDGE_SECS_INIT = float(os.environ.get("TWIN_EDGE_SECS", "3.31"))  # 직진(칸 이동)
+TWIN_TURN_SECS_INIT = float(os.environ.get("TWIN_TURN_SECS", "2.04"))  # 90° 회전
+TWIN_LIFT_SECS_INIT = float(os.environ.get("TWIN_LIFT_SECS", "2.13"))  # 리프트
 TWIN_EMA_ALPHA      = 0.0    # 0=고정(실측 학습 끔). >0 이면 실측으로 자동 보정(구방식)
 # 엣지의 이 지점까지만 가고 실물 마커를 기다린다. 1.0 = 노드까지 완전히 가서 기다린다.
 TWIN_HOLD_RATIO     = float(os.environ.get("TWIN_HOLD_RATIO", "1.0"))
@@ -141,23 +142,9 @@ TWIN_SNAP_WARN_M    = 0.30
 #  이 상한이 트윈을 사람 반응속도로 끌어내리지 않게 막아준다.)
 TWIN_EDGE_MAX = float(os.environ.get("TWIN_EDGE_MAX", "8.0"))
 
-# 수정 68 (B) — 회전 실시간 추종.
-#
-# **직진과 회전은 비대칭이다.** 직진 중엔 마커가 시야를 벗어나 보간이 불가피하지만,
-# 회전은 노드 위에서 제자리로 도니 **발밑 마커가 계속 보인다** → 추정이 아니라 **측정**이 가능하다.
-# 그래서 회전만 /agv/pose(카메라 yaw)로 직접 따라간다. 직진은 그대로 시간 보간(수정 60/65).
-#
-# 마커가 시야에서 사라지면 pose가 끊긴다 → 이 시간을 넘으면 다시 시간 보간으로 되돌아간다.
-POSE_STALE_SECS = 0.5
-
-# 수정 77 — 트윈 회전 heading을 '절대값'으로 (HEADING_OFFSET 확정 후).
-#
-# 델타(변화량) 방식은 HEADING_OFFSET을 못 재던 시절의 우회였다. 북향 마커로 offset이
-# 확정(=0)되면 카메라 yaw를 곧바로 절대 방위로 쓸 수 있고, 그게 더 정확하다 — 기준(anchor)
-# 없이 매 프레임 실물 방위를 그대로 반영하므로 회전을 거듭해도 오차가 누적되지 않는다.
-# 되돌릴 수 있게 밸브(env)로 둔다: TWIN_ABS_HEADING=0 이면 옛 델타 방식.
-POSE_HEADING_OFFSET = float(os.environ.get("HEADING_OFFSET", "0"))    # 카메라 yaw→서버 heading 상수 (북향 마커 → 0)
-TWIN_ABS_HEADING    = os.environ.get("TWIN_ABS_HEADING", "1") == "1"  # 1=절대(기본) / 0=델타(구방식)
+# [2026-07-24] 트윈 회전 실시간 추종(/agv/pose, 수정 68/77) 제거 — 각도값을 안 받는다.
+#   회전은 고정속도 시간적분 애니메이션 + 완료 시 heading_target 스냅으로만 처리한다.
+#   (node 동기화는 유지: 마커 도착 시 노드에 스냅.)
 
 # ─── 설정 파일 경로 ───────────────────────────────────────────────────────────
 MAP_PATH   = os.path.join(_ROOT, "server", "data", "map.json")
@@ -227,6 +214,10 @@ def _parse_twin_start_nodes() -> dict[int, int]:
 
 
 TWIN_START_NODES = _parse_twin_start_nodes()
+
+# 트윈에서 실물이 붙기 전까지 AGV를 숨길지 (수정 73). 기본 0 = 켜자마자 홈 노드에 그린다.
+# 1로 두면 예전 동작(실물 신호를 받아야 등장).
+TWIN_HIDE_UNTIL_SEEN = os.environ.get("TWIN_HIDE_UNTIL_SEEN", "0") == "1"
 
 
 def _normalize_angle(a: float) -> float:
@@ -320,10 +311,6 @@ class IsaacAGV:
         self._twin_holding  = False                   # 홀드 중 = 실물 마커 대기
         self._twin_hold_t: float | None = None        # 홀드 진입 시각 (대기 시간 = 추정 오차)
 
-        # 수정 68 — 실물 연속 자세 (/agv/pose). 회전을 실시간으로 따라가는 데 쓴다.
-        self._pose_latest = None    # (marker_id, yaw_deg, 수신시각) — MQTT 스레드가 갱신
-        self._pose_ref    = None    # (marker_id, yaw 기준, heading 기준) — 회전량 계산 원점
-        self._pose_log_t  = 0.0     # 추종 로그 rate limit
         self._move_speed    = MOVE_SPEED              # 이번 엣지에 쓸 속도
 
         self._twin_turn_secs = TWIN_TURN_SECS_INIT    # 실측 회전 소요시간 (EMA)
@@ -338,6 +325,7 @@ class IsaacAGV:
         self._twin_holding_turn = False               # 회전 홀드 = 실물 cmd_ack 대기
         self._twin_holding_lift = False               # 리프트 홀드 = 실물 cmd_ack 대기
         self._pending_ack: str | None = None           # 트윈: 실물이 보고한 cmd_ack
+        self._pending_start = False                     # 트윈: 실물이 동작 시작(cmd_start) 보고 → 애니 시작 트리거
 
     def set_bridge(self, bridge):
         """Bridge 인스턴스 연결 — cmd_ack 발행 경로 설정"""
@@ -393,54 +381,14 @@ class IsaacAGV:
         self._pending_ack = cmd
         self._twin_seen = True
 
-    def _on_pose_from_real(self, rid: int, marker_id: int, yaw_deg: float):
-        """트윈 모드 — 실물의 연속 자세(/agv/pose) 수신 (수정 68). main loop가 소비."""
-        self._pose_latest = (marker_id, float(yaw_deg), time.time())
-        self._twin_seen = True
+    def _on_start_from_real(self, rid: int, cmd: str):
+        """트윈 모드 — 실물의 동작 시작(cmd_start=STM EVT_ACK) 수신. main loop로 핸드오프.
 
-    def _apply_pose_heading(self) -> bool:
-        """실물 카메라 yaw로 heading을 **직접** 갱신. 적용했으면 True.
-
-        **회전 중에만 쓴다.** 직진 중엔 마커가 시야를 벗어나 pose가 끊기고(POSE_STALE),
-        그때는 시간 보간으로 폴백한다.
-
-        두 방식(TWIN_ABS_HEADING로 선택):
-          · 절대(기본, 수정 77): 카메라 yaw → 서버 heading((yaw+OFFSET)%360) → Isaac 라디안.
-            HEADING_OFFSET 확정(북향 마커 → 0) 후엔 이게 정답 — 매 프레임 실물의 절대 방위를
-            그대로 반영하므로 기준(anchor)도, 오차 누적도 없다.
-          · 델타(구방식): HEADING_OFFSET 미확정 시절의 우회. 마커 대비 yaw '변화량'만 신뢰하고
-            (offset이 빼기에서 상쇄됨) 마커가 바뀌면 기준을 다시 잡았다. 되돌릴 수 있게 남겨둔다.
-
-        부호: 실측(2026-07-12) **카메라 시계방향 = yaw 증가**. Isaac heading은 수학 규약
-        (0=East, 반시계 +) — 절대는 server_deg_to_rad가, 델타는 뺄셈이 이 부호차를 흡수한다.
+        이 신호가 오기 전엔 트윈이 명령을 실행(애니메이션 시작)하지 않는다 → 트윈 출발이
+        실물이 실제로 움직이기 시작한 순간과 맞는다(예전엔 /agv/cmd 수신 즉시 시작해 앞섰다).
         """
-        if not TWIN_MODE or self._pose_latest is None:
-            return False
-        mid, yaw, ts = self._pose_latest
-        if time.time() - ts > POSE_STALE_SECS:
-            return False                    # 마커가 시야에서 사라짐 → 시간 보간으로 폴백
-
-        if TWIN_ABS_HEADING:
-            # 절대: 실물 방위를 직접 반영. 상태(anchor) 없음 → 구조적으로 누적 오차 0.
-            self.heading = server_deg_to_rad((yaw + POSE_HEADING_OFFSET) % 360.0)
-            driver = "절대"
-        else:
-            # 델타: 마커 첫 관측을 기준으로 그 뒤 yaw 변화량만큼만 돌린다.
-            if self._pose_ref is None or self._pose_ref[0] != mid:
-                self._pose_ref = (mid, yaw, self.heading)   # 마커 바뀜 → 기준 재설정
-                return False
-            _, yaw_ref, head_ref = self._pose_ref
-            d_cw = np.radians((yaw - yaw_ref + 180.0) % 360.0 - 180.0)   # 시계방향 회전량
-            self.heading = _normalize_angle(head_ref - d_cw)
-            driver = "델타"
-
-        # 추종하고 있다는 걸 눈으로 확인할 창구 (0.5초에 한 번).
-        now = time.time()
-        if now - self._pose_log_t > 0.5:
-            self._pose_log_t = now
-            print(f"[AGV {self.rid}] (트윈) 회전 추종[{driver}] — 실물 yaw {yaw:.0f}° "
-                  f"→ heading {np.degrees(self.heading) % 360:.0f}°")
-        return True
+        self._pending_start = True
+        self._twin_seen = True
 
     # ─── 트윈 페이싱 (수정 60) ───────────────────────────────────────────────
 
@@ -476,25 +424,6 @@ class IsaacAGV:
 
     def _start_twin_turn_pacing(self):
         """turn 시작 — 실측 회전시간에 맞춰 각속도를 정한다."""
-        # 수정 68: **회전을 시작할 때마다 pose 기준을 다시 잡는다.**
-        #
-        # yaw는 '마커 대비 상대 각도'라 절대값을 못 믿는다. 그래서 (yaw 기준, heading 기준)
-        # 쌍을 잡아두고 그 차이로 회전량을 만든다. 그런데 그 기준을 **회전이 끝난 뒤에도
-        # 그대로 두면** 다음 회전이 낡은 기준 위에서 계산된다.
-        # (실측 버그: 1차 회전 후 heading이 목표로 스냅됐는데 기준은 안 바뀌어서,
-        #  2차 회전이 28° 틀어진 채로 시작했다. 회전할수록 오차가 쌓인다.)
-        #
-        # 회전 직전이 재기준을 잡기 가장 좋은 시점이다 — 이때 트윈 heading은 확실히 맞다
-        # (직전 동작이 끝나 스냅/동기화된 상태).
-        #
-        # 이미 손에 있는 최신 pose로 **즉시** 기준을 잡는다. 다음 pose를 기다리면 그 사이
-        # 트윈이 시간 적분으로 자유주행해 그만큼 어긋난 채로 기준이 잡힌다.
-        self._pose_ref = None
-        if self._pose_latest is not None:
-            mid, yaw, ts = self._pose_latest
-            if time.time() - ts <= POSE_STALE_SECS:
-                self._pose_ref = (mid, yaw, self.heading)   # 지금 heading이 정답
-
         total = abs(_normalize_angle(self.heading_target - self.heading))
         if total < 1e-6:
             total = np.pi          # turn_180 (diff가 ±π라 부호에 따라 0에 가까울 수 있음)
@@ -852,10 +781,6 @@ class IsaacAGV:
             if self._twin_holding_turn:
                 return
 
-            # 수정 68 — 실물 yaw가 살아있으면 **측정이 추정을 대체한다.**
-            # 회전 중엔 발밑 마커가 계속 보이므로 시간 보간할 이유가 없다.
-            pose_driven = self._apply_pose_heading()
-
             diff = _normalize_angle(self.heading_target - self.heading)
             # 트윈은 남은 각도가 총각도의 1% 이내면 홀드 (일반은 ANGLE_TOLERANCE에서 완료)
             limit = ANGLE_TOLERANCE
@@ -879,11 +804,9 @@ class IsaacAGV:
                     self.motors.set_speeds(-speed,  speed)  # 반시계
                 else:
                     self.motors.set_speeds( speed, -speed)  # 시계
-                if not pose_driven:
-                    # pose가 없을 때만 시간 적분으로 heading을 만든다(추정).
-                    # pose가 있으면 heading은 이미 실측으로 정해졌다 — 여기서 또 더하면 이중 적용.
-                    _, omega = self.motors.get_velocity()
-                    self.heading = _normalize_angle(self.heading + omega * dt)
+                # 시간 적분으로 heading 애니메이션 (pose 제거 — 항상 추정, 완료 시 스냅)
+                _, omega = self.motors.get_velocity()
+                self.heading = _normalize_angle(self.heading + omega * dt)
                 self._sync_prim(stage)
 
         elif self.state == "MOVING":
@@ -1703,12 +1626,18 @@ for rid, home_node in sorted(robot_homes.items()):
     agvs[rid] = IsaacAGV(rid, home_node)
     print(f"[AGV {rid}] Home: node {home_node}  ({x}, {y})")
 
-    # 수정 73 — 트윈 모드에서는 실물이 붙기 전까지 그리지 않는다.
-    # 실물 1대만 연결됐는데 화면에 2대가 서 있으면 트윈이 거짓을 그리는 것이다.
-    # 나중에 2번째 AGV가 붙으면 그때 등장한다(아래 main loop).
-    if TWIN_MODE:
+    # 수정 73 — 트윈 모드에서 실물이 붙기 전까지 숨기는 옵션.
+    #
+    # 원래 의도: 실물 1대만 연결됐는데 화면에 2대가 서 있으면 트윈이 거짓을 그리는 것이다.
+    # 그런데 트윈을 켜자마자 화면이 텅 비어 있어서(실물이 아직 아무것도 발행 안 함)
+    # "제대로 떴는지" 확인이 안 됐다. 기본을 '홈 노드에 바로 그리기'로 바꾼다.
+    # 예전 동작이 필요하면: TWIN_HIDE_UNTIL_SEEN=1
+    if TWIN_MODE and TWIN_HIDE_UNTIL_SEEN:
         set_agv_visible(stage, rid, False)
         print(f"[AGV {rid}] (트윈) 실물 연결 대기 중 — 연결되면 화면에 등장합니다")
+    elif TWIN_MODE:
+        agvs[rid]._twin_visible = True
+        print(f"[AGV {rid}] (트윈) 홈 노드 {home_node}에 표시 (실물 연결 전)")
 
 world.reset()
 
@@ -1769,8 +1698,7 @@ for agv in agvs.values():
         # 자기가 발행한 마커를 되받으면 자기 위치를 자기가 덮어쓴다.
         marker_handler=(agv._on_marker_from_real if TWIN_MODE else None),
         ack_handler=(agv._on_ack_from_real if TWIN_MODE else None),
-        # 수정 68 — 실물의 연속 자세(/agv/pose) 구독 → 회전을 실시간으로 따라간다
-        pose_handler=(agv._on_pose_from_real if TWIN_MODE else None),
+        start_handler=(agv._on_start_from_real if TWIN_MODE else None),
     )
     cam = IsaacCamera(
         get_pos_fn=lambda a=agv: a.pos,
@@ -1799,8 +1727,8 @@ print("=" * 60)
 print(f"  모드: {'디지털 트윈 (실물 마커 추종 · 발행 안 함)' if TWIN_MODE else '일반 시뮬 (Isaac이 AGV 역할)'}")
 if TWIN_MODE:
     _pace_mode = "실측 자동보정(EMA)" if TWIN_EMA_ALPHA > 0 else "고정(EMA 꺼짐)"
-    print(f"  페이싱: 1칸 {TWIN_EDGE_SECS_INIT:.1f}초 / 회전 {TWIN_TURN_SECS_INIT:.1f}초 "
-          f"/ 리프트 {TWIN_LIFT_SECS_INIT:.1f}초 → {_pace_mode}")
+    print(f"  페이싱: 1칸 {TWIN_EDGE_SECS_INIT:.2f}초 / 회전 {TWIN_TURN_SECS_INIT:.2f}초 "
+          f"/ 리프트 {TWIN_LIFT_SECS_INIT:.2f}초 → {_pace_mode}")
     print(f"          동작 {TWIN_HOLD_RATIO*100:.0f}% 지점에서 실물 신호 대기 "
           f"(직진=마커, 회전·리프트=cmd_ack) → 먼저 끝내지 않는다")
 print(f"  AGV-1 홈: {robot_homes[1]}  AGV-2 홈: {robot_homes[2]}")
@@ -1886,6 +1814,7 @@ _input_iface = carb.input.acquire_input_interface()
 _keyboard = omni.appwindow.get_default_app_window().get_keyboard()
 
 # ─── 메인 루프 ────────────────────────────────────────────────────────────────
+_prev_frame_t = time.time()   # 애니 dt를 벽시계로 재기 위한 직전 프레임 시각
 while simulation_app.is_running():
     world.step(render=True)
 
@@ -1904,7 +1833,13 @@ while simulation_app.is_running():
     if _paused:
         continue
 
-    dt = world.get_physics_dt()
+    # 애니메이션 dt = 벽시계 경과시간 (2026-07-18). physics_dt(고정 타임스텝)로 굴리면
+    # 프레임률(노트북 성능·GPU 부하·씬 복잡도)에 따라 speed×dt 누적이 달라져 트윈 직진·리프트
+    # 속도가 왔다갔다 한다(Isaac이 실시간보다 빨리 스텝하면 애니가 빨라짐). 벽시계 dt를 쓰면
+    # 페이싱 초가 성능 무관하게 그대로 지켜진다. 프레임 히칭 시 순간이동 방지로 상한 0.1s.
+    _now = time.time()
+    dt = min(_now - _prev_frame_t, 0.1)
+    _prev_frame_t = _now
 
     for agv in agvs.values():
         # 수정 73 — 실물이 붙으면 그때 화면에 등장시킨다.
@@ -1929,13 +1864,18 @@ while simulation_app.is_running():
 
         # MQTT 스레드 → main loop: IDLE 상태일 때만 명령 실행
         # (이동/회전 중 명령 수신 시 현재 동작 완료 후 실행)
-        if agv._pending_cmd is not None and agv.state == "IDLE":
+        # 트윈 모드: 실물의 동작 시작(cmd_start=STM EVT_ACK)을 받은 뒤에만 실행 →
+        #   애니메이션 시작이 실물의 실제 출발과 동기화된다(예전엔 /agv/cmd 즉시 실행해 앞섰다).
+        #   일반 모드(Isaac이 곧 AGV)는 시작신호가 없으므로 즉시 실행.
+        if (agv._pending_cmd is not None and agv.state == "IDLE"
+                and (not TWIN_MODE or agv._pending_start)):
             cmd      = agv._pending_cmd
             shelf_id = agv._pending_shelf_id
             target   = agv._pending_target_node
             agv._pending_cmd          = None
             agv._pending_shelf_id     = None
             agv._pending_target_node  = None
+            agv._pending_start        = False
             agv.execute_cmd(cmd, shelf_id, target)
 
         agv.update(dt, stage)

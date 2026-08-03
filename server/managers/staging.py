@@ -177,6 +177,27 @@ class StagingManager:
                   f"AGV-{incoming_rid} {wait_label} at node {wait_node}")
             return wait_node
 
+    def reserve_for(self, ws_node: int, rid: int) -> bool:
+        """ETA 우선권(수정 94): 아직 should_stage를 호출하지 않았지만 같은 작업대로
+        **더 먼저 도착할** 로봇에게 회랑 소유권을 선지정한다.
+
+        회랑이 비어있을 때만 유효하다(점유 중이면 건드리지 않음). owner만 세팅하고
+        큐에는 넣지 않는다 — 그 로봇이 곧 자기 배달을 계획할 때 should_stage에서
+        `_owner==rid`(이미 권한 있음) 경로로 그대로 진입한다.
+        만약 그 로봇이 끝내 오지 않아도 STAGING_TIMEOUT(30s) _check_timeout이
+        강제 해제 + 큐 드레인 → 교착 없음(불변식: 회랑은 항상 owner 있거나 free).
+        """
+        corridor = self.corridors.get(ws_node)
+        if not corridor:
+            return False
+        if self._reservation is not None and self._reservation.is_corridor_held(ws_node):
+            return False  # 이미 점유 중 — 선착순 유지, 건드리지 않음
+        self._set_owner(ws_node, rid)
+        corridor.occupied_at = time.time()
+        corridor.is_exiting = False
+        print(f"[StagingManager] W{ws_node}: corridor pre-reserved for AGV-{rid} (ETA 우선권)")
+        return True
+
     def add_staged_agv(self, ws_node: int, rid: int, staging_node: int):
         """대기 큐에 AGV 추가"""
         corridor = self.corridors.get(ws_node)

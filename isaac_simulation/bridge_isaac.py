@@ -27,8 +27,8 @@ MQTT_PORT = 1883
 TOPIC_CMD     = "/agv/cmd"
 TOPIC_MARKER  = "/agv/marker"
 TOPIC_CMD_ACK = "/agv/cmd_ack"
+TOPIC_CMD_START = "/agv/cmd_start"   # 트윈 전용 — 실물의 동작 시작(STM EVT_ACK) 수신
 TOPIC_PRESENCE = "/agv/presence"   # 수정 75 — AGV 접속/이탈 (일반 시뮬만 발행, 트윈은 침묵)
-TOPIC_POSE    = "/agv/pose"   # 수정 68 — 연속 자세 (트윈 전용)
 
 # cmd_ack의 shelf_id "미지정" 센티넬 (lift_up/down만 대상 선반 명시)
 _ACK_SHELF_UNSET = object()
@@ -50,18 +50,18 @@ class Bridge:
     def __init__(self, rid: int, cmd_handler: Callable,
                  marker_handler: Optional[Callable] = None,
                  ack_handler: Optional[Callable] = None,
-                 pose_handler: Optional[Callable] = None):
+                 start_handler: Optional[Callable] = None):
         self.rid = rid
         self._cmd_handler = cmd_handler
+        # 트윈 모드 전용: 실물의 /agv/cmd_start(동작 시작=STM EVT_ACK)를 구독 → 그 시각에
+        # 애니메이션을 시작한다(실물이 실제로 움직이기 시작한 순간과 출발을 맞춤).
+        self._start_handler = start_handler
         # 트윈 모드 전용: 실물 AGV가 발행한 /agv/marker를 구독해 위치를 따라간다.
         # None(기본, 일반 시뮬)이면 구독조차 하지 않음 → 자기가 발행한 마커를 되받지 않는다.
         self._marker_handler = marker_handler
         # 트윈 모드 전용: 실물의 /agv/cmd_ack(회전·리프트 완료)를 구독 → 그 시간에 맞춰
         # 애니메이션을 끝낸다 (수정 60). 일반 모드는 자기가 발행하므로 구독하면 되받는다.
         self._ack_handler = ack_handler
-        # 트윈 모드 전용 (수정 68): 실물의 /agv/pose(연속 자세)를 구독 → 회전을 **실시간으로**
-        # 따라간다. 마커·cmd_ack 사이를 시간으로 보간하던 것을 실제 측정값으로 대체.
-        self._pose_handler = pose_handler
 
         # 수정 63: client_id는 반드시 전역 유일해야 한다.
         #
@@ -119,10 +119,10 @@ class Bridge:
         client.subscribe(TOPIC_CMD)
         if self._marker_handler is not None:
             client.subscribe(TOPIC_MARKER)   # 트윈 모드 — 실물의 위치 보고를 따라감
-        if self._pose_handler is not None:
-            client.subscribe(TOPIC_POSE)     # 트윈 모드 — 실물의 연속 자세
         if self._ack_handler is not None:
             client.subscribe(TOPIC_CMD_ACK)  # 트윈 모드 — 실물의 회전/리프트 완료를 따라감
+        if self._start_handler is not None:
+            client.subscribe(TOPIC_CMD_START)  # 트윈 모드 — 실물의 동작 시작을 따라감
         if not self._is_twin:
             self._publish_presence(True)
         print(f"[Bridge-{self.rid}] MQTT connected (rc={rc})"
@@ -139,12 +139,6 @@ class Bridge:
             if rid == self.rid and cmd:
                 self._dispatch_cmd(cmd, data.get("shelf_id"), data.get("target_node"))
 
-        elif msg.topic == TOPIC_POSE and self._pose_handler is not None:
-            rid = int(data.get("rid", -1))
-            if rid == self.rid and data.get("marker_id") is not None:
-                self._pose_handler(self.rid, int(data["marker_id"]),
-                                   float(data.get("yaw", 0.0)))
-
         elif msg.topic == TOPIC_MARKER and self._marker_handler is not None:
             rid = int(data.get("rid", -1))
             marker_id = data.get("marker_id")
@@ -156,6 +150,12 @@ class Bridge:
             cmd = data.get("cmd", "")
             if rid == self.rid and cmd:
                 self._ack_handler(self.rid, cmd)
+
+        elif msg.topic == TOPIC_CMD_START and self._start_handler is not None:
+            rid = int(data.get("rid", -1))
+            cmd = data.get("cmd", "")
+            if rid == self.rid and cmd:
+                self._start_handler(self.rid, cmd)
 
     def _dispatch_cmd(self, cmd: str, shelf_id: Optional[int] = None,
                       target_node: Optional[int] = None):

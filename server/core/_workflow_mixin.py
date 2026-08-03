@@ -71,13 +71,21 @@ class WorkflowMixin:
         # stock 검증은 GUI 서버(warehouse_server_v2)가 단독 수행. AGV는 DB 미접근.
         # → AGV 자체 검증으로 인한 self-contradiction(수정 47) 영구 제거.
 
-        schedule = self.task_scheduler.schedule_order(user_id=user_id, order_id=order_id)
+        # 작업대는 GUI 메시지의 '작업대' 필드 우선 (사용자가 어느 작업대 파이에 앉았는지).
+        # 작업대-사용자 디커플링 → 사용자가 작업대를 바꿔도 정확. 없으면 user_id 역산 폴백.
+        # 이 작업대가 방문 순서(NN)의 출발점이기도 하므로 schedule_order 전에 구해 넘긴다
+        # (안 그러면 엑셀 기본 작업대 기준으로 순서가 짜여 가까운 선반부터 안 간다).
+        ws_node = self.shelf_manager.ws_id_to_node(data.get("작업대"))
+
+        # 수정 88: NN 출발점 = WS가 아니라 '담당 로봇이 결국 도착할 위치'.
+        # 로봇이 방금 선반을 내려놓고 그 자리에 서 있으면 그 선반부터 집게 한다(왕복 낭비 제거).
+        start_node = self._order_start_anchor(ws_node)
+
+        schedule = self.task_scheduler.schedule_order(
+            user_id=user_id, order_id=order_id, start_node=start_node)
         if not schedule:
             return self._error_response(f"Order not found: user={user_id}, order={order_id}")
 
-        # 작업대는 GUI 메시지의 '작업대' 필드 우선 (사용자가 어느 작업대 파이에 앉았는지).
-        # 작업대-사용자 디커플링 → 사용자가 작업대를 바꿔도 정확. 없으면 user_id 역산 폴백.
-        ws_node = self.shelf_manager.ws_id_to_node(data.get("작업대"))
         workstation_id = ws_node if ws_node is not None else schedule["workstation"]
         group_id = f"T{user_id}_{order_id}"
 
@@ -168,6 +176,25 @@ class WorkflowMixin:
 
     # ─── 작업 배정 (공정/F-노드/인터셉트) ───
 
+    def _order_start_anchor(self, ws_node: Optional[int]) -> Optional[int]:
+        """수정 88: 새 주문 NN 방문순서의 출발점 = 이 WS를 담당할 로봇이 '결국 도착할' 위치.
+
+        로봇이 이동/작업 중이면 순간 위치는 흔들리므로 최종 목적지(planned_path[-1])를 쓴다.
+        idle이면 현재 위치. 담당 로봇 없음/오프라인이면 WS 노드로 폴백(= 기존 동작).
+        NN 출발점은 '방문 순서 힌트'일 뿐이라 틀려도 비효율일 뿐 오동작 없음(안전한 휴리스틱).
+        home_node(= 그 WS 담당)는 robot_config.json이 단일 진실 — 코드에 박지 않고 재사용.
+        """
+        if ws_node is None:
+            return ws_node
+        for robot in self.robot_manager.get_all_robots():
+            if robot.home_node != ws_node or not robot.online:
+                continue
+            if robot.status == RobotStatus.IDLE:
+                return robot.current_node
+            # 이동/작업 중 → 결국 멈출 최종 목적지 (없으면 현재 위치)
+            return robot.planned_path[-1] if robot.planned_path else robot.current_node
+        return ws_node
+
     def _count_active_robots_per_ws(self) -> Dict[int, int]:
         """WS별 현재 비유휴 로봇 수 계산 (공정 배정용)"""
         counts: Dict[int, int] = {}
@@ -214,7 +241,12 @@ class WorkflowMixin:
             if not robot:
                 if self._try_intercept_returning_shelf(task):
                     continue  # 인터셉트 성공 → 다음 대기 작업 처리 시도
-                break         # 유휴 로봇 없음 → 종료
+                # 수정 87: 인터셉트 실패 시 break 하지 말고 이 태스크만 제외 후 다음 태스크 시도.
+                # (get_next_pending_task_fair는 최우선 1개만 반환 → break 하면 로봇이 든 선반을
+                #  필요로 하는 뒤순위 태스크가 인터셉트 검사에 도달조차 못 함. 실물 HIL 로그로 확인)
+                # blocked_task_ids로 걸러지므로 모두 소진되면 None 반환하며 자연 종료(무한루프 없음).
+                blocked_task_ids.add(task.task_id)
+                continue
 
             # 작업 시작
             first_st = self.task_manager.start_task(task.task_id, robot.rid)
@@ -355,6 +387,24 @@ class WorkflowMixin:
         print(f"[RequestHandler] Node U: Robot {carrying_robot.rid} intercepted while returning "
               f"shelf {first_shelf} → redirecting to WS {target_ws} for task {task.task_id}")
         return True
+
+    def _try_intercept_for_carried_shelf(self, rid: int) -> bool:
+        """수정 89: 복귀 중인 로봇 rid가 '지금 든 선반'을 첫 선반으로 필요로 하는 PENDING
+        태스크가 있으면 인터셉트(Node U). 마커 직후(in-flight 비어있는 fresh 순간) 호출 전용.
+
+        새 로직 없음 — 올바른 지점에서 캐논 `_try_intercept_returning_shelf(task)`를 부르는 wrapper.
+        우회/링크는 그 함수 + 포워딩 도착 핸들러(FORWARD_SHELF, 수정 15)가 처리한다.
+        """
+        robot = self.robot_manager.get_robot(rid)
+        if robot is None or robot.carrying_shelf is None:
+            return False
+        for task in self.task_manager.tasks.values():
+            if task.status != TaskStatus.PENDING:
+                continue
+            first_shelf = task.shelf_sequence[0] if task.shelf_sequence else None
+            if first_shelf == robot.carrying_shelf and self._try_intercept_returning_shelf(task):
+                return True
+        return False
 
     # ─── 도착 / lift_up / lift_down 처리 ───
 

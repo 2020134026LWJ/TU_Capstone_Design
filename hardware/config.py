@@ -18,6 +18,9 @@ MQTT_PORT = 1883
 TOPIC_CMD     = "/agv/cmd"      # 서버 → AGV 명령 (구독)
 TOPIC_MARKER  = "/agv/marker"   # AGV → 서버 위치 보고 (발행)
 TOPIC_CMD_ACK = "/agv/cmd_ack"  # AGV → 서버 명령 완료 (발행)
+# 트윈 전용 — AGV → 트윈 "명령 실행 시작"(STM EVT_ACK 수신 시). 서버는 구독하지 않는다.
+# 트윈이 애니메이션 시작 시각을 실물의 실제 동작 시작(=이 신호)에 맞추기 위함.
+TOPIC_CMD_START = "/agv/cmd_start"
 
 # 수정 75 — AGV 접속/이탈. 서버의 '유령 로봇' 방지 (안 켠 AGV에 태스크 배정 금지).
 #

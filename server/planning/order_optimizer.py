@@ -205,7 +205,8 @@ class OrderOptimizer:
         self,
         user_id: int,
         order_id: int,
-        optimization: str = "nearest"
+        optimization: str = "nearest",
+        start_node: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         주문 스케줄링 (엑셀에서 로드 → 최적화)
@@ -235,14 +236,20 @@ class OrderOptimizer:
         workstation = order_info["workstation_id"]
         items = [item["name"] for item in order_info["items"]]
 
+        # 방문 순서(NN)의 기준점 = AGV가 실제로 출발하는 작업대.
+        # 엑셀의 workstation_id는 '사용자의 기본 작업대'라 GUI에서 다른 작업대를 지정하면
+        # 어긋난다(작업대-사용자 디커플링, 수정 53). 실제 작업대(start_node)가 오면 그걸 쓴다.
+        # 안 오면 엑셀 기본값 폴백.
+        origin = start_node if start_node is not None else workstation
+
         print(f"[OrderOptimizer] Loading order: user={user_id}, order={order_id}")
         print(f"[OrderOptimizer] Items: {items}")
 
-        # 2. 최적화
+        # 2. 최적화 (origin 기준)
         if optimization == "nearest":
-            tasks = self.optimize_order(items, start_node=workstation)
+            tasks = self.optimize_order(items, start_node=origin)
         else:
-            tasks = self.optimize_order_by_distance(items, start_node=workstation)
+            tasks = self.optimize_order_by_distance(items, start_node=origin)
 
         if not tasks:
             print(f"[OrderOptimizer] No tasks scheduled for order {order_id}")

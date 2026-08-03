@@ -57,13 +57,13 @@ from hardware.config import (
 
 # 명령 문자열 → STM 명령 코드 (ASCII 숫자 1자리로 전송)
 CMD_CODE = {
-    "forward":    1,
-    "stop":       2,
-    "lift_up":    3,
-    "lift_down":  4,
-    "turn_left":  5,
-    "turn_right": 6,
-    "turn_180":   7,
+    "forward":    0x01,
+    "stop":       0x02,
+    "lift_up":    0x03,
+    "lift_down":  0x04,
+    "turn_left":  0x05,
+    "turn_right": 0x06,
+    "turn_180":   0x07,
 }
 
 EVT_DONE = 0x81  # STM → 동작 완료
@@ -74,7 +74,36 @@ EVT_ACK  = 0xFF  # STM → 명령 수신 확인
 # 회전량을 잘못 잡아 no-op이 된다(실측: 대기 없으면 32ms에 "완료"=안 돎, 3초 대기하면 정상).
 # EVT_DONE 후 이 시간만큼 마커 발행을 늦춰 서버가 다음 명령을 늦게 내게 한다.
 # 그동안 카메라가 STM에 offset을 계속 흘려 yaw가 안정된다. env로 튜닝: FWD_SETTLE_SECS
-FORWARD_SETTLE_SECS = float(os.environ.get("FWD_SETTLE_SECS", "1.5"))
+# 기본 0.8 (2026-07-21): 2대 동시 HIL에서 0.8로 완주 확인 — 1.5는 필요 이상으로 느려
+# 매 노드마다 0.7초씩 쌓였다. 회전 no-op이 재발하면 이 값부터 올려볼 것.
+FORWARD_SETTLE_SECS = float(os.environ.get("FWD_SETTLE_SECS", "0.8"))
+
+# 리프트 완료(EVT_DONE) 후 cmd_ack 발행까지의 정착 대기 (2026-07-21).
+# STM의 리프트 DONE은 TIM5 타이머 기반이라 스텝 펄스 종료 시점에 뜨는데, 시저리프트가
+# 기계적으로 완전히 내려/올라가 정착하기 전에 뜰 수 있다. 즉시 cmd_ack를 내면 서버가
+# 곧장 다음 명령(forward)을 발행 → 리프트가 덜 내려간 채 출발한다(실물 관측 2026-07-21,
+# 특히 WS에 선반 내려놓고 출발할 때). forward의 FORWARD_SETTLE_SECS와 같은 논리로, 리프트
+# DONE 후 이 시간만큼 cmd_ack를 늦춰 다음 명령을 지연시킨다. env로 튜닝: LIFT_SETTLE_SECS.
+# [주의] 리프트가 '끝까지 안 내려가고 멈춘다'면 이건 정착 문제가 아니라 STM TIM5 Period가
+#        짧은 것 = 펌웨어 사안(주원)이라 이 값으로는 안 고쳐진다.
+# 기본값 0.7 (2026-07-21): 서버 로그 실측 — STM 리프트 ack이 항상 명령 발행 후 ~1.47초에
+# 오는데(up/down 공통) 물리 리프트는 ~2.13초라 ack이 ~0.65초 이르게 뜬다. 그 gap을 메운다.
+# 여전히 성급하면 올릴 것. (근본은 STM TIM5가 물리보다 이르게 DONE을 쏘는 것 = 주원이 TIM5를
+#  물리 시간에 맞추면 이 값 0으로 가능. 여기선 펌웨어 무수정으로 브릿지에서 보정.)
+LIFT_SETTLE_SECS = float(os.environ.get("LIFT_SETTLE_SECS", "0.7"))
+
+# 회전 완료(EVT_DONE) 후 cmd_ack 발행까지의 정착 대기 (2026-07-22).
+# STM이 회전 DONE을 보고하는 시점에도 차체가 관성으로 목표각을 지나쳤다가(오버슛) 아직
+# IMU 폐루프가 목표로 되돌아오는 중일 수 있다(실물 관측: turn_180이 181° 목표인데 DONE
+# 직후 yaw≈221°). 즉시 cmd_ack를 내면 서버가 곧장 forward를 발행 → 로봇이 아직 안정되지
+# 않은(틀어진) 헤딩으로 출발해 다음 마커를 놓친다. forward/리프트의 *_SETTLE_SECS와 같은
+# 논리로, 회전 DONE 후 이 시간만큼 cmd_ack를 늦춰 차체가 목표각에 정착한 뒤 다음 명령이
+# 나가게 한다. 서버는 이 ack 전엔 다음 명령을 안 내므로 = 회전이 정착할 때까지 안 움직인다.
+# [주의] 오버슛이 '되돌아오지 않고 그 자리에 멈추는' 종류라면(폐루프 없음) 이 값으로는
+#        안 고쳐진다 = 펌웨어 감쇠/정지임계 사안(주원). 넣기 전 turn_180 격리 테스트로
+#        DONE 후 yaw가 목표로 기어드는지(=정착시간이 듣는지) 먼저 확인할 것.
+# env로 튜닝: TURN_SETTLE_SECS. 기본 0.5 (보수적 시작값 — 실측 후 조정).
+TURN_SETTLE_SECS = float(os.environ.get("TURN_SETTLE_SECS", "0.5"))
 
 # 반복 이벤트 병합 창 (2026-07-18).
 # 주원이 STM 펌웨어(hardware/stm32/rpi_uart.c Send_Event)는 통신유실 대비로 EVT_DONE/EVT_ACK를
@@ -200,7 +229,7 @@ class Bridge:
                 self._target_node = data.get("target_node")
                 self._dispatch_cmd(cmd)
 
-    def _dispatch_cmd(self, cmd: str):
+    def _dispatch_cmd(self, cmd: str, send_now: bool = False):
         code = CMD_CODE.get(cmd)
         if code is None:
             print(f"[Bridge-{self.rid}] Unknown cmd: {cmd}")
@@ -214,7 +243,19 @@ class Bridge:
             self._fwd_marker = None
             self._fwd_settling = False
         self._pending_code = code     # arm: 다음 패킷부터 실려 나감 (EVT_ACK까지 반복)
-        self._uart_send_packet()      # 즉시 1회도 송신 (마커 안 보여도 명령 전달 보장)
+        # [2026-07-24] 평상시(MQTT 명령)엔 여기서 직접 UART로 안 쏜다 — writer를 카메라
+        #   스레드 하나로 통일한다. 예전엔 MQTT 콜백 스레드가 여기서 즉시 1발 썼는데,
+        #   카메라 스레드의 10Hz offset 스트림과 합쳐 writer가 2개가 되어, 이 즉시-한-발이
+        #   carrier 패킷 꽁무니에 공백(IDLE) 없이 붙는 순간 STM의 ReceiveToIdle 프레이밍이
+        #   뭉개졌다(Size!=21 → RX FAIL). 간헐적 회전 오차/리프트 오작동의 유력 원인.
+        #   → _pending_code만 장전하고, 카메라 스레드의 다음 _uart_send_packet(≤100ms)이
+        #     이 코드를 얹어 보낸다 = jw_headless/opencv_aruco의 '큐에 담고 루프가 얹어
+        #     보내기' 단일-writer 구조 복원. (명령은 로봇이 마커 위에 선 상태에서 오므로
+        #     카메라 스트림이 흐르고 있다 = 전달 보장)
+        #   단 park_lift처럼 카메라 루프가 이미 멈춘 종료 컨텍스트에선 아무도 안 보내므로
+        #   send_now=True로 직접 보낸다 — 그땐 단일 스레드라 프레임 충돌도 없다.
+        if send_now:
+            self._uart_send_packet()
 
     # ─── 카메라 offset 공급 (같은 라파 카메라 스레드가 호출) ───────────────────
 
@@ -346,6 +387,12 @@ class Bridge:
 
     def _handle_uart_event(self, event: int):
         """STM32 단일 바이트 이벤트 → cmd_ack 발행"""
+        # [진단 2026-07-24] STM→브릿지 원시 이벤트 수신을 보이게 한다.
+        #   지금까지 EVT_ACK 수신과 dedup/guard 드롭이 전부 조용해서, STM이 신호를 보냈는지
+        #   브릿지가 버렸는지 로그로 구분이 안 됐다(ACK 유실/수신단 hang 추적 불가).
+        #   이 줄로 STM이 실제로 뭘·언제 보냈는지가 다 찍힌다(3× 반복도 그대로 보인다).
+        _evt_name = {EVT_DONE: "DONE", EVT_ACK: "ACK"}.get(event, f"?0x{event:02X}")
+        print(f"[Bridge-{self.rid}] <- STM {_evt_name}")
         # ── 반복 이벤트 병합 (2026-07-18) ──────────────────────────────────────
         # STM이 EVT_DONE/EVT_ACK를 3회 반복 전송한다(위 EVENT_DEDUP_SECS 주석). 같은 값이
         # 창 안에 또 오면 반복분이므로 버린다 — 첫 바이트만 처리해 '유령 ack'을 막는다.
@@ -364,6 +411,7 @@ class Bridge:
             # (dedup 창을 넘겨 새는 유령 ack까지 프로토콜 레벨에서 원천 차단. 실측: lift_up
             #  dispatch 후 _pending_code=3 그대로인데 0x81이 와 16ms 유령 ack이 터지던 문제)
             if self._pending_code != 0:
+                print(f"[Bridge-{self.rid}]    → DONE 버림 (ACK 미수신, pending_code={self._pending_code})")
                 return
             # forward 완료(2026-07-17): 바로 마커를 발행하지 않고 FORWARD_SETTLE_SECS 만큼 기다린
             #   뒤 발행한다(_forward_settle_publish). 모터 멈춘 직후 IMU yaw가 흔들려 곧바로 turn을
@@ -376,9 +424,16 @@ class Bridge:
             cmd = self._last_cmd
             self._last_cmd = None
             if cmd is not None:
-                self.publish_cmd_ack(cmd)
+                if cmd in ("lift_up", "lift_down") and LIFT_SETTLE_SECS > 0:
+                    # 리프트 물리 정착까지 기다린 뒤 ack (성급 출발 방지, LIFT_SETTLE_SECS 주석 참조).
+                    # 서버는 이 ack 전엔 다음 명령을 안 내므로 = 리프트가 정착할 때까지 로봇이 안 움직인다.
+                    threading.Timer(LIFT_SETTLE_SECS, self.publish_cmd_ack, args=(cmd,)).start()
+                elif cmd in ("turn_left", "turn_right", "turn_180") and TURN_SETTLE_SECS > 0:
+                    # 회전 오버슛이 목표각으로 정착할 때까지 기다린 뒤 ack (TURN_SETTLE_SECS 주석 참조).
+                    threading.Timer(TURN_SETTLE_SECS, self.publish_cmd_ack, args=(cmd,)).start()
+                else:
+                    self.publish_cmd_ack(cmd)
         elif event == EVT_ACK:
-            # STM이 명령 수신 확인 → carrier(0)로 복귀 (다음 패킷부터 오프셋만 스트리밍)
             self._pending_code = 0
 
     def _forward_settle_publish(self):
@@ -397,6 +452,40 @@ class Bridge:
             self._publish_marker_now(*buffered)
 
     # ─── UART 초기화 ──────────────────────────────────────────────────────────
+
+    # ─── 리프트 상태 동기화 (2026-07-21) ──────────────────────────────────────
+    # STM의 lift_state는 리셋 시 무조건 0(내려감)으로 초기화되는데, 리프트를 올린 채
+    # 껐다 켜면 '실제=위 / STM=아래'로 어긋난다. 그 상태에서 첫 lift_up은 이미 상단인
+    # 리프트를 더 밀어올려 탈조만 하고(펄스는 나가므로 EVT_DONE은 정상 도착) 겉보기엔
+    # "리프트를 안 했다"가 된다. 리밋스위치가 없어 STM 혼자서는 이 어긋남을 알 수 없다.
+    #   → 정상 종료 시 내려둔다(park_lift). 비정상 종료(정전·pkill -9)는 코드로 막지
+    #     않는다 — 시작할 때 올라간 리프트를 강제로 맞추려면 하드스톱을 밀어야 해서
+    #     기구에 무리가 간다. 그 경우는 '손으로 내리고 STM 리셋'(무해·동일 결과)으로
+    #     대응한다. STM은 리셋 시 lift_state=0이므로 그것만으로 동기화된다.
+
+    def _wait_cmd_done(self, timeout: float) -> bool:
+        """방금 arm한 명령의 EVT_DONE 대기. no-op이면 DONE이 안 와서 False."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self._pending_code == 0 and self._last_cmd is None:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def park_lift(self, timeout: float = 4.0):
+        """종료 직전 리프트를 내려 다음 런의 lift_state(=0)와 물리 위치를 맞춘다.
+
+        이미 내려가 있으면 STM의 `if (lift_state)` 가드에 걸려 no-op이라 EVT_DONE이
+        오지 않는다 → timeout까지 기다렸다 그냥 진행한다(정상 경로).
+        """
+        if not UART_ENABLED or not self._serial:
+            return
+        print(f"[Bridge-{self.rid}] 종료 정리: lift_down")
+        self._dispatch_cmd("lift_down", send_now=True)  # 카메라 루프 이미 정지 → 직접 송신
+        if self._wait_cmd_done(timeout):
+            print(f"[Bridge-{self.rid}] 리프트 내림 완료")
+        else:
+            print(f"[Bridge-{self.rid}] 리프트 이미 내려가 있음(no-op) — 진행")
 
     def open_uart(self):
         """UART 포트 열기 + 수신 스레드 시작"""

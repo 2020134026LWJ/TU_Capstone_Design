@@ -106,6 +106,7 @@ class DBLoader:
 
         # 컬럼명 정리 (첫 행이 헤더인 경우)
         if df.columns[0].startswith("사용자"):
+            df = df.iloc[:, :3]  # 스프레드시트 편집으로 붙는 유령 빈 컬럼 방어
             df.columns = ["주문", "물건", "개수"]
             df = df.iloc[1:]  # 첫 행 제거
 
@@ -237,6 +238,7 @@ class DBLoader:
         df = pd.read_excel(order_file)
 
         if df.columns[0].startswith("사용자"):
+            df = df.iloc[:, :3]  # 스프레드시트 편집으로 붙는 유령 빈 컬럼 방어
             df.columns = ["주문", "물건", "개수"]
             df = df.iloc[1:]
 

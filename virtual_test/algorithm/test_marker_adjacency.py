@@ -172,3 +172,60 @@ def test_turn_cmd_has_no_target(handler, mock_mqtt, helpers):
     # forward 개수 == target을 실은 개수 (turn/lift엔 안 붙는다)
     assert len(mock_mqtt.forward_targets) == sum(
         1 for _, c in mock_mqtt.cmds if c == "forward")
+
+
+# ─── 수정 92: 회전/리프트 in-flight 중 마커 무시 ───
+
+def _arm_inflight(handler, rid, cmd):
+    """command_queue에 cmd를 in-flight로 세팅 (dispatch 상태 모사)"""
+    from server.planning.command_queue import CommandEntry
+    handler.command_queues[rid].in_flight = CommandEntry(cmd=cmd)
+
+
+def test_marker_ignored_during_turn(handler, helpers):
+    """회전 중 옆칸 유령 마커가 와도 회전을 조기 종료/위치 점프 하지 않는다 (수정 92).
+
+    실물 HIL 재현: 노드 16에서 turn_right 도는 중 카메라가 이웃 17을 발행 →
+    서버가 이를 회전 완료로 오인해 노드 25로 이탈하던 버그.
+    """
+    robot = handler.robot_manager.get_robot(1)
+    robot.current_node = 16
+    robot.heading_initialized = True
+    _arm_inflight(handler, 1, "turn_right")
+
+    resp = helpers.step_marker(handler, 1, 17)   # 17은 16의 이웃(인접성은 통과) → 유령
+
+    assert resp["success"] is False
+    assert resp["action"] == "marker_during_turn_ignored"
+    assert robot.current_node == 16, "회전 중 마커로 위치가 점프하면 안 됨"
+    # in-flight 회전이 조기 ack되지 않았다 (진짜 완료는 cmd_ack로만)
+    assert handler.command_queues[1].in_flight is not None
+    assert handler.command_queues[1].in_flight.cmd == "turn_right"
+
+
+def test_marker_ignored_during_lift(handler, helpers):
+    """리프트 중 마커(같은 노드 재검출 포함)도 무시 — 리프트는 cmd_ack로만 완료 (수정 92)."""
+    robot = handler.robot_manager.get_robot(1)
+    robot.current_node = 16
+    robot.heading_initialized = True
+    _arm_inflight(handler, 1, "lift_up")
+
+    resp = helpers.step_marker(handler, 1, 16)   # 제자리 재검출
+
+    assert resp["action"] == "marker_during_turn_ignored"
+    assert handler.command_queues[1].in_flight.cmd == "lift_up", "리프트가 조기 ack되면 안 됨"
+
+
+def test_marker_completes_forward_still_works(handler, helpers):
+    """회귀 방지: forward in-flight일 때 목표 마커는 정상적으로 완료시킨다 (수정 92가 forward는 안 건드림)."""
+    from server.planning.command_queue import CommandEntry
+    robot = handler.robot_manager.get_robot(1)
+    robot.current_node = 16
+    robot.heading_initialized = True
+    handler.command_queues[1].in_flight = CommandEntry(cmd="forward", target_node=17)
+
+    resp = helpers.step_marker(handler, 1, 17)   # forward 목표 노드 도착
+
+    assert resp["success"] is True
+    assert robot.current_node == 17, "forward 목표 마커는 정상 도착 처리돼야 함"
+    assert handler.command_queues[1].in_flight is None, "forward는 마커로 ack됨"

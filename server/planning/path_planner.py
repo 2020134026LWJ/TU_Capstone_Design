@@ -133,6 +133,8 @@ class PathPlanner:
         start_heading: Optional[int] = None,  # 서버 기준 degree (0=N,90=E,180=S,270=W)
         soft_avoid: Optional[Set[int]] = None,  # 통행권: 되도록 피할 노드(움직이는 로봇 경로). 비용만 +
         soft_penalty: float = 2.0,    # PARAM: soft_avoid 노드 통과 시 추가 비용 (회피 강도)
+        carry_turn_hazard: Optional[Set[int]] = None,  # 수정 95: 여기서 회전하면 정적선반과 충돌 → 내려놓고돌기 강제
+        carry_turn_penalty: float = 3.0,  # PARAM: 든 채 선반옆 회전 추가 비용 (내려놓기+픽업 ≈ 6초 반영)
     ) -> Optional[List[Tuple[int, int]]]:
         """
         시간 포함 A* 알고리즘 (회전 페널티 포함)
@@ -220,7 +222,13 @@ class PathPlanner:
                 # 방향 계산 및 회전 페널티
                 if nxt_node != cur_node:
                     nxt_dir = self._node_direction(cur_node, nxt_node)
-                    extra = turn_penalty if (cur_dir != -1 and nxt_dir != cur_dir) else 0.0
+                    is_turn = (cur_dir != -1 and nxt_dir != cur_dir)
+                    extra = turn_penalty if is_turn else 0.0
+                    # 수정 95: 든 채 회전 노드(cur_node)가 정적선반 옆이면 '내려놓고 돌기'(≈6초)가
+                    # 강제된다 → 그 회전을 비싸게 매겨 웬만하면 빈 노드에서 돌게 유도.
+                    # (재료를 계획 비용에 편입 — 실행시점에만 알던 걸 A*가 미리 안다.)
+                    if is_turn and carry_turn_hazard and cur_node in carry_turn_hazard:
+                        extra += carry_turn_penalty
                 else:
                     nxt_dir = cur_dir  # 대기: 방향 유지
                     extra = 0.0

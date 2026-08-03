@@ -1949,7 +1949,7 @@ AGV의 single-slot 채널과 동기화 안 됨.
 - **약점 3 — lift cmd에 `shelf_id` 전달** (`mqtt_client.publish_cmd` + `_movement_mixin._send_next_command` + `bridge` + `step6_visual.execute_cmd`): 서버가 들/놓을 선반을 명시(lift 시점 `carrying_shelf`). 시뮬은 좌표 추측(`_find_nearby_shelf`) 대신 그 선반을 직접 처리하되, `_shelf_is_near`로 실제 근처일 때만(teleport 방지) — 없으면 빈 리프트로 보고.
 - **약점 4 — cmd_ack에 lift 결과 보고** (`bridge.publish_cmd_ack` shelf_id 센티넬 + `_marker_mixin._handle_cmd_ack` 검증): 시뮬이 실제 든 선반을 ack에 실어 보냄(None=빈 리프트). 서버가 기대(`carrying_shelf`)와 비교해 불일치 시 경고 → **이전엔 서버가 빈 리프트를 영영 몰라 유령 선반을 계속 운반(분실 영구화)** 하던 관측 격차를 닫음. 실물(UART)은 미지정 → 검증 스킵(오경보 방지).
 
-- **별개로 확정된 약점 1 (이번 미수정)**: Node U 인터셉트가 복귀 이동 중 거의 발화 불가(이중 게이트 — `get_available_robot()==None`일 때만 시도 + in_flight 가드 + 마커 핸들러가 다음 명령을 인터셉트 검사보다 먼저 발행). **이번 분실의 원인 아님**(없으면 포워딩 최적화 손실일 뿐) + 수정 시 in-flight race 재오픈 위험 → 백로그.
+- **별개로 확정된 약점 1 (→ ✅수정 87+89로 해소, 2026-07-21)**: Node U 인터셉트가 복귀 이동 중 거의 발화 불가였음(세 게이트 — 배정 루프가 최우선 태스크만 보고 break + in_flight 가드 + 마커 핸들러가 다음 명령을 인터셉트 검사보다 먼저 발행). **수정 87**이 첫째 게이트(break→다른 태스크 시도), **수정 89**가 셋째 게이트(마커 직후 fresh 순간에 발화) 제거. 둘째(in_flight 가드)는 정합성상 유지하되 fresh 지점에서 부르므로 통과. 다운스트림 링크는 기존 포워딩 도착 핸들러가 담당(옛 '이중배달' 우려는 오판이었음 — 수정 89 참조).
 - **버그 B (GUI 파란불 누락)**: 협업자 GUI 코드 영역(`activate_shelf_cells`가 현재 그리드만 켬) → 별도 트랙(통지+파이 로그 확정). AGV 서버는 정상.
 
 **수정 파일**: `server/managers/task.py`, `server/core/_workflow_mixin.py`, `server/core/_movement_mixin.py`, `server/comm/mqtt_client.py`, `server/core/_marker_mixin.py`, `hardware/bridge.py`, `isaac_simulation/step6_visual.py`, `tests/conftest.py`, `tests/test_dup_order_idempotent.py`(신규), `tests/test_lift_shelf_id.py`(신규)
@@ -2480,6 +2480,270 @@ pytest 100 통과. **구현: `reservation_service.py`(footprint 예약/해제/�
 
 ---
 
+### 수정 87: Node U 인터셉트 — 배정 루프가 최우선 태스크 하나만 보고 종료하던 버그 (2026-07-21)
+
+> **쉽게**: 로봇이 A선반을 들고 복귀 중인데 새 주문이 여러 선반을 필요로 할 때, 서버가
+> "제일 먼저 생성된 태스크" 하나만 인터셉트 검사하고 실패하면 그냥 멈춰서, 정작 **로봇이 들고 있는
+> 선반을 필요로 하는 태스크**(순서상 뒤)는 검사조차 못 하던 문제.
+
+**문제 (실물 HIL 로그로 확인, 2026-07-21 AGV-2 단독)**:
+주문1 마지막에 AGV-2가 **선반 2-4(노드 30)를 들고 `returning_shelf`** 중. 이때 주문2가 들어와
+PENDING 태스크 3개 생성 — `T1_2_0`(선반 1-3/26), `T1_2_1`(선반 1-2/19), **`T1_2_2`(선반 2-4/30)**.
+로봇이 들고 있는 30을 다시 안 내려놓고 WS로 돌리는 Node U 인터셉트가 **`T1_2_2`에서 발화해야** 했으나,
+인터셉트 시도조차 안 되고 AGV-2는 30을 노드 30에 내려놓은 뒤 처음부터 다시 가지러 감.
+
+**근본 원인 = 배정 루프의 "실패 시 break"** (`_workflow_mixin._try_assign_pending_tasks`):
+- `get_next_pending_task_fair`는 같은 WS면 **생성 순서**로 정렬 → 맨 먼저 `T1_2_0`(선반 26) 반환.
+- 유휴 로봇 없음(AGV-1 offline, AGV-2 복귀중) → `_try_intercept_returning_shelf(T1_2_0)` 호출.
+- 인터셉트 함수는 **넘어온 태스크의 `shelf_sequence[0]` 하나만** 검사 (`get_robot_carrying_shelf(26)`).
+  AGV-2가 든 건 **30이지 26이 아님** → `False`.
+- 호출부가 **`break`** → 루프 종료. **`T1_2_2`(선반 30)는 인터셉트 검사에 도달조차 못 함.**
+- (in-flight 가드는 매 마커/ACK마다 재시도되므로 영구 원인 아님. 진짜 원인은 태스크 선택 순서 + break.)
+
+**해결 (한 줄) = 인터셉트 실패 시 break 대신 그 태스크를 `blocked_task_ids`에 넣고 continue.**
+그러면 `exclude`로 걸러지며 나머지 PENDING 태스크를 차례로 인터셉트 시도 → 로봇이 든 선반과 맞는
+태스크(`T1_2_2`)까지 도달. 모두 소진되면 `get_next_pending_task_fair`가 None 반환하며 자연 종료(무한루프 없음).
+`_try_intercept_returning_shelf`의 자체 가드(carrying robot 존재·RETURNING_SHELF·in-flight 없음·
+현재 서브태스크 RETURN_SHELF)는 그대로라, 더 많은 태스크에 시도해도 오발화 없음.
+
+```python
+# _workflow_mixin.py _try_assign_pending_tasks, 유휴 로봇 없음 분기
+if not robot:
+    if self._try_intercept_returning_shelf(task):
+        continue
+    blocked_task_ids.add(task.task_id)   # 기존: break
+    continue                              # → 다른 PENDING 태스크도 인터셉트 시도
+```
+
+**연결**: 수정 57 하단 "별개로 확정된 약점 1"(인터셉트가 복귀 중 거의 발화 불가)의 세 게이트 중
+**"최우선 태스크 하나만 검사"** 게이트를 제거한 것. 나머지 둘(in-flight 가드/마커 핸들러 순서)은
+정합성상 유지(제거 시 stale 재계획 race 재오픈).
+
+**수정 파일**: `server/core/_workflow_mixin.py` (1줄 — break → blocked+continue)
+
+---
+
+### 수정 88: 새 주문 방문순서(NN)를 '로봇 최종 위치'부터 (2026-07-21)
+
+> **쉽게**: 로봇이 선반 30을 노드 30에 막 내려놓고 그 자리에 서 있는데, 새 주문 스케줄이
+> **작업대(WS) 기준**으로 짜여서 멀리 있는 선반 26을 먼저 가지러 갔다가 30을 마지막에 또 옴.
+> → 스케줄 출발점을 **그 WS를 담당할 로봇이 결국 도착할 위치**로 바꿔, 서 있는 선반부터 집게.
+
+**문제 (실물 HIL 로그, 2026-07-21)**: 주문2 = 선반 [26,19,30]. 로봇이 선반 30을 복귀시켜
+노드 30에 서 있는데도, NN이 `start_node=ws_node`(WS 32)로 계산돼 `[26,19,30]` 순서 → 로봇이
+30 위에 있으면서 26을 먼저 가지러 감(왕복 낭비). NN 자체는 선반→선반 체이닝(`order_optimizer.py:155`)은
+하지만 **첫 출발점이 WS 고정**이라 로봇 실제 위치를 반영 못 함.
+
+**근본 원인 = NN 출발점이 로봇의 실제/최종 위치가 아니라 WS.** 로봇은 주문의 각 선반을
+`WS↔선반` 왕복으로 처리하므로, 다음 주문을 시작하는 위치 = **직전 작업의 최종 목적지**다.
+이동 중이면 순간 위치는 흔들리니 **최종 목적지**(planned_path 끝)를 앵커로 써야 안정적.
+
+**해결 (기조 유지 — 기존 계산기에 재료만 바꿔 먹임)**: `OrderOptimizer`는 그대로 두고,
+core가 `schedule_order`에 넘기는 `start_node`만 WS → **담당 로봇의 최종 위치**로 교체.
+- 새 헬퍼 `_order_start_anchor(ws_node)`: `home_node==ws_node`인 online 로봇을 찾아 —
+  idle이면 `current_node`, 이동/작업 중이면 `planned_path[-1]`(최종 목적지, 없으면 current_node).
+  담당 로봇 없음/오프라인이면 `ws_node`로 폴백(= 기존 동작).
+- NN 출발점은 **방문 순서 힌트일 뿐**이라 틀려도 비효율일 뿐 오동작 없음(안전한 휴리스틱).
+- `workstation_id`는 그대로 `ws_node` 기준(`schedule_order`의 `start_node`는 NN에만 쓰이고
+  반환 `workstation`엔 영향 없음 — order_optimizer.py:243/268 확인). 태스크 소속 WS 불변.
+
+이러면 로봇이 선반 30에 서 있을 때 새 주문은 30(거리 0)부터 방문 → 26을 먼저 가는 왕복 제거.
+mid-return 리다이렉트(인터셉트) 없이 재-fetch 낭비를 없앰. **인터셉트(수정 89 예정)와 상보적** —
+C는 복귀 완료 후 최적 순서, 인터셉트는 복귀를 중간에 끊는 더 공격적 최적화.
+
+**수정 파일**: `server/core/_workflow_mixin.py` (`_order_start_anchor` 헬퍼 신규 + `_handle_start_order` 1줄)
+
+---
+
+### 수정 89: Node U 인터셉트 발화 — 마커 직후(in-flight 빈 순간)로 이동 (2026-07-21)
+
+> **쉽게**: 인터셉트 검사가 "다음 복귀 명령을 낸 뒤"에 돌아서 항상 in-flight가 차 있어 영영 skip.
+> 검사를 "다음 명령을 내기 전(마커 직후, 상태가 가장 fresh한 순간)"으로 옮겨 발화시킴.
+
+**문제 (실물 HIL 로그, 2026-07-21)**: 수정 87로 인터셉트가 올바른 태스크(T1_2_2, 선반 30)에
+**도달은 하는데**(`intercept skipped ... T1_2_2 stays PENDING` 로그가 그 증거), **매번 in-flight
+가드에 막힘.** 원인은 마커 핸들러(`_marker_mixin._handle_marker_report`) 호출 순서:
+- `queue.ack()`(in-flight 비움) → `_send_next_command()`(**다음 복귀 명령 발행 → in-flight 다시 참**)
+  → `_try_assign_pending_tasks()`(인터셉트 시도하지만 **이미 in-flight → skip**).
+
+즉 인터셉트 검사가 항상 "다음 명령 발행 뒤"라 fresh한 창(195~343줄 사이)을 못 씀.
+= 수정 57 "약점 1"의 세 번째 게이트.
+
+**중요한 정정 (다운스트림은 이미 정상)**: 애초에 "인터셉트 발화 시 새 주문 태스크가 소비 안 돼
+이중배달"이라 우려했으나 **오판이었다.** FORWARD_SHELF **도착** 핸들러(`_workflow_mixin`
+`_handle_putdown_ack` FORWARD 분기, 수정 15)가 이미 —
+`get_demand_items_for_ws`(새 주문 품목 조회) → `insert_forward_return_subtasks`(T_old에
+WAIT+PICKUP+RETURN 삽입) → `handle_shelf_forwarded`+`skip_shelf_subtasks_for_forwarding`
+(새 태스크 T_new을 COMPLETED로 **소비**) — 를 수행한다. 인터셉트는 `RETURN_SHELF→FORWARD_SHELF`
+변환만 하면 도착 시 기존 포워딩 캐논 플로우가 링크를 완결한다. **∴ 태스크 소유권 이전(옛 A안) 불요.**
+
+**해결 (B만, 기조 유지)**:
+- 마커 핸들러에서 `_send_next_command` **직전**(fresh 순간)에 인터셉트 훅 추가:
+  로봇이 `RETURNING_SHELF`면 `_try_intercept_for_carried_shelf(rid)` 시도 → 성공 시 옛 복귀 명령
+  안 내고 early return(인터셉트가 `_plan_and_publish_move`로 이미 새 경로 발행).
+- 신규 얇은 wrapper `_try_intercept_for_carried_shelf(rid)`: 로봇이 **든 선반을 첫 선반으로
+  필요로 하는 PENDING 태스크**를 찾아 **기존 `_try_intercept_returning_shelf(task)`를 그대로 호출**
+  (새 로직 아님 — 올바른 지점에서 캐논 함수를 부르는 wrapper. `_try_dispatch_all`을 여러 지점에서
+  부르는 패턴과 동일).
+- fresh 지점이라 `_try_intercept_returning_shelf`의 in-flight 가드가 통과 = 46.1이 요구한
+  "정합인 순간(마커 직후)에만 발화" 조건을 **구조적으로** 충족(stale race 안 열림).
+- 로봇이 이미 복귀 목적지(집)에 도착했으면 `_process_arrival`이 먼저 처리 → 인터셉트 지점 도달 안 함
+  = **too-late면 자연 폴백**(정상 복귀 후 수정 88 스케줄링이 서 있는 선반부터 재픽업). 안전.
+
+**수정 파일**: `server/core/_marker_mixin.py`(인터셉트 훅 1블록) + `server/core/_workflow_mixin.py`
+(`_try_intercept_for_carried_shelf` wrapper 신규) + `tests/test_intercept.py`(마커 구동 + 다운스트림 소비 회귀)
+
+---
+
+### 수정 90: 포워딩 수요 조회가 '이미 만족된(낡은) 수요'를 집던 버그 — 인터셉트 후 GUI 파란불 누락 (2026-07-21)
+
+> **쉽게**: 인터셉트로 선반을 WS에 다시 갖다놨는데, 서버가 "이 선반 누가 필요로 하지?"를 찾을 때
+> **주문1의 이미 다 픽한 낡은 수요**를 먼저 집어서 "필요한 사람 없음"으로 오판 → 새 주문(주문2)의
+> 진짜 수요를 놓침 → WAIT_PICKING을 안 거치고 태스크가 끝나버려 **GUI 파란불(shelf_arrived) 안 감**.
+
+**문제 (실물 HIL 로그, 2026-07-21 — 수정 89로 인터셉트가 실제 발화하며 드러남)**: 주문2 선반 30
+인터셉트 성공 후 WS 32 도착. 포워딩 도착 핸들러가 `get_demand_items_for_ws(30, 32)`로 필요 품목을
+조회하는데 `shelf_demand[30]`에 **두 수요**가 있었다 —
+- `T1_1_2`(주문1, 운반하던 그 태스크, IN_PROGRESS): items `['껌']`, 이미 픽 완료 → remaining `[]`
+- `T1_2_0`(주문2, PENDING): items `['껌']` → remaining `['껌']` ← **진짜 수요**
+
+`get_demand_items_for_ws`가 **첫 매칭(T1_1_2)** 을 반환 → `['껌'] - items_picked['껌'] = []` →
+"no items needed" 분기 → T1_2_0 소비 안 됨 → F-node `direct to WS` + immediate-arrival 캐스케이드로
+**WAIT_PICKING 없이 task_complete** → `_enter_wait_picking` 미호출 → **shelf_arrived 미발행** →
+사람이 픽 못 함 → shelf_complete 영영 안 옴(작업대 정지).
+
+**근본 원인 = 수요 조회가 'first-match'라 이미 만족된 수요를 걸러내지 않음.** 운반 태스크(T1_1_2)의
+자기 수요는 픽이 끝나도 태스크 미완료(RETURN 중)라 `shelf_demand`에 남는다. 정상 포워딩은 두 태스크의
+WS가 **다르므로** ws 필터로 안 겹치지만, **인터셉트는 같은 WS(32)에서 두 주문이 겹쳐** 낡은 수요가
+새 수요를 가린다. `handle_shelf_forwarded`도 동일한 first-match라 만족된 self-수요(T1_1_2)를 집으면
+방금 삽입한 WAIT+PICKUP+RETURN을 되레 지운다.
+
+**해결 (기조 유지 — 두 조회 함수에 'satisfied 스킵' 술어 추가)**: "이미 다 픽한 수요 = 수요 아님".
+- `get_demand_items_for_ws`: 첫 ws 매칭에서 곧장 return하지 말고, **remaining이 비면 다음 수요로**
+  계속 → 미충족 수요를 찾으면 그 품목 반환.
+- `handle_shelf_forwarded`: ws 매칭 + 상태 확인에 더해 **demand의 품목이 모두 items_picked면 skip**
+  → 만족된 self-수요(T1_1_2) 건너뛰고 진짜 수요자(T1_2_0)의 GO_TO_SHELF를 재타깃 + 반환.
+
+이러면 인터셉트 후 도착 시 T1_2_0이 정상 소비되고 운반 태스크(T1_1_2)에 WAIT+PICKUP+RETURN이
+삽입돼 `_enter_wait_picking` → **shelf_arrived 발행(GUI 파란불) → shelf_complete 수신** 정상 복원.
+수정 89의 회귀 테스트가 이 낡은 self-수요 케이스를 안 덮어 놓쳤음(단일 수요만 검증) → 회귀 추가.
+
+**수정 파일**: `server/managers/task.py`(`get_demand_items_for_ws`+`handle_shelf_forwarded` satisfied 스킵)
++ `tests/test_intercept.py`(낡은 self-수요 겹침 회귀)
+
+---
+
+### 수정 91: 낡은 수요를 '조회 시 거르기'가 아니라 '픽 완료 시 제거' — 근본해결 (2026-07-21)
+
+> **쉽게**: 수정 90은 죽은 수요를 남겨두고 읽는 쪽에서 매번 걸러냈다(backstop). 이번엔 **죽은 수요를
+> 애초에 안 만든다** — 작업자가 선반 픽을 끝낸 그 순간(수요가 만족된 시점) 그 수요를 지운다.
+
+**동기 (수정 90의 정직한 한계)**: 수정 90은 증상(조회가 낡은 수요를 집음)을 두 조회 함수에서 막았다.
+그러나 **진짜 뿌리 = 픽이 끝난 태스크의 수요가 `shelf_demand`에 계속 남는 것**(태스크가 완전 COMPLETE될
+때까지 안 지워짐 — RETURN 도는 내내 유령으로 잔존). 유령을 만드는 근원을 두면 새 소비 지점이 생길 때마다
+같은 병에 걸린다(실제로 수정 90에서 `get_demand_items_for_ws` 하나 고치니 `handle_shelf_forwarded`도
+같은 병이라 둘 다 고쳐야 했음 = 유령이 여러 출구로 샌다는 증거).
+
+**근본 원인 = 수요 생명주기의 종료 지점이 잘못됨.** 수요("이 태스크가 이 선반에서 이 품목을 원한다")는
+**픽이 끝나면 죽는다.** 그런데 제거는 태스크 완료(`_remove_shelf_demand`)/포워딩 때만 일어나, 픽~복귀
+사이 구간에 죽은 수요가 살아있다.
+
+**해결 (근본 — 픽 완료 시점에 제거)**: `handle_shelf_complete`가 `items_to_pick`을 `items_picked`로
+옮긴 직후, `remove_shelf_demand_for_shelf(task_id, shelf_id)`로 그 태스크의 그 선반 수요를 제거한다.
+- 안전성: `_check_shelf_needed_elsewhere`는 **다른 WS**(`!= current_ws`) 수요만 보고, 제거 대상은
+  **자기 태스크·자기 선반**뿐 → 포워딩 판단/타 태스크 조회에 영향 없음(코드로 확인).
+- 포워딩 재픽업(dest WS에서 T1이 T2 몫을 다시 픽)의 2차 `handle_shelf_complete`도 안전 —
+  `remove_shelf_demand_for_shelf`는 idempotent(없으면 no-op), T2 수요는 이미 forward 시 제거됨(수정 15).
+
+**수정 90은 안전망으로 유지.** 이제 두 겹 방어가 된다: **(91) 유령을 안 만든다 + (90) 혹시 새도 안 집는다.**
+근원이 막혔으니 평상시 90의 스킵은 발동할 일이 없지만, 미래에 다른 경로가 죽은 수요를 남겨도 90이 잡는다.
+
+**수정 파일**: `server/managers/task.py`(`handle_shelf_complete`에 픽 완료 시 수요 제거 1줄)
++ `tests/test_intercept.py`(픽 완료 후 shelf_demand에서 그 수요가 사라졌는지 회귀)
+
+---
+
+### 수정 92: 회전/리프트 in-flight 중 들어온 마커는 무시 — 수정 64의 turn/lift 판 (2026-07-21)
+
+> **쉽게**: 로봇이 제자리 회전하는 도중 카메라가 옆칸 마커를 잡아 발행하면, 서버가 그걸 "회전 완료 +
+> 그 노드 도착"으로 오인해 회전을 조기 종료하고 위치를 점프시켜 이후 경로가 통째로 어긋났다.
+
+**문제 (실물 HIL 로그, 2026-07-21)**: 노드 16에서 turn_right(북→동) 도는 중, 브릿지가 회전 도중
+`-> /agv/marker id=17`을 발행. 서버 마커 핸들러가 이를 받아 **in-flight turn_right를 조기 ack +
+위치를 17로 점프 + 다음 forward 발행** → heading이 아직 안 맞은 채 전진 → 뒤늦게 진짜 turn cmd_ack
+도착(`WARN cmd_ack mismatch: in_flight.cmd=forward, ack.cmd=turn_right`) → heading 재갱신 →
+재계획 → 엉뚱한 노드 25로. 트윈도 "회전 10.94초 / forward 목적지 불일치(서버=25 vs 추측=17)"로 갈림.
+
+**근본 원인 = 마커 핸들러의 방어 비대칭.** 수정 64는 **forward**만 목표-불일치 가드가 있고,
+**회전·리프트가 in-flight일 때 마커가 오면 그냥 `queue.ack()`** 한다. 그러나 회전/리프트는
+**cmd_ack로만 완료**되고 그동안 로봇은 같은 노드에 머문다 — 그 사이 들어온 마커는 유령(옆칸 오검출)
+이거나 같은 노드 중복이라 **어느 쪽이든 무시**해야 한다. 위치는 '틀린 값'보다 '직전 값'이 안전(수정 59/62/64와 동일 논리).
+
+**해결 (수정 64와 대칭)**: 마커 핸들러에서 in-flight cmd가 turn_left/right/180 · lift_up/down이면
+**마커를 무시**(ack 안 함, 위치 갱신 안 함, early return). 회전/리프트 완료는 오직 cmd_ack 경로로.
+- forward만이 마커로 완료된다는 불변식을 명시적으로 강제 → in-flight 종류별로 완료 신호를 분리.
+- 실물 마커 시트 낱장 절단(옆칸 오검출 감소)과 **독립**한 서버측 방어 — 실물이 마커를 잘못 읽어도 안전.
+
+**수정 파일**: `server/core/_marker_mixin.py`(`_handle_marker_report`에 turn/lift in-flight 가드 1블록)
++ `tests/test_marker_adjacency.py`(회전/리프트 in-flight 중 마커 무시 회귀)
+
+---
+
+### 수정 93: 든 채 회전 게이트 — fail-safe(내려놓기 우선)에서 근본설계(대기 우선)로 (2026-07-22)
+
+> **쉽게**: 든 로봇이 회전할 때 옆칸에 다른 든 로봇이 있으면 지금은 "일단 선반 내려놓고 돌고 다시
+> 들기"를 했는데, 상대가 **곧 지나갈 로봇**이면 그냥 **한 박자 기다렸다 든 채 돌면** 될 걸 과하게
+> 반응했다. 이제 "안 비키는 것(정적 선반)"만 내려놓고, "언젠가 비키는 것(살아있는 든 로봇)"은 기다린다.
+
+**문제 (실물 2대 HIL 로그, 2026-07-22)**: 든 채 반납 중 AGV-1이 노드 **33·41에서 각각 내려놓고 돌기**를
+발동(`정지 든로봇=대기 무의미`). 그러나 위험물 AGV-2는 둘 다 **이웃칸을 *떠나는 중***이었다(33 때 노드
+32→40, 41 때 노드 42→43). 한 박자 기다렸으면 든 채 정상 회전으로 끝났을 것 — 내려놓기 2회가 불필요.
+
+**근본 원인 = 수정 84 "움직이나?" 판정이 스냅샷 휴리스틱이라 샌다.** `_intransit_carrier_adjacent`가
+상대의 **진입 예정 노드**(`peek_expected_node()==이웃`)만 "움직임"으로 인정 → **이웃을 떠나는 중**
+(`current_node==이웃` + forward in-flight)이거나 **잠깐 막힌**(forward가 pending) 든 로봇은 "정지"로
+오판. "지금 움직이나?"라는 순간값으로 "곧 비킬까?"를 맞히려는 것 자체가 새는 추상화다. 단일 진실
+(예약/교착감지)을 안 쓰고 별도 병렬 기구(이웃 스캔+움직임 추측+defer 카운터)를 굴린 게 뿌리.
+
+**해결 = fail-safe → 근본설계 전환. 3부분(전제: 데모에선 로봇 끊김=실패라 '끊긴 든 로봇' 비대상):**
+
+1. **회전 게이트 단순화** (`_send_next_command`): footprint 이웃 점유자를 딱 두 종류로만 가른다.
+   - **정적 선반**(IN_PLACE/AT_WORKSTATION) = 절대 안 비킴 → **즉시 내려놓고 돌기**.
+   - **살아있는 든 로봇** = 언젠가 비킴 → **대기**(`return False`, 상대 마커 시 `_try_dispatch_all` 재시도로 해제).
+   - "움직이나?" 추측 제거 → `_intransit_carrier_adjacent`·`TURN_DEFER_MAX`·`_turn_defer_count` **삭제**.
+   - 선반 상태(`ShelfStatus`)로 두 종류가 깨끗이 갈려 스냅샷 구멍이 통째로 사라짐.
+
+2. **회전-대기를 wait-for 그래프에 등록** (`_detect_deadlock_cycle`): 지금까지 **forward-대기만** 그래프에
+   올렸다(회전 대기는 "아직 노드 점유 경쟁 아님"이라 명시적 제외). 근본설계는 회전을 "내려놓기" 대신
+   "대기"로 바꾸므로 **회전 마주 막힘**(든 로봇 둘이 서로의 footprint 이웃칸을 점유 → 둘 다 못 돎)이라는
+   새 교착이 생긴다. `_turn_wait_blocker(rid)`(=이웃칸을 점유한 다른 든 로봇 rid)로 `wait_for[rid]`에
+   추가 → 상호 회전 교착이 **길이-2 사이클**로 같은 감지기(수정 54)에 잡힌다.
+
+3. **교착 해소를 피해자 종류별로** (`_resolve_deadlock`): 사이클 멤버 중 **회전-대기 피해자**가 있으면
+   그 한쪽을 **내려놓고 돌기로 강제**(`[lift_down_hold, turn, lift_up_hold]` 삽입 후 dispatch) → 맨몸 회전 →
+   자기 칸 비우고 나감 → 사이클 unwind. **forward-대기 피해자**만 있으면 기존 A* 우회(수정 54) 유지.
+   (내려놓기는 없어진 게 아니라 "휴리스틱 기본동작"에서 "교착 해소책"으로 강등됐다.)
+
+**왜 안전한가**:
+- **충돌**: 회전 자체는 이웃 clear(1) + footprint 예약(수정 85, 남이 진입 금지)으로 회전 내내 4칸 선반-free
+  → 물리적으로 불가능. 스냅샷 스캔보다 엄밀(획득/점유).
+- **멈춤**: 위험이 "불필요한 내려놓기"에서 "교착"으로 이동하지만, 대기는 (a)상대 이동으로 해제 or
+  (b)사이클이면 감지기가 내려놓기로 해제 → **영구 멈춤 없음.** fail-safe(애매하면 내려놓기=항상 진행)를
+  버린 대신 **감지+해소 배선(2·3)이 그 진행 보장을 대신**한다 — 그래서 2·3이 1과 한 세트다.
+
+**검증 (2026-07-22)**: pytest **120** (신규 `test_turn_carry_gate.py` 3건 — 든로봇옆=대기 / 정적선반옆=
+내려놓기 / 상호 회전 교착 감지+내려놓기 해소, 즉 1·2·3번이 실제로 발동함을 직접 증명). 퍼저 3종
+회귀 0-fail(`deadlock_fuzz` 3천·`path_stress` 10만·`lifecycle_fuzz` 5천). **구현: `_movement_mixin`
+(게이트 단순화 + `_holding_turn`/`_turn_wait_blocker` + `_detect_deadlock_cycle` 턴엣지 +
+`_resolve_deadlock` 종류별 해소, `_intransit_carrier_adjacent`·defer 삭제).**
+> [TODO] `deadlock_fuzz`에 회전 마주 막힘 시나리오를 랜덤 대량으로도 추가하면 더 강함(현재는 타겟 pytest).
+
+> **관계**: 수정 82(내려놓기 도입)→84(움직이면 대기, 스냅샷)→85(예약 footprint)의 연장. 84의 스냅샷
+> 판정을 예약/교착감지 단일 진실로 대체. 알려진 이슈 ③(회랑 정면 교착=로컬 양보 부재)과는 **다른 층** —
+> 이건 회전 footprint 교착, 그건 1차선 forward 스왑 교착.
+
+---
+
 ### 알려진 이슈 (고부하 스트레스로 발견, 2026-07-17 — 재발 시 대응)
 
 수정 84·85 검증 중 24~48주문 동시 투입에서 드러난 **별개의 기존 문제 2건**. 수정 84·85와 무관
@@ -2495,6 +2759,71 @@ pytest 100 통과. **구현: `reservation_service.py`(footprint 예약/해제/�
   **"목표까지 글로벌 재라우팅"만** 해서, 1차선이라 우회로 없으면 `우회 경로 없음 — 해소 실패`
   (`exclude=None`=한쪽이 완전히 박힘). in-flight 이동이 남으면 자연 해소(일시적), 둘 다 정지+무우회면
   영구 프리즈(48주문서 발생). 근본=**"로컬 양보(한쪽 후진/대피)" 해소 전략 부재**. 미구현.
+
+---
+
+### 수정 94: 회랑 진입 우선권을 '커밋 순서'에서 'ETA(도착 순서)'로 (2026-07-23)
+
+**증상**: 두 AGV가 같은 작업대로 배달할 때, **픽업을 먼저 끝낸** 로봇이 회랑을 점유했다.
+픽업이 몇 초 빨랐어도 경로가 더 길면, 정작 작업대엔 늦게 도착하면서 **먼저 도착한 로봇을
+스테이징에 세워둔다.** (실측: AGV-2가 3초 먼저 픽업(노드27, 7칸) → 회랑 점유. AGV-1은
+노드19(작업대까지 5칸 이내)에서 픽업했지만 스테이징 노드0으로 우회 → AGV-1이 6초 먼저
+작업대 옆에 도착하고도 대기.)
+
+**왜 기존 선점(`try_preempt_at_gateway`)이 못 막나**: 그건 스테이징 AGV가 **게이트웨이**에
+도착했을 때만 발동한다. 일반 배달은 진입 경로 밖 **스테이징 노드**(수정 28)에서 대기하므로
+게이트웨이를 밟지 않아 선점 기회가 없다.
+
+**해결 (한 겹 추가)**: `_plan_and_publish_move`가 `should_stage` **직전에**, 회랑이 비어 있으면
+`_corridor_eta_contender(rid, ws)`로 같은 작업대에 **더 먼저 도착할** 로봇(A* 휴리스틱 잔여거리)
+을 찾는다. 있으면 `StagingManager.reserve_for(ws, winner)`로 그 로봇에게 선점권을 넘겨,
+늦게-도착할 rid가 스테이징하도록 한다. winner는 곧 자기 배달을 계획할 때 `_owner==rid`
+(이미 인증됨) 경로로 그대로 진입.
+
+**contender 조건(보수적)**: 선반을 든 채(`carrying_shelf`) `PICKING_UP_SHELF`/`DELIVERING_TO_WS`
+상태이고 현재 태스크 `workstation_id`가 그 작업대인 로봇만. **동률은 제외**(선착순 유지 → thrash 방지).
+
+**교착 안전**: 불변식 유지 — 회랑은 항상 owner가 있거나 free다. 선점받은 winner가 끝내 안 오면
+`STAGING_TIMEOUT`(30s) `_check_timeout`이 강제 해제 + 큐 드레인. **새 교착 경로 없음.**
+
+**검증**: `virtual_test/algorithm/test_stg_eta_priority.py` 6종(가까운 로봇 지목 / 동률 선착순 /
+타 작업대 무시 / 빈손 무시 / 회랑 이전 통합 / 이미 점유 시 no-op). 전체 pytest 126 passed.
+**수정 파일**: `server/core/_movement_mixin.py`(`_corridor_eta_contender` + 훅),
+`server/managers/staging.py`(`reserve_for`).
+
+---
+
+### 수정 95: 든 채 회전 × 선반 인접 비용을 A* 재료로 편입 (2026-07-23)
+
+**증상**: 선반을 든 로봇이 **정적선반 옆 노드에서 회전**하면 안전장치(수정 93)가 발동해
+`lift_down → turn → lift_up`(내려놓고 돌기, ≈6초)를 강제한다. 그런데 A* 경로비용은 이
+페널티를 **몰라서**, 깨끗하게 돌 수 있는 노드가 같은 길이로 있어도 굳이 선반 옆에서 도는
+경로를 골랐다. (실측: AGV-2가 노드32(빈 회전)를 두고 노드25(선반26 옆)에서 회전 → 내려놓기.)
+
+**근본원인 = "하나의 플로우, 여러 재료" 위반**: 경로 결정은 A*가(계획 시점), '내려놓고
+돌기' 판정은 실행 시점(`_turn_hazard_kind`)이 따로 했다. 두 결정이 다른 정보를 다른
+시점에 봐서, A*가 자기가 만든 경로의 실제 비용을 몰랐다.
+
+**해결 (재료 하나 추가)**: `astar_with_time(carry_turn_hazard=...)` 파라미터 신설. 든 상태에서
+회전 노드(cur_node)가 정적선반의 직교 이웃이면 비용 `+carry_turn_penalty`(기본 3.0 ≈ 내려놓기+
+픽업 시간). 실행시점에만 알던 비용을 **같은 A* 비용함수 안**에 넣어 계획이 미리 안다. 그 결과
+soft_avoid(타 로봇, +2)로 32가 밀려도, 선반옆 회전(+3)이 더 비싸 A*가 32-경로로 되돌아온다.
+
+- **정적선반만** 재료화(비-CARRIED 선반의 이웃). 움직이는 '든로봇' 위험은 전이적이라 제외
+  (비용에 넣으면 경로가 매 틱 흔들림 = thrashing).
+- **하드블록 아님** — 대안이 없으면 그 회전을 여전히 택한다(경로를 막지 않음).
+
+**검증**: `virtual_test/algorithm/test_carry_turn_cost.py` 4종(페널티가 선반옆→깨끗회전 뒤집기 /
+대안없으면 그대로 / hazard 집합 도출 / CARRIED 선반 제외). pytest 130 passed + 퍼저 3종
+(path_stress 200k · lifecycle 8k · deadlock 8k) 전부 0 FAIL.
+**수정 파일**: `server/planning/path_planner.py`(`carry_turn_hazard` 파라미터 + 비용),
+`server/core/_movement_mixin.py`(`_carry_turn_hazard_nodes` + 호출부).
+
+> **남은 것 (미구현, 근본해결의 나머지 절반)**: '낡은 스냅샷' 재계획 — 회피 대상이 사라졌는데
+> 이미 정한 경로를 따라가는 문제. 매 마커(fresh)마다 남은 경로를 재도출해 **엄격히 더 쌀 때만**
+> 교체하는 것. REFACTOR F Phase 4.1이 lookahead_replan을 지운 자리라 예약 churn/thrashing 위험이
+> 커서, 시연 후 퍼저 돌려가며 별도로 넣는 게 안전. (수정 95는 비용함수를 완성해 이 케이스
+> 대부분을 계획 시점에 이미 막는다 — 재계획은 잔여 일반화.)
 
 ---
 

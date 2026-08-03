@@ -114,6 +114,11 @@ def main():
     except KeyboardInterrupt:
         print(f"\n[RPi AGV-{rid}] 종료 중...")
     finally:
+        # 카메라를 놓기 전에 리프트를 내린다 — offset 스트림이 살아 있어야 STM PID가 안정적.
+        try:
+            bridge.park_lift()
+        except Exception as e:
+            print(f"[RPi AGV-{rid}] 리프트 정리 실패(무시): {e}")
         if camera:
             camera.release()
         bridge.disconnect()
